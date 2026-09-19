@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="admin-layout">
+{% set admin_sidebar_class = 'admin-nav' %}{% include 'admin/_nav.html' %}
+<main class="admin-main"><div class="eyebrow">SYSTEM HEALTH</div><h1>System errors</h1><div class="muted">Failures are recorded here without exposing stack traces to customers. Resolve them after the cause is understood.</div>
+<section class="admin-panel"><table class="admin-table"><tr><th>Time</th><th>Code</th><th>Path</th><th>Message</th><th>User</th><th>Status</th><th></th></tr>{% for e in errors %}<tr><td>{{e.created_at.strftime('%d %b %H:%M:%S') if e.created_at else '—'}}</td><td>{{e.code}}</td><td>{{e.path}}</td><td style="white-space:normal;min-width:320px">{{e.message}}</td><td>{{e.user_id or 'Public'}}</td><td><span class="admin-badge {% if not e.resolved %}off{% endif %}">{{'RESOLVED' if e.resolved else 'OPEN'}}</span></td><td>{% if not e.resolved %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="error_id" value="{{e.id}}"><button class="admin-action" type="submit">Resolve</button></form>{% endif %}</td></tr>{% else %}<tr><td colspan="7">No recorded system errors.</td></tr>{% endfor %}</table></section>
+</main></div>
+{% endblock %}
