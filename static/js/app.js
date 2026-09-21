@@ -114,51 +114,7 @@
     navigator.serviceWorker.ready.then(reg => { if (reg.update) reg.update().catch(() => {}); }).catch(() => {});
   }
 
-  // Product image recovery: missing catalogue photos render local artwork immediately,
-  // then the first nearby cards quietly try the exact-photo resolver. This never delays
-  // the storefront and never replaces a working photograph with placeholder art.
-  const startProductImageRecovery=()=>{
-    const found=[...document.querySelectorAll('img[data-product-resolve]')];
-    if(!found.length || !window.fetch)return;
-    const imgs=found.slice(0,36);
-    let active=0, cursor=0;
-    const next=()=>{
-      while(active<2 && cursor<imgs.length){
-        const img=imgs[cursor++];
-        if(!img||img.dataset.resolving==='1')continue;
-        active++; img.dataset.resolving='1';
-        fetch(img.dataset.productResolve,{credentials:'same-origin',cache:'no-store'})
-          .then(r=>r.ok?r.blob():null)
-          .then(blob=>{
-            if(!blob || !String(blob.type||'').startsWith('image/') || blob.type==='image/svg+xml')return;
-            const objectUrl=URL.createObjectURL(blob);
-            const probe=new Image();
-            probe.onload=()=>{img.src=objectUrl;};
-            probe.onerror=()=>URL.revokeObjectURL(objectUrl);
-            probe.src=objectUrl;
-          })
-          .catch(()=>{})
-          .finally(()=>{active--;next();});
-      }
-    };
-    const visibleFirst=imgs;
-    cursor=0;
-    if('IntersectionObserver' in window){
-      const io=new IntersectionObserver(entries=>{
-        for(const entry of entries){
-          if(entry.isIntersecting){
-            const img=entry.target;
-            const pos=imgs.indexOf(img);
-            if(pos>=0 && pos<36){imgs.splice(pos,1);imgs.unshift(img);}
-            io.unobserve(img);
-            next();
-          }
-        }
-      },{rootMargin:'500px 0px'});
-      visibleFirst.forEach(img=>io.observe(img));
-    }else{next();}
-  };
-  startProductImageRecovery();
+  // Product images are deterministic same-origin assets prepared at build time.
   updateCounts();renderCartPage();
   if(document.getElementById('checkoutSummary')){const c=read();document.getElementById('checkoutSummary').innerHTML=c.map(x=>`<div class="summary-line"><span>${escapeHtml(x.name)} × ${x.qty}</span><b>${money(x.price*x.qty)}</b></div>`).join('')||'<span class="muted">No items.</span>';document.getElementById('checkoutTotal').textContent=c.reduce((s,x)=>s+x.price*x.qty,0).toFixed(2);}
   if(!location.pathname.startsWith('/control')&&!location.pathname.startsWith('/merchant')&&'serviceWorker' in navigator){navigator.serviceWorker.register('/shop/sw.js',{scope:'/'}).catch(()=>{});}
