@@ -19,7 +19,8 @@
     try{
       const r=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),credentials:'same-origin'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Order could not be placed');
       if(paymentMethod==='till'){
-        const p=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:document.getElementById('mpesaReference')?.value.trim()||''}),credentials:'same-origin'});
+        const approvalMode=document.querySelector('input[name="approvalMode"]:checked')?.value||'AUTO';
+        const p=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:document.getElementById('mpesaReference')?.value.trim()||'',approval_mode:approvalMode}),credentials:'same-origin'});
         const pd=await p.json();
         save([]);
         if(!p.ok)throw new Error(pd.error||'Till payment could not be submitted');
@@ -30,7 +31,7 @@
       if(p.ok){save([]);location.href='/order/'+encodeURIComponent(d.order_number)+'?payment='+encodeURIComponent(pd.payment_id);return;}
       // Backup plan: when the API/STK route is unavailable, switch to automatic Till monitoring.
       if((p.status===503||p.status===502) && window.DENMART_TILL){
-        const g=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:''}),credentials:'same-origin'});
+        const g=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:'',approval_mode:'AUTO'}),credentials:'same-origin'});
         const gd=await g.json();
         save([]);
         if(g.ok){location.href='/order/'+encodeURIComponent(d.order_number)+'?payment='+encodeURIComponent(gd.payment_id);return;}
@@ -49,6 +50,20 @@
 
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
 
+
+
+  // Browser-side failures are useful operational evidence too. Keep the payload small and
+  // never include form values, tokens, payment data, or customer details.
+  const reportClientError=(message,source='',line=0,column=0,code='CLIENT_ERROR')=>{
+    try{
+      const body=JSON.stringify({message:String(message||'Browser error').slice(0,900),source:String(source||'').slice(0,280),line,column,code});
+      const url='/api/client-errors';
+      if(navigator.sendBeacon){navigator.sendBeacon(url,new Blob([body],{type:'application/json'}));}
+      else{fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive:true}).catch(()=>{});}
+    }catch(_e){}
+  };
+  window.addEventListener('error',event=>reportClientError(event.message,event.filename,event.lineno,event.colno,'WINDOW_ERROR'));
+  window.addEventListener('unhandledrejection',event=>reportClientError(event.reason?.message||String(event.reason||'Unhandled promise rejection'),'','', '', 'UNHANDLED_REJECTION'));
 
   // PWA install experience: use the browser's real install prompt when available.
   const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;

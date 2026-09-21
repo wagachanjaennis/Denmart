@@ -5,6 +5,7 @@ import json
 import base64
 import csv
 import io
+import re
 from io import BytesIO
 from PIL import Image, ImageOps
 from pathlib import Path
@@ -562,7 +563,7 @@ def orders():
 @admin_required("payments.view")
 def approve_order_payment(order_id):
     order = db.session.get(Order, order_id)
-    payment = (Payment.query.filter_by(order_id=order_id, method="MPESA_TILL")
+    payment = (Payment.query.filter(Payment.order_id == order_id, Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL"]))
                .order_by(Payment.created_at.desc()).first())
     if not order or order.business_id != current_user.business_id or not payment:
         flash("Order or pending Till payment was not found.", "error")
@@ -570,6 +571,12 @@ def approve_order_payment(order_id):
     if payment.status != "PENDING_APPROVAL":
         flash("That payment is no longer awaiting approval.", "error")
         return redirect(url_for("admin.orders"))
+    reference = re.sub(r"[^A-Za-z0-9]", "", str(request.form.get("reference") or "").strip()).upper()
+    if reference:
+        if len(reference) < 6 or len(reference) > 20:
+            flash("Enter a valid M-PESA transaction code (6–20 characters).", "error")
+            return redirect(url_for("admin.orders"))
+        payment.external_reference = reference
     if not _settle_order_payment(order, payment):
         db.session.rollback()
         flash("Payment could not be approved. Check the transaction reference and reserved stock.", "error")
@@ -584,7 +591,7 @@ def approve_order_payment(order_id):
 @admin_required("payments.view")
 def reject_order_payment(order_id):
     order = db.session.get(Order, order_id)
-    payment = (Payment.query.filter_by(order_id=order_id, method="MPESA_TILL")
+    payment = (Payment.query.filter(Payment.order_id == order_id, Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL"]))
                .order_by(Payment.created_at.desc()).first())
     if not order or order.business_id != current_user.business_id or not payment:
         flash("Order or pending Till payment was not found.", "error")
@@ -660,7 +667,7 @@ def products():
 @bp.post(f"{ADMIN_BASE}/products/resolve-images")
 @admin_required("products.edit")
 def resolve_product_images():
-    from services.product_images import resolve_product_image
+    from services.product_images import resolve_product_image_with_metadata
     try:
         limit = max(1, min(int(request.form.get("limit", "80") or "80"), 120))
     except ValueError:
@@ -672,16 +679,28 @@ def resolve_product_images():
     matched = 0
     for product in products:
         try:
-            image = resolve_product_image(product)
-        except Exception:
-            image = None
+            image, meta = resolve_product_image_with_metadata(product)
+        except Exception as exc:
+            current_app.logger.exception("Product image bulk lookup failed for %s", product.id)
+            try:
+                db.session.add(SystemError(
+                    business_id=((db.session.get(Category, product.category_id).business_id) if product.category_id and db.session.get(Category, product.category_id) else current_user.business_id),
+                    level="WARN", code="PRODUCT_IMAGE_LOOKUP_FAILED", message=str(exc)[:1000] or "Product image lookup failed",
+                    path=request.path[:500], method=request.method[:20], user_id=current_user.id,
+                    ip_address=request.headers.get("X-Forwarded-For", request.remote_addr),
+                    user_agent=request.user_agent.string[:1000],
+                ))
+                db.session.flush()
+            except Exception:
+                db.session.rollback()
+            image, meta = None, None
         if image:
             product.image_url = image
             ProductImage.query.filter_by(product_id=product.id, is_primary=True).update({"is_primary": False})
             db.session.add(ProductImage(
                 product_id=product.id, image_url=image, thumbnail_url=image,
-                alt_text=product.name, source_type="OPEN_FOOD_FACTS_MATCH",
-                license_info="External product image; verify supplier/rights before commercial campaigns.",
+                alt_text=product.name, source_type=(meta or {}).get("source_type", "EXTERNAL_PRODUCT_MATCH"),
+                license_info=(meta or {}).get("license_info", "External product image; verify supplier/rights before commercial campaigns."),
                 sort_order=0, is_primary=True,
             ))
             matched += 1

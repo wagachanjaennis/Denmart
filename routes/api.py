@@ -301,7 +301,7 @@ def _intent_status_for_entity(entity, gateway_method):
     received = order_received_total(entity) if isinstance(entity, Order) else sale_received_total(entity)
     if received >= total and total > 0:
         return "PAID"
-    return "PARTIALLY_PAID" if received > 0 else ("PENDING_APPROVAL" if gateway_method == "MPESA_TILL_INTENT" else "PENDING")
+    return "PARTIALLY_PAID" if received > 0 else ("PENDING_APPROVAL" if gateway_method in {"MPESA_TILL_INTENT", "MPESA_TILL_MANUAL"} else "PENDING")
 
 
 def _normalise_person_name(value):
@@ -443,8 +443,8 @@ def payment_gateway_sms():
                 continue
             matched, actual = _settle_gateway_intent(intent, event)
             if matched: break
-    # 2) Online Till automatic matching: prefer buyer phone; when the provider SMS has no phone,
-    # fall back to an exact unique buyer-name match. Never auto-match an ambiguous candidate.
+    # 2) Online Till automatic matching. MANUAL intents are intentionally excluded;
+    # they stay visible to an administrator for verification.
     if not matched and amount and store and (customer_phone or customer):
         cutoff = now() - timedelta(hours=2)
         candidates=[]
@@ -591,18 +591,25 @@ def till_payment_submit():
     till_number = str(till_setting.value or "").strip() if till_setting else ""
     if not till_number:
         return jsonify(error="mpesa_till_not_configured"), 503
-    existing = (Payment.query.filter(Payment.order_id == order.id, Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL"]),
+    existing = (Payment.query.filter(Payment.order_id == order.id, Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL", "MPESA_TILL_MANUAL"]),
                                      Payment.status.in_(["PENDING_APPROVAL", "PARTIALLY_PAID", "PENDING"]))
                 .order_by(Payment.created_at.desc()).first())
+    approval_mode = str(data.get("approval_mode") or "AUTO").strip().upper()
+    if approval_mode not in {"AUTO", "MANUAL"}:
+        approval_mode = "AUTO"
     if existing:
+        existing_mode = "MANUAL" if existing.method == "MPESA_TILL_MANUAL" else "AUTO"
+        if approval_mode != existing_mode:
+            return jsonify(error="payment_already_started", approval_mode=existing_mode, payment_id=existing.id, status=existing.status), 409
         if reference and not existing.external_reference:
             existing.external_reference = reference
             db.session.commit()
-        return jsonify(ok=True, payment_id=existing.id, status=existing.status, message="Payment is being monitored automatically",
-                       received=str(order_received_total(order)), outstanding=str(order_outstanding(order)), total=str(order.total))
+        return jsonify(ok=True, payment_id=existing.id, status=existing.status, message=("Payment is awaiting manual approval." if existing_mode == "MANUAL" else "Payment is being monitored automatically"),
+                       received=str(order_received_total(order)), outstanding=str(order_outstanding(order)), total=str(order.total), approval_mode=existing_mode)
+    payment_method = "MPESA_TILL_MANUAL" if approval_mode == "MANUAL" else "MPESA_TILL_INTENT"
     payment = Payment(
         business_id=order.business_id, store_id=order.store_id, order_id=order.id,
-        provider="SAFARICOM", method="MPESA_TILL_INTENT", amount=order.total,
+        provider="SAFARICOM", method=payment_method, amount=order.total,
         currency=current_app.config["CURRENCY"], status="PENDING_APPROVAL",
         external_reference=reference or None, phone_number=phone,
     )
@@ -612,7 +619,7 @@ def till_payment_submit():
     db.session.commit()
     # If the optional transaction code points to an SMS that arrived just before the intent
     # existed, reconcile that unmatched event immediately. This is the manual-reference backup.
-    if reference:
+    if reference and approval_mode == "AUTO":
         prior = (PaymentGatewayEvent.query.filter(
             PaymentGatewayEvent.business_id == order.business_id,
             PaymentGatewayEvent.store_id == order.store_id,
@@ -629,7 +636,7 @@ def till_payment_submit():
     return jsonify(ok=True, payment_id=payment.id, status=current_status,
                    order_number=order.order_number, till_number=till_number,
                    received=str(order_received_total(order)), outstanding=str(order_outstanding(order)),
-                   message="Payment submitted. Real Mart is listening for the M-PESA confirmation automatically.")
+                   message=("Payment submitted for manual approval." if approval_mode == "MANUAL" else "Payment submitted. Real Mart is listening for the M-PESA confirmation automatically."))
 
 
 @csrf.exempt

@@ -1,10 +1,12 @@
 import os
 from datetime import datetime, timezone
-from flask import Flask, Blueprint, jsonify, redirect, url_for, request, render_template
+from flask import Flask, Blueprint, jsonify, redirect, url_for, request, render_template, current_app
 from flask_login import current_user
 from config import Config
 from extensions import db, migrate, login_manager, csrf
 from models import User, Business, SystemError, SystemSetting
+from werkzeug.exceptions import HTTPException
+from flask_wtf.csrf import CSRFError
 
 
 def create_app():
@@ -79,29 +81,19 @@ def create_app():
         return ("", 204)
     app.register_blueprint(pulse_bp)
 
-    @app.errorhandler(404)
-    def not_found(_):
-        return render_template("errors/not_found.html"), 404
-
-    @app.errorhandler(Exception)
-    def handle_unexpected_error(exc):
-        from werkzeug.exceptions import HTTPException
-        if isinstance(exc, HTTPException):
-            return exc
-        # Never leak SQL/POS/provider details to public browsers. Record enough
-        # evidence for the protected admin System Errors screen instead.
+    def _record_system_error(exc, *, level="ERROR", code=None):
+        """Persist an actionable error without ever letting logging break the request."""
         try:
-            business_id = None
-            if current_user.is_authenticated:
-                business_id = current_user.business_id
-            else:
-                business_id = db.session.query(Business.id).order_by(Business.created_at).first()
-                business_id = business_id[0] if business_id else None
+            business_id = current_user.business_id if current_user.is_authenticated else None
+            if not business_id:
+                row = db.session.query(Business.id).order_by(Business.created_at).first()
+                business_id = row[0] if row else None
+            message = str(getattr(exc, "description", exc) or "Unexpected application error")[:1000]
             err = SystemError(
                 business_id=business_id,
-                level="ERROR",
-                code=exc.__class__.__name__,
-                message=str(exc)[:1000] or "Unexpected application error",
+                level=level,
+                code=(code or exc.__class__.__name__)[:120],
+                message=message,
                 path=request.path[:500],
                 method=request.method[:20],
                 user_id=current_user.id if current_user.is_authenticated else None,
@@ -112,7 +104,47 @@ def create_app():
             db.session.commit()
         except Exception:
             db.session.rollback()
+
+    @app.errorhandler(404)
+    def not_found(exc):
+        # A browser probing for /favicon.ico should not turn the health screen into noise.
+        if request.path != "/favicon.ico":
+            _record_system_error(exc, level="WARN", code="NOT_FOUND")
+        return render_template("errors/not_found.html"), 404
+
+    @app.errorhandler(CSRFError)
+    def handle_csrf_error(exc):
+        _record_system_error(exc, level="SECURITY", code="CSRF_ERROR")
+        return render_template("errors/server_error.html"), 400
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(exc):
+        if exc.code and exc.code >= 400 and request.path not in {"/healthz", "/pulse_receiver", "/favicon.ico"}:
+            _record_system_error(exc, level="WARN" if exc.code < 500 else "ERROR", code=f"HTTP_{exc.code}")
+        return exc
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(exc):
+        current_app.logger.exception("Unhandled application exception")
+        _record_system_error(exc, level="ERROR", code=exc.__class__.__name__)
         return render_template("errors/server_error.html"), 500
+
+    @app.post("/api/client-errors")
+    @csrf.exempt
+    def client_errors():
+        """Accept lightweight browser errors so the health screen also catches JS failures."""
+        payload = request.get_json(silent=True) or {}
+        message = str(payload.get("message") or "Browser error")[:1000]
+        source = str(payload.get("source") or "")[:300]
+        line = payload.get("line")
+        column = payload.get("column")
+        details = message
+        if source:
+            details += f" · {source}"
+        if line is not None:
+            details += f" · line {line}:{column or 0}"
+        _record_system_error(RuntimeError(details), level="CLIENT", code=str(payload.get("code") or "CLIENT_ERROR"))
+        return ("", 204)
 
     @app.get("/api")
     def api_root():

@@ -2,9 +2,9 @@ from io import BytesIO
 import base64
 from decimal import Decimal
 from PIL import Image, ImageDraw, ImageFont
-from flask import Blueprint, render_template, request, session, send_file, jsonify, Response, redirect, url_for, flash
+from flask import Blueprint, render_template, request, session, send_file, jsonify, Response, redirect, url_for, flash, current_app
 from extensions import db
-from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment
+from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError
 from services.search import forgiving_rank
 from services.product_images import resolve_product_image
 
@@ -114,7 +114,7 @@ def order_confirmation(order_number):
     till_number = str(till_setting.value or "").strip() if till_setting else ""
     active_payment = (Payment.query.filter(
         Payment.order_id == order.id,
-        Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
+        Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
         Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]),
     ).order_by(Payment.created_at.desc()).first())
     from services.payments.settlement import order_received_total, order_outstanding
@@ -190,6 +190,17 @@ def mpesa_till_qr():
     return send_file(buf, mimetype="image/png", max_age=3600)
 
 
+
+
+@bp.get("/favicon.ico")
+def favicon():
+    # Reuse the installed app icon so browsers stop generating a noisy 404.
+    from pathlib import Path
+    icon = Path(current_app.root_path) / "static" / "pwa" / "icon.svg"
+    if icon.exists():
+        return send_file(icon, mimetype="image/svg+xml", max_age=86400)
+    return ("", 404)
+
 @bp.get("/app-qr.png")
 def app_qr():
     import qrcode
@@ -217,7 +228,21 @@ def product_photo(product_id):
             except Exception:
                 pass
         return redirect(raw, code=302)
-    image = resolve_product_image(product)
+    try:
+        image = resolve_product_image(product)
+    except Exception as exc:
+        current_app.logger.exception("Product image lookup failed for %s", product.id)
+        try:
+            db.session.add(SystemError(
+                business_id=((db.session.get(Category, product.category_id).business_id) if product.category_id and db.session.get(Category, product.category_id) else None),
+                level="WARN", code="PRODUCT_IMAGE_LOOKUP_FAILED", message=str(exc)[:1000] or "Product image lookup failed",
+                path=request.path[:500], method=request.method[:20], ip_address=request.remote_addr,
+                user_agent=request.user_agent.string[:1000],
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        image = None
     if image:
         product.image_url = image
         try:
