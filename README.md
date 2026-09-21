@@ -80,3 +80,6 @@ Backup guarantees
 - SQLite export streams every table in bounded batches, writes a manifest, verifies row counts, runs SQLite integrity and foreign-key checks, then streams the verified file to the browser.
 - SQLite restore validates integrity and requires every current application table before replacing the live database.
 - Uploaded product images stored inside database records are included automatically in both database backup formats. External image URLs remain URLs.
+
+### Product image reliability (image-fix build)
+The public catalogue now routes product photos through `/product-photo/<id>.jpg` instead of trusting a stored external URL directly. A broken external image no longer redirects back to itself: the browser gets an immediate local catalogue visual, while the first visible missing-photo cards can quietly attempt the exact-product resolver. Known supermarket product families are seeded with real product-listing image URLs so common items such as milk, yoghurt, cooking oil, detergent, bread, tea and soft drinks have package photography without requiring manual uploads before the catalogue can be demonstrated. The public service worker deliberately does not cache `/product-photo/` responses, preventing an old broken image response from surviving a deployment.

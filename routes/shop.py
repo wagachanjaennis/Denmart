@@ -1,12 +1,17 @@
 from io import BytesIO
 import base64
+import mimetypes
+from urllib.parse import urlparse
+
+import requests
 from decimal import Decimal
 from PIL import Image, ImageDraw, ImageFont
 from flask import Blueprint, render_template, request, session, send_file, jsonify, Response, redirect, url_for, flash, current_app
 from extensions import db
 from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError
 from services.search import forgiving_rank
-from services.product_images import resolve_product_image
+from services.product_images import lookup_exact_image
+from services.product_visuals import product_visual_svg
 
 bp = Blueprint("shop", __name__)
 
@@ -211,56 +216,166 @@ def app_qr():
     return send_file(buf, mimetype="image/png", max_age=86400)
 
 
+def _fallback_product_photo(product):
+    category_name = ""
+    if getattr(product, "category_id", None):
+        category = db.session.get(Category, product.category_id)
+        category_name = category.name if category else ""
+    svg = product_visual_svg(product, category_name)
+    return Response(
+        svg,
+        mimetype="image/svg+xml",
+        headers={
+            "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+            "X-Denmart-Image": "catalogue-visual-fallback",
+        },
+    )
+
+
+def _safe_remote_image(url):
+    """Fetch an external image for the recovery path only.
+
+    Normal page loads still use the stored image URL directly for speed. This helper is
+    called after a browser image error or when an explicit resolver request is made, so a
+    broken retailer/CDN URL cannot trap the product in a redirect-to-itself loop.
+    """
+    raw = str(url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    try:
+        response = requests.get(
+            raw,
+            timeout=float(current_app.config.get("PRODUCT_IMAGE_LOOKUP_TIMEOUT", 5)),
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; DenmartProductImage/1.0)",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+            allow_redirects=True,
+            stream=True,
+        )
+        response.raise_for_status()
+        content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return None
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > 8 * 1024 * 1024:
+                    return None
+            except ValueError:
+                pass
+        data = response.content
+        if not data or len(data) > 8 * 1024 * 1024:
+            return None
+        mime = content_type or mimetypes.guess_type(parsed.path)[0] or "image/jpeg"
+        return data, mime
+    except Exception:
+        return None
+
+
+def _store_image_metadata(product, image_url, meta=None):
+    """Persist the discovered source without overwriting an admin-uploaded image."""
+    try:
+        ProductImage.query.filter_by(product_id=product.id, is_primary=True).update({"is_primary": False})
+        db.session.add(ProductImage(
+            product_id=product.id,
+            image_url=image_url,
+            thumbnail_url=image_url,
+            alt_text=product.name,
+            source_type=((meta or {}).get("source_type") or "PRODUCT_IMAGE_LOOKUP"),
+            license_info=((meta or {}).get("license_info") or "External product image; verify supplier/rights before commercial campaigns."),
+            sort_order=0,
+            is_primary=True,
+        ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
 @bp.get("/product-photo/<product_id>.jpg")
 def product_photo(product_id):
     product = db.session.get(Product, product_id)
     if not product or product.status != "ACTIVE":
         return ("", 404)
-    if product.image_url and str(product.image_url).strip():
-        raw = str(product.image_url)
-        if raw.startswith("data:image/") and "," in raw:
-            import base64 as _b64
-            header, encoded = raw.split(",", 1)
+
+    resolve = request.args.get("resolve", "0") == "1"
+    raw = str(product.image_url or "").strip()
+
+    # Browser error handlers can request the deterministic local artwork immediately,
+    # while a separate background resolver request searches for a real photograph.
+    if request.args.get("fallback", "0") == "1":
+        return _fallback_product_photo(product)
+
+    # Data URLs are already local to the application and can be served immediately.
+    if raw.startswith("data:image/") and "," in raw:
+        header, encoded = raw.split(",", 1)
+        try:
+            binary = base64.b64decode(encoded)
+            mime = header.split(";", 1)[0].replace("data:", "") or "image/jpeg"
+            return send_file(BytesIO(binary), mimetype=mime, max_age=86400)
+        except Exception:
+            raw = ""
+
+    # Fast path: keep valid external catalogue URLs fast. A failed browser load will call
+    # this same endpoint with ?resolve=1, which breaks the old redirect loop.
+    if raw and not resolve:
+        if raw.startswith(("http://", "https://")):
+            return redirect(raw, code=302)
+        if raw.startswith("/static/"):
+            return redirect(raw, code=302)
+
+    # Recovery path for a broken stored URL. First test the stored URL server-side; this
+    # turns a hotlink/CDN problem into a same-origin response when the server can fetch it.
+    if resolve and raw.startswith(("http://", "https://")):
+        fetched = _safe_remote_image(raw)
+        if fetched:
+            data, mime = fetched
+            return send_file(BytesIO(data), mimetype=mime, max_age=86400)
+
+    # Ignore the current URL during forced resolution. The old resolver returned an
+    # existing bad URL unchanged, so it could never recover from a broken image.
+    if resolve:
+        try:
+            result = lookup_exact_image(
+                product.name,
+                product.brand or "",
+                getattr(product, "barcode", "") or "",
+                getattr(product, "search_keywords", "") or "",
+            )
+        except Exception as exc:
+            current_app.logger.exception("Product image lookup failed for %s", product.id)
             try:
-                binary = _b64.b64decode(encoded)
-                mime = header.split(";", 1)[0].replace("data:", "")
-                return send_file(BytesIO(binary), mimetype=mime, max_age=86400)
+                category = db.session.get(Category, product.category_id) if product.category_id else None
+                db.session.add(SystemError(
+                    business_id=category.business_id if category else None,
+                    level="WARN",
+                    code="PRODUCT_IMAGE_LOOKUP_FAILED",
+                    message=str(exc)[:1000] or "Product image lookup failed",
+                    path=request.path[:500],
+                    method=request.method[:20],
+                    ip_address=request.remote_addr,
+                    user_agent=request.user_agent.string[:1000],
+                ))
+                db.session.commit()
             except Exception:
-                pass
-        return redirect(raw, code=302)
-    try:
-        image = resolve_product_image(product)
-    except Exception as exc:
-        current_app.logger.exception("Product image lookup failed for %s", product.id)
-        try:
-            db.session.add(SystemError(
-                business_id=((db.session.get(Category, product.category_id).business_id) if product.category_id and db.session.get(Category, product.category_id) else None),
-                level="WARN", code="PRODUCT_IMAGE_LOOKUP_FAILED", message=str(exc)[:1000] or "Product image lookup failed",
-                path=request.path[:500], method=request.method[:20], ip_address=request.remote_addr,
-                user_agent=request.user_agent.string[:1000],
-            ))
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-        image = None
-    if image:
-        product.image_url = image
-        try:
-            ProductImage.query.filter_by(product_id=product.id, is_primary=True).update({"is_primary": False})
-            db.session.add(ProductImage(
-                product_id=product.id, image_url=image, thumbnail_url=image,
-                alt_text=product.name, source_type="OPEN_FOOD_FACTS_MATCH",
-                license_info="External product image; verify supplier/rights before commercial campaigns.",
-                sort_order=0, is_primary=True,
-            ))
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-        return redirect(image, code=302)
-    # No unrelated stock art and no initials: an unresolved item stays visually clean
-    # until a verified external match or administrator upload is available.
-    svg = """<svg xmlns='http://www.w3.org/2000/svg' width='800' height='800' viewBox='0 0 800 800'><rect width='800' height='800' rx='34' fill='#f5f7f6'/><rect x='110' y='110' width='580' height='580' rx='26' fill='#fff' stroke='#dfe7e2' stroke-width='8'/><circle cx='330' cy='335' r='78' fill='#e9efeb'/><path d='M290 540h220' stroke='#cad6cf' stroke-width='20' stroke-linecap='round'/><path d='M290 585h150' stroke='#d9e2dd' stroke-width='16' stroke-linecap='round'/></svg>"""
-    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=300"})
+                db.session.rollback()
+            result = None
+
+        if result:
+            score, image_url, meta = result
+            fetched = _safe_remote_image(image_url)
+            if fetched:
+                data, mime = fetched
+                # Save the verified source URL so future page loads do not need another lookup.
+                product.image_url = image_url
+                _store_image_metadata(product, image_url, meta)
+                return send_file(BytesIO(data), mimetype=mime, max_age=86400)
+            # A new URL that cannot be fetched by the server is not useful for recovery.
+            # Keep the product visually complete with the deterministic local artwork.
+
+    # Missing images never become an empty/gray broken box again.
+    return _fallback_product_photo(product)
 
 
 @bp.get("/shop/manifest.webmanifest")
@@ -333,7 +448,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v16";
+    js = '''const CACHE_VERSION = "denmart-public-v17-images";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
 const STATIC_ASSETS = ["/static/css/app.css","/static/js/app.js","/shop/manifest.webmanifest","/shop/app-icon/192.png","/shop/app-icon/512.png"];
@@ -350,6 +465,12 @@ self.addEventListener("fetch", event => {
   const request = event.request;
   const url = new URL(request.url);
   if (bypass(request, url)) return;
+  // Product photos are dynamic/repairable resources. Never cache them here, otherwise a
+  // previously broken redirect can survive a deploy and keep showing the old missing image.
+  if (url.pathname.startsWith("/product-photo/")) {
+    event.respondWith(fetch(request, {cache: "no-store"}).catch(() => caches.match(request)));
+    return;
+  }
   if (url.pathname.endsWith("manifest.webmanifest") || url.pathname.includes("/shop/app-icon/")) {
     event.respondWith(fetch(request).then(response => {
       if (response.ok) caches.open(STATIC_CACHE).then(c => c.put(request, response.clone()));
