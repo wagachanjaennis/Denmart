@@ -61,12 +61,15 @@ def create_app():
                     else Business.query.first())
         footer_setting = (SystemSetting.query.filter_by(business_id=business.id, key="footer_text").first() if business else None)
         footer = footer_setting.value if footer_setting else "All rights reserved · Denmart Merchants"
+        from services.product_images import public_product_image, has_public_product_image
         return {
             "business_name": business.name if business else "Denmart",
             "business_logo": business.logo_url if business else "",
             "currency": app.config["CURRENCY"],
             "footer_text": footer,
             "title": None,
+            "product_image_url": public_product_image,
+            "has_product_image": has_public_product_image,
         }
 
     @app.get("/healthz")

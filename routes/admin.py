@@ -106,7 +106,10 @@ def _remote_product_image_data_url(image_url):
 def _set_product_image(product, data_url, source_type="ADMIN_UPLOAD"):
     if not data_url:
         return
-    cached = _remote_product_image_data_url(data_url)
+    # Uploaded photos are already normalized into a data URL; remote URLs are
+    # fetched once so administrator-supplied images remain available with the
+    # product record.
+    cached = data_url if is_data_image_url(data_url) else _remote_product_image_data_url(data_url)
     product.image_url = cached
     ProductImage.query.filter_by(product_id=product.id).delete(synchronize_session=False)
     db.session.add(ProductImage(
@@ -701,21 +704,12 @@ def products():
 @admin_required("products.edit")
 def resolve_product_images():
     """Audit the local catalogue cache without making a network request."""
-    from services.product_images import local_product_image_url, local_path_from_url
+    from services.product_images import has_public_product_image
 
     products = Product.query.filter_by(status="ACTIVE").order_by(Product.name).all()
-    ready = 0
-    for product in products:
-        url = str(product.image_url or "").strip()
-        path = None
-        if url.startswith("/static/catalogue/products/"):
-            relative = url[len("/static/"):].lstrip("/")
-            candidate = Path(current_app.static_folder) / relative
-            path = candidate if candidate.is_file() else None
-        if path and path.stat().st_size > 0:
-            ready += 1
+    ready = sum(1 for product in products if has_public_product_image(product))
     missing = len(products) - ready
-    flash(f"Image cache audit: {ready}/{len(products)} active products have a local image asset." + (f" {missing} need the build cache regenerated." if missing else " All active products are protected from blanks/unrelated runtime images."), "success" if missing == 0 else "error")
+    flash(f"Real-image audit: {ready}/{len(products)} active products have a curated real image or an administrator upload. {missing} remain without a real image and will stay as neutral placeholders.", "success" if missing == 0 else "error")
     return redirect(url_for("admin.products"))
 
 

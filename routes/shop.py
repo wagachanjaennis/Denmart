@@ -9,8 +9,7 @@ from flask import Blueprint, render_template, request, session, send_file, jsoni
 from extensions import db
 from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError
 from services.search import forgiving_rank
-from services.product_images import is_local_image_url, local_path_from_url, image_content_type
-from services.product_visuals import product_visual_svg
+from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 
 bp = Blueprint("shop", __name__)
 
@@ -44,13 +43,16 @@ def catalogue_query(store=None, q="", category=""):
         query = query.filter(Product.category_id == category)
     rows = query.order_by(Product.name).limit(2000).all()
     if not q:
-        return rows
+        return sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))
     product_ids = [row.product_id for row in rows]
     aliases_by_product = {}
     if product_ids:
         for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(product_ids)).all():
             aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
-    return forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=300)
+    ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=300)
+    # Real image-backed matches always precede unmatched products; relevance is preserved
+    # inside each group by retaining the forgiving_rank order.
+    return [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
 
 
 @bp.get("/")
@@ -69,7 +71,7 @@ def home():
             if term in text:
                 return i
         return 99
-    ranked = sorted(rows, key=lambda x: (rank(x), x.product.name.lower()))
+    ranked = sorted(rows, key=lambda x: (0 if has_public_product_image(x.product) else 1, rank(x), x.product.name.lower()))
     essentials = ranked[:36]
     more_products = [x for x in ranked[36:] if x not in essentials][:120]
     return render_template("shop/home.html", stores=active_stores(), store=store, essentials=essentials, more_products=more_products, categories=categories, total_products=len(rows))
@@ -215,38 +217,17 @@ def app_qr():
     return send_file(buf, mimetype="image/png", max_age=86400)
 
 
-def _fallback_product_photo(product):
-    category_name = ""
-    if getattr(product, "category_id", None):
-        category = db.session.get(Category, product.category_id)
-        category_name = category.name if category else ""
-    svg = product_visual_svg(product, category_name)
-    return Response(
-        svg,
-        mimetype="image/svg+xml",
-        headers={
-            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
-            "X-Denmart-Image": "catalogue-generated",
-        },
-    )
 
-
-def _local_product_photo(product):
-    """Serve only the exact local asset recorded on the product row."""
+def _serve_data_product_photo(product):
     raw = str(product.image_url or "").strip()
-    if not is_local_image_url(raw):
+    parsed = data_url_to_bytes(raw)
+    if not parsed:
         return None
-    path = local_path_from_url(raw)
-    if not path or not path.is_file() or path.stat().st_size <= 0:
-        return None
-    return send_file(
-        path,
-        mimetype=image_content_type(path),
-        max_age=31536000,
-        conditional=True,
-        etag=True,
-        last_modified=path.stat().st_mtime,
-    )
+    binary, mime = parsed
+    response = send_file(BytesIO(binary), mimetype=mime, max_age=31536000)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["X-Denmart-Image"] = "database-upload"
+    return response
 
 
 @bp.get("/product-photo/<product_id>.jpg")
@@ -255,34 +236,20 @@ def product_photo(product_id):
     if not product or product.status != "ACTIVE":
         return ("", 404)
 
-    local = _local_product_photo(product)
-    if local is not None:
-        # send_file's max_age handles browser HTTP caching; the service worker also caches
-        # this same-origin image after first use. No remote lookup is performed here.
-        local.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        local.headers["X-Denmart-Image"] = "catalogue-local"
-        return local
+    # Exact curated photo: return a redirect so legacy callers can still resolve it.
+    exact = public_product_image(product)
+    if exact and not is_data_image_url(exact):
+        response = redirect(exact, code=302)
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        response.headers["X-Denmart-Image"] = "curated-remote"
+        return response
 
-    # Uploaded administrator images remain database-backed data URLs and are safe to serve
-    # without any network dependency.
-    raw = str(product.image_url or "").strip()
-    if raw.startswith("data:image/") and "," in raw:
-        try:
-            header, encoded = raw.split(",", 1)
-            binary = base64.b64decode(encoded)
-            mime = header.split(";", 1)[0].replace("data:", "") or "image/webp"
-            response = send_file(BytesIO(binary), mimetype=mime, max_age=31536000)
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-            response.headers["X-Denmart-Image"] = "database-local"
-            return response
-        except Exception:
-            pass
+    uploaded = _serve_data_product_photo(product)
+    if uploaded is not None:
+        return uploaded
 
-    # The catalogue is never allowed to hotlink, resolve, or redirect to an external
-    # product image during a customer visit. Every product has a deterministic local
-    # generated asset after the build cache step; this last guard prevents a blank box
-    # even if the database/file bundle becomes inconsistent.
-    return _fallback_product_photo(product)
+    # Deliberately no generated illustration and no generic product substitute.
+    return ("", 404)
 
 
 @bp.get("/shop/manifest.webmanifest")
@@ -355,7 +322,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v18-local-images";
+    js = '''const CACHE_VERSION = "denmart-public-v19-real-images";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
@@ -373,16 +340,6 @@ self.addEventListener("fetch", event => {
   const request = event.request;
   const url = new URL(request.url);
   if (bypass(request, url)) return;
-
-  // Catalogue images are bundled with the deployment and are never resolved remotely.
-  // Cache-first makes products already viewed available when the app is offline.
-  if (url.pathname.startsWith("/static/catalogue/products/")) {
-    event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => {
-      if (response.ok) caches.open(IMAGE_CACHE).then(c => c.put(request, response.clone()));
-      return response;
-    })));
-    return;
-  }
 
   if (url.pathname.endsWith("manifest.webmanifest") || url.pathname.includes("/shop/app-icon/")) {
     event.respondWith(fetch(request).then(response => {

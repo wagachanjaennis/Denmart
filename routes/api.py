@@ -9,6 +9,7 @@ from models import (Product, ProductAlias, StoreProduct, Payment, Sale, SaleItem
                     InventoryTransaction, now, Store, Customer, Business, PaymentIntegration,
                     SystemSetting, PaymentGatewayEvent)
 from services.search import forgiving_rank
+from services.product_images import public_product_image, has_public_product_image
 from services.payments.daraja import DarajaProvider
 from services.payments.settlement import order_received_total, order_outstanding, sale_received_total, sale_outstanding, settle_gateway_order_payment, settle_gateway_sale_payment
 from services.crypto import decrypt
@@ -19,7 +20,7 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 
 def safe_product_payload(r, include_stock=False):
     data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "barcode": r.product.barcode,
-            "sku": r.product.sku, "price": str(r.selling_price), "image_url": r.product.image_url, "slug": r.product.slug, "category_id": r.product.category_id}
+            "sku": r.product.sku, "price": str(r.selling_price), "image_url": public_product_image(r.product), "slug": r.product.slug, "category_id": r.product.category_id}
     if include_stock:
         data["stock"] = str(r.stock_quantity)
     return data
@@ -39,9 +40,10 @@ def product_search():
         if ids:
             for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
                 aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
-        rows = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=60)
+        ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=60)
+        rows = [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
     else:
-        rows = rows[:60]
+        rows = sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))[:60]
     return jsonify(items=[safe_product_payload(r) for r in rows])
 
 
@@ -69,9 +71,10 @@ def pos_product_search():
         if ids:
             for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
                 aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
-        rows = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=50)
+        ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=50)
+        rows = [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
     else:
-        rows = rows[:50]
+        rows = sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))[:50]
     return jsonify(items=[safe_product_payload(r, include_stock=True) for r in rows])
 
 

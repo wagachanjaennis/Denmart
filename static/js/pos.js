@@ -27,8 +27,9 @@ async function warmCache(){if(!navigator.onLine)return;try{const r=await fetch('
 async function localBarcode(barcode){const rows=await idbAll('catalogue');return rows.find(x=>String(x.barcode||'')===String(barcode))||null}
 
 function productButton(x){
-  const initials=String(x.name||'DM').split(/\s+/).slice(0,2).map(v=>v[0]).join('').toUpperCase();
-  const media=x.image_url?`<img src="${esc(x.image_url)}" alt="" loading="lazy" onerror="this.outerHTML='<span class=\"pos-initials\">${esc(initials)}</span>'">`:`<span class="pos-initials">${esc(initials)}</span>`;
+  const media=x.image_url
+    ? `<img src="${esc(x.image_url)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'pos-no-image',textContent:'No image'}))">`
+    : `<span class="pos-no-image">No image</span>`;
   return `<button class="pos-product" onclick='addPOS(${JSON.stringify(x.id)},${JSON.stringify(x.name)},${Number(x.price)},${Number(x.stock||0)})'>${media}<span><strong>${esc(x.name)}</strong><small>${esc(x.barcode||x.sku||'Catalogue')}</small></span><b>${money(x.price)}</b></button>`;
 }
 
@@ -48,7 +49,7 @@ async function searchPOS(){
 }
 function normalizeSearchText(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}
 function editDistance(a,b){a=normalizeSearchText(a);b=normalizeSearchText(b);const prev=Array.from({length:b.length+1},(_,i)=>i);for(let i=1;i<=a.length;i++){let cur=[i];for(let j=1;j<=b.length;j++)cur[j]=Math.min(cur[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));for(let j=0;j<=b.length;j++)prev[j]=cur[j]}return prev[b.length]}
-function localFuzzySearch(rows,q,limit=50){const needle=normalizeSearchText(q);if(!needle)return rows.slice(0,limit);return rows.map(x=>{const hay=normalizeSearchText(`${x.name} ${x.barcode||''} ${x.sku||''}`);const name=normalizeSearchText(x.name);const exact=hay.includes(needle)?100:0;const ratio=1-(editDistance(needle,name)/Math.max(needle.length,name.length,1));return {x,score:Math.max(exact,ratio*100)}}).filter(v=>v.score>=58).sort((a,b)=>b.score-a.score||a.x.name.localeCompare(b.x.name)).slice(0,limit).map(v=>v.x)}
+function localFuzzySearch(rows,q,limit=50){const needle=normalizeSearchText(q);if(!needle)return rows.slice().sort((a,b)=>(a.image_url?0:1)-(b.image_url?0:1)||String(a.name||'').localeCompare(String(b.name||''))).slice(0,limit);return rows.map(x=>{const hay=normalizeSearchText(`${x.name} ${x.barcode||''} ${x.sku||''}`);const name=normalizeSearchText(x.name);const exact=hay.includes(needle)?100:0;const ratio=1-(editDistance(needle,name)/Math.max(needle.length,name.length,1));return {x,score:Math.max(exact,ratio*100)}}).filter(v=>v.score>=58).sort((a,b)=>(b.score-a.score)||((a.x.image_url?0:1)-(b.x.image_url?0:1))||String(a.x.name||'').localeCompare(String(b.x.name||''))).slice(0,limit).map(v=>v.x)}
 async function searchText(q){
   if(!navigator.onLine){return localFuzzySearch(await idbAll('catalogue'),q,50)}
   const r=await fetch('/api/pos/products/search?q='+encodeURIComponent(q),{credentials:'same-origin'});const d=await r.json();await cacheProducts(d.items||[]);return d.items||[];

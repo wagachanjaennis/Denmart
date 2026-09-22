@@ -81,9 +81,7 @@ Backup guarantees
 - SQLite restore validates integrity and requires every current application table before replacing the live database.
 - Uploaded product images stored inside database records are included automatically in both database backup formats. External image URLs remain URLs.
 
-### Product image reliability (local image-cache build)
-The public catalogue stores a local image URL on every product row and serves that file from the deployed application. The build script `scripts/prepare_catalogue_images.py` is the one-time preparation step: it imports previously verified source URLs, downloads/normalizes the image, writes `static/catalogue/products/<product-id>.webp`, and records the exact local URL in SQLite/Postgres. When an exact photograph is unavailable, it writes a deterministic product-specific visual instead of an unrelated photo or blank tile.
+### Product image reliability (direct links)
+Product images use a curated set of exact-match, real product-photo URLs embedded in `services/product_images.py`. The storefront never generates substitute product artwork and never falls back to illustrated cylinders, cards, emoji, or unrelated stock images. Products without a verified real image show a neutral `Image unavailable` state and are ordered after products that have a real image. Administrator-uploaded exact photos stored in the database are still supported.
 
-The customer storefront does not call an image search service, hotlink retailer/CDN images, or try to repair photos during page rendering. Product image responses are cacheable for one year and the PWA service worker keeps already-viewed catalogue images in a dedicated cache for offline use.
-
-When rebuilding/redeploying on Render, the cache is generated as part of the service build rather than by a customer request. Render services otherwise have ephemeral runtime files, so generated catalogue assets that must survive deployment belong in the build artifact; persistent disk is only required for filesystem changes that must be created later at runtime (for example ongoing uploads).
+Known remote images are rendered directly from their source URL; the app does not create a local catalogue-image backup during deployment. When a remote image is temporarily unreachable, the image is hidden and the neutral unavailable state remains in place instead of replacing it with fake artwork.
