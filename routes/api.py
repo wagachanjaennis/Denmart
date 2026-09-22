@@ -2,7 +2,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 import json
 import re
-from flask import Blueprint, current_app, jsonify, request, session, url_for
+from flask import Blueprint, current_app, jsonify, request, session
 from flask_login import current_user, login_required
 from extensions import csrf, db
 from models import (Product, ProductAlias, StoreProduct, Payment, Sale, SaleItem, Order, OrderItem,
@@ -19,7 +19,7 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 
 def safe_product_payload(r, include_stock=False):
     data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "barcode": r.product.barcode,
-            "sku": r.product.sku, "price": str(r.selling_price), "image_url": url_for("shop.product_photo", product_id=r.product.id), "slug": r.product.slug, "category_id": r.product.category_id}
+            "sku": r.product.sku, "price": str(r.selling_price), "image_url": r.product.image_url, "slug": r.product.slug, "category_id": r.product.category_id}
     if include_stock:
         data["stock"] = str(r.stock_quantity)
     return data

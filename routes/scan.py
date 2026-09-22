@@ -2,7 +2,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 
-from flask import Blueprint, jsonify, render_template, request, url_for
+from flask import Blueprint, jsonify, render_template, request
 from flask_login import current_user, login_required
 
 from extensions import db
@@ -136,7 +136,7 @@ def lookup():
             "barcode": product.barcode,
             "sku": product.sku,
             "brand": product.brand,
-            "image_url": url_for("shop.product_photo", product_id=product.id),
+            "image_url": product.image_url or "",
             "stock": str(selected_sp.stock_quantity if selected_sp else 0),
             "reserved": str(selected_sp.reserved_quantity if selected_sp else 0),
             "cost_price": str(selected_sp.cost_price if selected_sp else 0),

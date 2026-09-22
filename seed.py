@@ -27,13 +27,81 @@ def slugify(value: str) -> str:
 
 
 def image_for(name: str, category: str, brand: str) -> str:
-    """Keep catalogue seeding image-neutral.
+    # Known product-family photography.  These are direct product-listing assets,
+    # chosen so size/variant names still have a real package photograph rather than
+    # leaving the catalogue empty. Unknown items use the local catalogue visual
+    # fallback in routes/shop.py and can later be resolved through the image finder.
+    exact = {
+        "Superloaf White Bread 400g": "https://cdn.mafrservices.com/sys-master-root/hb4/h24/12681202991134/82690_main.jpg?im=Resize%3D376",
+        "Brookside Fresh Milk 500ml": "https://cdnprod.mafretailproxy.com/sys-master-root/h36/h14/16975813509150/43316_main.jpg_480Wx480H",
+        "KCC Fresh Milk 500ml": "https://cdn.mafrservices.com/sys-master-root/hc1/h82/12452122132510/11666_Main.jpg?im=Resize%3D480",
+        "Brookside Yoghurt Strawberry 500ml": "https://cdn.mafrservices.com/pim-content/KEN/media/product/43324/1742392804/43324_main.jpg",
+        "Rina Cooking Oil 1L": "https://cdn.mafrservices.com/pim-content/KEN/media/product/21018/1742392804/21018_main.jpg",
+        "Tropical Heat Chilli Lemon Crisps 100g": "https://cdn.mafrservices.com/pim-content/KEN/media/product/32275/1742392804/32275_main.jpg",
+        "Del Monte Mango Juice 1L": "https://cdn.mafrservices.com/pim-content/KEN/media/product/38611/1742392804/38611_main.jpg",
+        "Colgate Maximum Cavity Protection 100ml": "https://cdn.mafrservices.com/pim-content/KEN/media/product/222023/1742392804/222023_main.jpg",
+        "Tupike Maize Meal 2Kg": "https://d16zmt6hgq1jhj.cloudfront.net/product/3888/yiuDik14bzJMMSXVqTO9olE0xFTl5X23UZ3rzSU2.jpg",
+        "Golden Fry Cooking Oil 2L": "https://cdnprod.mafretailproxy.com/sys-master-root/h38/h04/12462424457246/34101_Main.jpg_480Wx480H",
+        "Omo Detergent 1kg": "https://cdn.mafrservices.com/sys-master-root/h05/h10/62003535642654/14163_main.jpg?im=Resize%3D480",
+        "Kericho Gold Tea Bags 100s": "https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720",
+        "Brookside Strawberry Yogurt 500ml": "https://cdn.mafrservices.com/pim-content/KEN/media/product/44080/1742392804/44080_main.jpg",
+        "Delamere Strawberry Yoghurt 500ml": "https://cdn.mafrservices.com/pim-content/KEN/media/product/44079/1742392804/44079_main.jpg",
+        "Daima UHT Milk Fino 500ml": "https://www.beibora.co.ke/asset/products/section_d/Daima%20Uht%20Fino%20Bora%20500%20Ml.jpg",
+        "Pearl Pishori fortified rice 2Kg": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
+        "Supa Loaf Butter Toast Bread 400g": "https://cdn.mafrservices.com/sys-master-root/h02/ha0/12681201451038/82689_main.jpg?im=Resize%3D376",
+        "Ketepa Catering Tea Bag 100 Tea Bags Tagged": "https://d16zmt6hgq1jhj.cloudfront.net/product/7601/fOBDkMfk1BMxcjqetgBCJ0Yt3g3h2RMiachaLChh.png",
+        "Coca-Cola 500ml": "https://media.edgexm.co.ke/photos/products/Coca_Cola_Coke_Pet_Bottle_500ml.jpg",
+        "Unga Exe All Purpose Flour 2kg": "https://artcaffemarket.co.ke/cdn/shop/files/11428-262795.jpg?v=1734955008",
+        "Golden Fry Cooking Oil 1L": "https://shop.bidcoafrica.com/cdn/shop/files/Golden-Fry-1L.jpg?v=1737536953&width=1946",
+        "Golden Fry Cooking Oil 5L": "https://shop.bidcoafrica.com/cdn/shop/files/Golden-Fry-5L_5c79bf31-1072-4346-9c05-90833df2cad7.jpg?v=1737536953&width=1946",
+        "Delamere Strawberry Yoghurt 150ml": "https://cdn.mafrservices.com/sys-master-root/h69/h56/26449306615838/67552_main.jpg?im=Resize%3D376",
+        "Brookside Vanilla Yoghurt 500ml": "https://cdn.mafrservices.com/sys-master-root/h78/h60/12456806842398/47410_Main.jpg?im=Resize%3D480",
+        "Brookside Natural Yoghurt 500ml": "https://cdn.mafrservices.com/pim-content/KEN/media/product/44082/1742392804/44082_main.jpg?im=Resize%3D480",
+    }
+    if name in exact:
+        return exact[name]
 
-    Product photography is resolved by the permanent catalogue cache builder, which
-    binds one verified local file to one exact product. Seed-time family mappings are
-    intentionally disabled so a 1L/500ml variant (or unrelated product) can never
-    inherit another package photo.
-    """
+    n = (name or "").lower().strip()
+    b = (brand or "").lower().strip()
+    # High-value family mappings for the products most visible in the storefront.
+    # These deliberately match product identity, not just a generic category.
+    family = [
+        (("brookside", "fresh milk"), "https://cdnprod.mafretailproxy.com/sys-master-root/h36/h14/16975813509150/43316_main.jpg_480Wx480H"),
+        (("brookside", "dairy best"), "https://www.beibora.co.ke/asset/products/section_d/Brookside%20Dairy%20Best%20Milk%20500%20ml.jpg"),
+        (("daima", "milk"), "https://www.beibora.co.ke/asset/products/section_d/Daima%20Uht%20Fino%20Bora%20500%20Ml.jpg"),
+        (("daima", "uht"), "https://www.beibora.co.ke/asset/products/section_d/Daima%20Uht%20Fino%20Bora%20500%20Ml.jpg"),
+        (("fresha", "milk"), "https://www.beibora.co.ke/asset/products/section_d/Fresha%20Aseptic%20500Ml%20Pouch18%20Pcs.jpg"),
+        (("fresha", "fresh"), "https://www.beibora.co.ke/asset/products/section_d/Fresha%20Aseptic%20500Ml%20Pouch18%20Pcs.jpg"),
+        (("fresha", "vanilla yoghurt"), "https://www.beibora.co.ke/asset/products/section_d/Fresha%20Vanilla%20Yoghurt%201Ltr.jpg"),
+        (("fresha", "vanilla yogurt"), "https://www.beibora.co.ke/asset/products/section_d/Fresha%20Vanilla%20Yoghurt%201Ltr.jpg"),
+        (("brookside", "vanilla yoghurt"), "https://cdn.mafrservices.com/sys-master-root/h78/h60/12456806842398/47410_Main.jpg?im=Resize%3D480"),
+        (("brookside", "vanilla yogurt"), "https://cdn.mafrservices.com/sys-master-root/h78/h60/12456806842398/47410_Main.jpg?im=Resize%3D480"),
+        (("brookside", "natural yoghurt"), "https://cdn.mafrservices.com/pim-content/KEN/media/product/44082/1742392804/44082_main.jpg?im=Resize%3D480"),
+        (("brookside", "natural yogurt"), "https://cdn.mafrservices.com/pim-content/KEN/media/product/44082/1742392804/44082_main.jpg?im=Resize%3D480"),
+        (("ilara", "milk"), "https://www.beibora.co.ke/asset/products/section_d/Ilara%20Fresh%20Milk%20500Ml-Pouch.jpg"),
+        (("kcc", "fresh milk"), "https://cdn.mafrservices.com/sys-master-root/hc1/h82/12452122132510/11666_Main.jpg?im=Resize%3D480"),
+        (("k.c.c", "fresh milk"), "https://cdn.mafrservices.com/sys-master-root/hc1/h82/12452122132510/11666_Main.jpg?im=Resize%3D480"),
+        (("kcc", "vanilla yoghurt"), "https://www.beibora.co.ke/asset/products/section_d/K.C.C%20Delit%20Vanilla%20Yoghurt%20500Ml.jpeg"),
+        (("k.c.c", "vanilla yoghurt"), "https://www.beibora.co.ke/asset/products/section_d/K.C.C%20Delit%20Vanilla%20Yoghurt%20500Ml.jpeg"),
+        (("tuzo", "strawberry yoghurt"), "https://www.beibora.co.ke/asset/products/section_d/Tuzo%20Strawberry%20Yoghurt%20500Ml.jpeg"),
+        (("golden fry", "cooking oil"), "https://shop.bidcoafrica.com/cdn/shop/files/Golden-Fry-1L.jpg?v=1737536953&width=1946"),
+        (("omo", "detergent"), "https://cdn.mafrservices.com/sys-master-root/h05/h10/62003535642654/14163_main.jpg?im=Resize%3D480"),
+        (("rina", "cooking oil"), "https://cdn.mafrservices.com/pim-content/KEN/media/product/21018/1742392804/21018_main.jpg"),
+        (("del monte", "juice"), "https://kayshia.com/cdn/shop/products/20220905_231415_1500x.jpg?v=1662522855"),
+        (("coca-cola", ""), "https://media.edgexm.co.ke/photos/products/Coca_Cola_Coke_Pet_Bottle_500ml.jpg"),
+        (("kericho gold", "tea"), "https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg"),
+        (("delamere", "strawberry yoghurt"), "https://cdn.mafrservices.com/sys-master-root/h69/h56/26449306615838/67552_main.jpg?im=Resize%3D376"),
+        (("superloaf", "bread"), "https://cdn.mafrservices.com/sys-master-root/hb4/h24/12681202991134/82690_main.jpg?im=Resize%3D376"),
+        (("supa loaf", "bread"), "https://cdn.mafrservices.com/sys-master-root/h02/ha0/12681201451038/82689_main.jpg?im=Resize%3D376"),
+        (("colgate", ""), "https://cdn.mafrservices.com/pim-content/KEN/media/product/222023/1742392804/222023_main.jpg"),
+        (("tropical heat", "crisps"), "https://cdn.mafrservices.com/pim-content/KEN/media/product/32275/1742392804/32275_main.jpg"),
+        (("pearl", "pishori"), "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480"),
+    ]
+    for (required_brand, required_term), url in family:
+        if required_brand in b and (not required_term or required_term in n):
+            return url
+    # The loop above returns only when the specific pair matched; retain no image for
+    # unknown long-tail items so the storefront can show the generated catalogue visual.
     return ""
 
 

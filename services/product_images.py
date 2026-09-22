@@ -19,13 +19,10 @@ LOCAL_PREFIX = "/static/catalogue/products/"
 LOCAL_DIRNAME = "catalogue/products"
 
 
-def local_product_image_url(product_id: str, ext: str = "webp", batch: str | None = None) -> str:
-    """Return the same-origin URL for one product's cached image."""
+def local_product_image_url(product_id: str, ext: str = "webp") -> str:
+    """Return the stable same-origin URL for one product's cached image."""
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "", str(product_id or ""))
-    if not safe_id:
-        return ""
-    safe_batch = re.sub(r"[^0-9]", "", str(batch or ""))
-    return f"{LOCAL_PREFIX}{safe_batch}/{safe_id}.{ext}" if safe_batch else f"{LOCAL_PREFIX}{safe_id}.{ext}"
+    return f"{LOCAL_PREFIX}{safe_id}.{ext}" if safe_id else ""
 
 
 def local_product_image_path(product_id: str, ext: str = "webp") -> Path:
@@ -45,9 +42,7 @@ def local_path_from_url(url: str) -> Path | None:
     root = (Path(current_app.static_folder) / LOCAL_DIRNAME).resolve()
     try:
         resolved = candidate.resolve()
-        # Batch folders (001, 002, ...) are allowed, but traversal outside the
-        # catalogue cache is never allowed.
-        if resolved == root or root not in resolved.parents:
+        if resolved.parent != root:
             return None
         return resolved
     except Exception:
