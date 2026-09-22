@@ -1,11 +1,9 @@
-# Denmart catalogue image cache
+# Denmart real catalogue image cache
 
-This build removes runtime product-image searching from the customer storefront.
+Denmart does not bundle fake product illustrations. Product images are acquired at build time and stored locally under `static/catalogue/products/NNN/`, with 100-product batches.
 
-Each product stores a same-origin URL such as `/static/catalogue/products/<product-id>.webp` in `products.image_url`, and the matching file is bundled under `static/catalogue/products/`.
+The first 500 high-expectation products are prioritised into batches `001`–`005`. The remaining catalogue is reserved in `006`–`014`.
 
-The Render build runs `scripts/prepare_catalogue_images.py`. It uses the stored source manifest for previously verified product-image URLs and attempts to download/normalize those photos during the build. A temporary source failure never replaces an existing local asset. Products without a verified photograph receive a deterministic product-specific catalogue visual rather than an unrelated stock image or blank tile.
+A photo is accepted only when its source can be tied to the requested product identity. The pipeline refuses cross-product reuse and records misses as `pending_real_photo`. The public storefront never performs an image search at runtime.
 
-The PWA service worker caches local catalogue images cache-first after they are viewed, while HTTP caching marks product assets immutable for one year.
-
-For portable SQLite use, `scripts/cache_sqlite_backup.py` prepares a supplied SQLite backup with the same local product-image mappings.
+The browser service worker uses a dedicated same-origin image cache so a successfully downloaded photo remains available after temporary network loss.

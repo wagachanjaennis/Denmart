@@ -3,7 +3,7 @@ services:
     name: real-mart
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python init_db.py && python scripts/prepare_catalogue_images.py
+    buildCommand: pip install -r requirements.txt && python init_db.py && python scripts/prepare_catalogue_images.py --limit 500 --discover
     startCommand: python init_db.py && gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION

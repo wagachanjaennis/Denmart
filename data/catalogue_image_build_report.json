@@ -1,0 +1,9 @@
+{
+  "version": "2026-09-22-real-v1-baseline",
+  "total_products": 1319,
+  "bundled_real_photos": 0,
+  "bundled_placeholder_images": 0,
+  "priority_products": 500,
+  "target_real_photos": 350,
+  "note": "No fake/generated product images are bundled. The included GitHub/Render downloader acquires verified real photos from exact sources and records the local product mapping."
+}

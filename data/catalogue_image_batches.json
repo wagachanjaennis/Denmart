@@ -1,0 +1,77 @@
+{
+  "version": "2026-09-22-real-batches-v1",
+  "base": "/static/catalogue/products",
+  "batch_size": 100,
+  "folders": {
+    "001": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/001/"
+    },
+    "002": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/002/"
+    },
+    "003": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/003/"
+    },
+    "004": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/004/"
+    },
+    "005": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/005/"
+    },
+    "006": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/006/"
+    },
+    "007": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/007/"
+    },
+    "008": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/008/"
+    },
+    "009": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/009/"
+    },
+    "010": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/010/"
+    },
+    "011": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/011/"
+    },
+    "012": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/012/"
+    },
+    "013": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 100,
+      "folder": "/static/catalogue/products/013/"
+    },
+    "014": {
+      "catalogue_capacity": 100,
+      "catalogue_products": 19,
+      "folder": "/static/catalogue/products/014/"
+    }
+  }
+}

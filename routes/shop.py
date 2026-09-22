@@ -10,7 +10,6 @@ from extensions import db
 from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError
 from services.search import forgiving_rank
 from services.product_images import is_local_image_url, local_path_from_url, image_content_type
-from services.product_visuals import product_visual_svg
 
 bp = Blueprint("shop", __name__)
 
@@ -215,38 +214,52 @@ def app_qr():
     return send_file(buf, mimetype="image/png", max_age=86400)
 
 
-def _fallback_product_photo(product):
-    category_name = ""
-    if getattr(product, "category_id", None):
-        category = db.session.get(Category, product.category_id)
-        category_name = category.name if category else ""
-    svg = product_visual_svg(product, category_name)
-    return Response(
-        svg,
-        mimetype="image/svg+xml",
-        headers={
-            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
-            "X-Denmart-Image": "catalogue-generated",
-        },
-    )
+def _catalogue_manifest():
+    """Load the build-time real-photo registry."""
+    import json
+    path = Path(current_app.static_folder) / "catalogue" / "catalogue-image-manifest.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("products", {})
+    except Exception:
+        return {}
+
+
+def _pending_product_photo(product):
+    """Neutral product-specific pending card, never a fake product image."""
+    import html
+    brand = html.escape(str(product.brand or "Denmart"))
+    name = html.escape(str(product.name or "Product photo pending"))
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+      <rect width="800" height="800" rx="56" fill="#f5f7f8"/>
+      <rect x="58" y="58" width="684" height="684" rx="44" fill="#ffffff" stroke="#dfe6e9" stroke-width="4"/>
+      <circle cx="400" cy="320" r="92" fill="#f0f3f5"/>
+      <path d="M350 320h100M400 270v100" stroke="#9aa6ad" stroke-width="10" stroke-linecap="round"/>
+      <text x="400" y="478" text-anchor="middle" font-family="Arial,sans-serif" font-size="24" font-weight="700" fill="#6d777d">PHOTO NOT CACHED YET</text>
+      <text x="400" y="530" text-anchor="middle" font-family="Arial,sans-serif" font-size="22" font-weight="700" fill="#273137">{brand}</text>
+      <text x="400" y="568" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" fill="#4e5a60">{name}</text>
+    </svg>"""
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-store", "X-Denmart-Image": "catalogue-pending"})
 
 
 def _local_product_photo(product):
-    """Serve only the exact local asset recorded on the product row."""
-    raw = str(product.image_url or "").strip()
-    if not is_local_image_url(raw):
-        return None
-    path = local_path_from_url(raw)
+    """Serve only the exact cached file recorded for this exact product."""
+    manifest = _catalogue_manifest()
+    entry = manifest.get(str(product.id)) or {}
+    raw = str(entry.get("url") or "").strip()
+    # First serve a verified build-cache photo. Then allow a real administrator-uploaded
+    # local image stored directly on the product row. Generated legacy catalogue assets do
+    # not exist in the repository anymore, so this cannot revive the old fake photos.
+    if entry.get("type") == "photo" and is_local_image_url(raw):
+        path = local_path_from_url(raw)
+    else:
+        row_raw = str(product.image_url or "").strip()
+        path = local_path_from_url(row_raw) if is_local_image_url(row_raw) else None
     if not path or not path.is_file() or path.stat().st_size <= 0:
         return None
-    return send_file(
-        path,
-        mimetype=image_content_type(path),
-        max_age=31536000,
-        conditional=True,
-        etag=True,
-        last_modified=path.stat().st_mtime,
-    )
+    response = send_file(path, mimetype=image_content_type(path), max_age=31536000, conditional=True, etag=True, last_modified=path.stat().st_mtime)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["X-Denmart-Image"] = "catalogue-real-local"
+    return response
 
 
 @bp.get("/product-photo/<product_id>.jpg")
@@ -254,17 +267,9 @@ def product_photo(product_id):
     product = db.session.get(Product, product_id)
     if not product or product.status != "ACTIVE":
         return ("", 404)
-
     local = _local_product_photo(product)
     if local is not None:
-        # send_file's max_age handles browser HTTP caching; the service worker also caches
-        # this same-origin image after first use. No remote lookup is performed here.
-        local.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        local.headers["X-Denmart-Image"] = "catalogue-local"
         return local
-
-    # Uploaded administrator images remain database-backed data URLs and are safe to serve
-    # without any network dependency.
     raw = str(product.image_url or "").strip()
     if raw.startswith("data:image/") and "," in raw:
         try:
@@ -277,12 +282,7 @@ def product_photo(product_id):
             return response
         except Exception:
             pass
-
-    # The catalogue is never allowed to hotlink, resolve, or redirect to an external
-    # product image during a customer visit. Every product has a deterministic local
-    # generated asset after the build cache step; this last guard prevents a blank box
-    # even if the database/file bundle becomes inconsistent.
-    return _fallback_product_photo(product)
+    return _pending_product_photo(product)
 
 
 @bp.get("/shop/manifest.webmanifest")
