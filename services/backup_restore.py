@@ -76,7 +76,7 @@ def restore_database_json(payload):
     """Replace the live database with a compatible JSON snapshot."""
     db.create_all()
     if not isinstance(payload, dict) or payload.get("format") not in {"denmart-database-v2", "real-mart-json-v1"}:
-        raise ValueError("Unsupported backup format. Choose a Real Mart JSON backup.")
+        raise ValueError("Unsupported backup format. Choose a Denmart JSON backup.")
     tables_data = payload.get("tables") or {}
     known = {t.name: t for t in db.metadata.sorted_tables}
     missing = [name for name in tables_data if name not in known]
@@ -227,7 +227,7 @@ def restore_sqlite_snapshot(path: str | Path, batch_size: int = 2000):
     known = {t.name: t for t in db.metadata.sorted_tables}
     if "businesses" not in available:
         source.dispose()
-        raise ValueError("This is not a Real Mart database snapshot.")
+        raise ValueError("This is not a Denmart database snapshot.")
     missing_known = [t.name for t in db.metadata.sorted_tables if t.name not in available]
     if missing_known:
         source.dispose()

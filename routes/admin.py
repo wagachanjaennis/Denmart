@@ -22,6 +22,7 @@ from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryT
 from services.audit import audit
 from services.crypto import encrypt, decrypt
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
+from services.search import forgiving_rank
 
 bp = Blueprint("admin", __name__)
 ADMIN_BASE = "/control"
@@ -688,10 +689,13 @@ def products():
         query = query.filter(StoreProduct.store_id == store_id)
     if category_id:
         query = query.filter(Product.category_id == category_id)
-    if q:
-        like = f"%{q}%"
-        query = query.filter((Product.name.ilike(like)) | (Product.brand.ilike(like)) | (Product.barcode.ilike(like)) | (Product.sku.ilike(like)))
-    items = query.order_by(Product.name).limit(5000).all()
+    items = query.order_by(Product.name).limit(10000).all()
+    if q and items:
+        aliases_by_product = {}
+        ids = [item.product_id for item in items]
+        for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
+            aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
+        items = forgiving_rank(items, q, aliases_by_product=aliases_by_product, limit=5000, minimum=0.50)
     return render_template(
         "admin/products.html", items=items,
         stores=Store.query.filter_by(business_id=current_user.business_id).order_by(Store.name).all(),
@@ -1067,16 +1071,57 @@ def inventory():
     query = StoreProduct.query.join(Store).join(Product).filter(Store.business_id == business_id)
     if selected_store:
         query = query.filter(StoreProduct.store_id == selected_store.id)
-    if q:
-        needle = f"%{q}%"
-        query = query.filter(or_(Product.name.ilike(needle), Product.barcode.ilike(needle), Product.sku.ilike(needle)))
     if low:
         query = query.filter(StoreProduct.stock_quantity <= StoreProduct.reorder_level)
-    rows = query.order_by((StoreProduct.stock_quantity - StoreProduct.reorder_level).asc(), Product.name.asc()).limit(400).all()
+    rows = query.order_by((StoreProduct.stock_quantity - StoreProduct.reorder_level).asc(), Product.name.asc()).limit(10000).all()
+    if q and rows:
+        aliases_by_product = {}
+        ids = [row.product_id for row in rows]
+        for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
+            aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
+        rows = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=400, minimum=0.48)
+    else:
+        rows = rows[:400]
     total_cost = sum((Decimal(r.stock_quantity or 0) * Decimal(r.cost_price or 0) for r in rows), Decimal("0"))
     total_retail = sum((Decimal(r.stock_quantity or 0) * Decimal(r.selling_price or 0) for r in rows), Decimal("0"))
     low_count = sum(1 for r in rows if Decimal(r.stock_quantity or 0) <= Decimal(r.reorder_level or 0))
-    return render_template("admin/inventory.html", rows=rows, stores=stores, store_id=store_id, selected_store=selected_store,
+
+    def stock_layers(sp):
+        # Inventory transactions form a lightweight FIFO ledger without a schema
+        # migration. Existing unlogged stock is treated as the oldest/opening layer;
+        # each later positive receipt/adjustment becomes a new layer. Sales consume
+        # the oldest layer first, so the newest layer remains visually distinct.
+        txns = (InventoryTransaction.query.filter_by(store_id=sp.store_id, product_id=sp.product_id)
+                .order_by(InventoryTransaction.created_at.asc(), InventoryTransaction.id.asc()).all())
+        net_tx = sum((Decimal(t.quantity or 0) for t in txns), Decimal("0"))
+        opening = Decimal(sp.stock_quantity or 0) - net_tx
+        layers = []
+        if opening > 0:
+            layers.append({"qty": opening, "remaining": opening, "when": sp.created_at, "label": "Opening stock", "source": "OLD"})
+        for t in txns:
+            qty = Decimal(t.quantity or 0)
+            if qty > 0:
+                layers.append({"qty": qty, "remaining": qty, "when": t.created_at,
+                               "label": (t.notes or t.transaction_type or "Stock received").strip()[:80],
+                               "source": "NEW" if t.transaction_type in {"PURCHASE", "ADJUSTMENT", "ADJUSTMENT_IN", "RECEIVE", "SCAN_STOCK"} else "OLD"})
+            elif qty < 0:
+                to_consume = -qty
+                for layer in layers:
+                    if to_consume <= 0:
+                        break
+                    take = min(layer["remaining"], to_consume)
+                    layer["remaining"] -= take
+                    to_consume -= take
+        remaining = [x for x in layers if x["remaining"] > 0]
+        remaining.sort(key=lambda x: (x["when"] or sp.created_at), reverse=True)
+        # The newest surviving inbound layer is the visible NEW STOCK layer. Everything
+        # underneath it is older stock; when those layers are exhausted the divider vanishes.
+        for i, layer in enumerate(remaining):
+            layer["is_newest"] = i == 0 and layer["source"] == "NEW"
+        return remaining
+
+    display_rows = [{"item": r, "layers": stock_layers(r)} for r in rows]
+    return render_template("admin/inventory.html", rows=rows, display_rows=display_rows, stores=stores, store_id=store_id, selected_store=selected_store,
                            q=q, low=low, total_cost=total_cost, total_retail=total_retail, low_count=low_count)
 
 

@@ -70,6 +70,27 @@ async function queueOfflineSale(method){
 async function syncOffline(){if(!navigator.onLine)return;const queued=await idbAll('queue');if(!queued.length)return;try{const {r,d}=await apiJSON('/api/pos/sync/offline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sales:queued})});if(!r.ok)return;for(const item of d.results||[]){if(item.ok)await idbDelete('queue',item.client_ref)}if((d.results||[]).some(x=>x.ok))toast('Offline sales synced to Denmart');renderOfflineQueueBadge()}catch(e){}}
 
 let lastMpesaTransaction='';
+function setGatewayContext(ctx={}){
+  const el=document.getElementById('denmartGatewayContext');
+  if(!el)return;
+  el.dataset.paymentId=String(ctx.paymentId||'');
+  el.dataset.saleId=String(ctx.saleId||'');
+  el.dataset.expectedAmount=Number(ctx.expectedAmount||0).toFixed(2);
+  el.dataset.receipt=String(ctx.receipt||'');
+  el.dataset.phone=String(ctx.phone||'');
+  el.dataset.active=ctx.paymentId?'1':'0';
+  window.DenmartGatewayContext={paymentId:el.dataset.paymentId,saleId:el.dataset.saleId,expectedAmount:el.dataset.expectedAmount,receipt:el.dataset.receipt,phone:el.dataset.phone,active:el.dataset.active==='1'};
+}
+setGatewayContext();
+window.denmartGatewayPaymentConfirmed=function(data){
+  const ctx=window.DenmartGatewayContext||{};
+  const receipt=data?.receipt||ctx.receipt||'';
+  if(data?.status) paintMpesaPaymentCard({...data,status:data.status},receipt);
+  if(data?.status==='PAID'){
+    toast('M-PESA confirmed · '+(receipt||'sale'));
+    cart=[]; renderCart(); setGatewayContext();
+  }
+};
 async function refreshMpesaFeed(){
   const headline=$('#posMpesaLast'), today=$('#posMpesaToday'); if(!headline||!navigator.onLine)return;
   try{
@@ -92,24 +113,33 @@ async function makeSale(method){
   if(!navigator.onLine && method!=='MPESA')return queueOfflineSale(method);
   const phone=method==='MPESA'?prompt('Customer M-PESA number (07xx xxx xxx)',''):null;
   if(method==='MPESA'&&!phone)return toast('Payment not started');
+  if(method==='MPESA')setGatewayContext({expectedAmount:cart.reduce((t,x)=>t+(Number(x.price)*Number(x.qty)),0),phone});
   const reference=method==='CARD'?prompt('Card / external payment reference',''):null;
   if(method==='CARD'&&!reference)return toast('Payment not recorded');
   const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference})});
   if(!r.ok)return toast(d.error||'Sale failed');
   if(method==='MPESA'){
-    const p=await apiJSON('/api/payments/mpesa/initiate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,amount:d.total,phone_number:phone})});
-    if(p.r.ok){
-      toast('M-PESA prompt sent');
-      waitForPayment(p.d.payment_id,d.receipt_number);
-    }else if(p.r.status===503 && (p.d.error==='mpesa_not_configured'||p.d.error==='payment_provider_unavailable')){
-      const g=await apiJSON('/api/payments/gateway/await',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,phone_number:phone})});
-      if(!g.r.ok)return toast(g.d.message||g.d.error||'M-PESA gateway could not start');
-      toast('Ask customer to pay to the M-PESA line · waiting for confirmation');
+    // Android Denmart Gateway is the primary M-PESA confirmation path. It works
+    // without Daraja by listening to the merchant phone's M-PESA SMS.
+    const g=await apiJSON('/api/payments/gateway/await',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,phone_number:phone})});
+    if(g.r.ok){
+      setGatewayContext({paymentId:g.d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
+      toast('Ask customer to pay to the M-PESA line · listening for exact confirmation');
       waitForPayment(g.d.payment_id,d.receipt_number);
     }else{
-      return toast(p.d.message||p.d.error||'M-PESA request failed');
+      // Optional Daraja remains available for a later deployment, but is not
+      // required for this SMS-gateway build.
+      const p=await apiJSON('/api/payments/mpesa/initiate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,amount:d.total,phone_number:phone})});
+      if(p.r.ok){
+        setGatewayContext({paymentId:p.d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
+        toast('M-PESA prompt sent');
+        waitForPayment(p.d.payment_id,d.receipt_number);
+      }else{
+        return toast(g.d.message||g.d.error||p.d.message||p.d.error||'M-PESA payment could not start');
+      }
     }
   }else{
+    setGatewayContext();
     toast('Sale complete · '+d.receipt_number);window.open('/merchant/receipt/'+encodeURIComponent(d.receipt_number),'_blank','noopener');cart=[];renderCart();
   }
 }
@@ -136,6 +166,8 @@ async function waitForPayment(paymentId,receiptNumber){
       const {d}=await apiJSON('/api/payments/'+encodeURIComponent(paymentId)+'/status');
       paintMpesaPaymentCard(d,receiptNumber);
       if(d.status==='PAID'){
+        window.denmartGatewayPaymentConfirmed?.({...d,receipt:receiptNumber});
+        setGatewayContext();
         toast('M-PESA confirmed · '+receiptNumber); cart=[]; renderCart();
         setTimeout(()=>window.open('/merchant/receipt/'+encodeURIComponent(receiptNumber),'_blank','noopener'),250);
         return;

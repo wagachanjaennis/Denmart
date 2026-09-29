@@ -380,13 +380,13 @@ def _settle_gateway_intent(intent, event):
 @csrf.exempt
 @bp.post("/payment-gateway/sms")
 def payment_gateway_sms():
-    supplied_key = (request.args.get("key") or request.headers.get("X-RealMart-Gateway-Key") or "").strip()
+    supplied_key = (request.args.get("key") or request.headers.get("X-Denmart-Gateway-Key") or request.headers.get("X-RealMart-Gateway-Key") or "").strip()
     secret = _gateway_secret()
     if not secret or supplied_key != secret:
         return jsonify(error="gateway_not_authorized"), 401
     payload = request.get_json(silent=True) or {}
-    event_id = (request.headers.get("X-RealMart-Event-Id") or payload.get("event_id") or "").strip()
-    device_id = (request.headers.get("X-RealMart-Gateway-Id") or payload.get("gateway_device_id") or "").strip()[:120]
+    event_id = (request.headers.get("X-Denmart-Event-Id") or request.headers.get("X-RealMart-Event-Id") or payload.get("event_id") or "").strip()
+    device_id = (request.headers.get("X-Denmart-Gateway-Id") or request.headers.get("X-RealMart-Gateway-Id") or payload.get("gateway_device_id") or "").strip()[:120]
     message = str(payload.get("message") or "").strip()
     sender = str(payload.get("sender") or "").strip()[:120]
     source = str(payload.get("source") or "android_sms").strip()[:40]
@@ -434,6 +434,35 @@ def payment_gateway_sms():
     )
     db.session.add(event); db.session.flush()
     matched = False; actual = None
+    # 0) Android WebView exact-context match. The Denmart companion app reads
+    # the live POS DOM and sends the payment_id + exact expected amount. This
+    # is the most deterministic path and avoids server-side candidate guessing.
+    context_payment_id = str(payload.get("payment_id") or "").strip()
+    context_amount = None
+    try:
+        if payload.get("expected_amount") not in (None, ""):
+            context_amount = Decimal(str(payload.get("expected_amount")).replace(",", ""))
+    except InvalidOperation:
+        context_amount = None
+    if context_payment_id and amount is not None:
+        intent = db.session.get(Payment, context_payment_id)
+        exact_ok = bool(intent and intent.business_id == business_id)
+        exact_ok = exact_ok and bool(intent.store_id == (store.id if store else intent.store_id))
+        exact_ok = exact_ok and intent.method in {"MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"}
+        exact_ok = exact_ok and intent.status in {"PENDING", "PARTIALLY_PAID", "PENDING_APPROVAL"}
+        if context_amount is not None:
+            exact_ok = exact_ok and context_amount == amount
+        if exact_ok:
+            expected_phone = normalize_ke_phone(payload.get("expected_phone"))
+            if expected_phone and customer_phone:
+                exact_ok = expected_phone == customer_phone
+            if exact_ok and intent.phone_number and customer_phone:
+                exact_ok = normalize_ke_phone(intent.phone_number) == customer_phone
+            sale = db.session.get(Sale, intent.sale_id) if intent.sale_id else None
+            exact_ok = exact_ok and bool(sale and sale.business_id == business_id and sale.store_id == intent.store_id and sale.payment_status != "PAID")
+            if exact_ok and sale_outstanding(sale) == amount:
+                matched, actual = _settle_gateway_intent(intent, event)
+
     # 1) Exact transaction reference, when a buyer supplied it as a fallback.
     if transaction_id:
         ref_intents = (Payment.query.filter(
@@ -639,7 +668,7 @@ def till_payment_submit():
     return jsonify(ok=True, payment_id=payment.id, status=current_status,
                    order_number=order.order_number, till_number=till_number,
                    received=str(order_received_total(order)), outstanding=str(order_outstanding(order)),
-                   message=("Payment submitted for manual approval." if approval_mode == "MANUAL" else "Payment submitted. Real Mart is listening for the M-PESA confirmation automatically."))
+                   message=("Payment submitted for manual approval." if approval_mode == "MANUAL" else "Payment submitted. Denmart is listening for the M-PESA confirmation automatically."))
 
 
 @csrf.exempt

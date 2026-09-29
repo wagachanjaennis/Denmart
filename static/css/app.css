@@ -205,3 +205,5 @@ body.pwa-standalone{overscroll-behavior-y:none;-webkit-touch-callout:none}
 
 /* Real-product imagery only: POS has a neutral state when no photo exists. */
 .pos-no-image{width:54px;height:54px;border-radius:8px;background:#f1f3f3;color:#879396;display:grid;place-items:center;font-size:.52rem;font-weight:800;text-align:center;flex:0 0 54px}
+
+.stock-layer-table .stock-summary-row{background:#fbfcfc}.stock-layer-row td{border-top:0!important;padding-top:6px!important;padding-bottom:6px!important}.stock-layer-row td:nth-last-child(-n+3){background:#fcfdfc}.stock-layer-row small{display:block;color:var(--muted);margin-top:2px}.stock-divider td{border-top:2px solid var(--denmart-green)!important;border-bottom:0!important;padding:7px 10px!important;font-size:.58rem!important;font-weight:850!important;letter-spacing:.06em;color:var(--muted);text-transform:uppercase}.stock-divider span{color:var(--denmart-green-dark);font-weight:950}.danger-action{background:#7d3d35!important}
