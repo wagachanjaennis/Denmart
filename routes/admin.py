@@ -614,9 +614,21 @@ def approve_order_payment(order_id):
             flash("Enter a valid M-PESA transaction code (6–20 characters).", "error")
             return redirect(url_for("admin.orders"))
         payment.external_reference = reference
+
+    # First reuse the same automatic gateway matcher. This fixes legacy/manual
+    # approvals when the Android listener has already delivered the M-PESA event.
+    try:
+        from routes.api import reconcile_gateway_intent
+        matched, _actual = reconcile_gateway_intent(payment)
+        if matched:
+            flash(f"{order.order_number} payment approved automatically.", "success")
+            return redirect(url_for("admin.orders"))
+    except Exception:
+        db.session.rollback()
+
     if not _settle_order_payment(order, payment):
         db.session.rollback()
-        flash("Payment could not be approved. Check the transaction reference and reserved stock.", "error")
+        flash("Payment could not be approved. The matching M-PESA event or transaction code was not verified, or stock is no longer reserved.", "error")
         return redirect(url_for("admin.orders"))
     db.session.commit()
     audit("ORDER_PAYMENT_APPROVED", "Order", order.id, new_values={"payment_id": payment.id, "reference": payment.provider_transaction_id})

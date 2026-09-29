@@ -120,6 +120,19 @@ def _record_sale(data, allow_offline=False):
 
     receipt_number = client_ref or f"DM-{now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
     paid_now = payment_method in {"CASH", "CARD"}
+    mpesa_phone = ""
+    if payment_method == "MPESA":
+        raw_phone = str(data.get("phone_number") or "").strip()
+        digits = "".join(ch for ch in raw_phone if ch.isdigit())
+        if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
+            mpesa_phone = digits
+        elif digits.startswith("0") and len(digits) == 10 and digits[1] in "17":
+            mpesa_phone = "254" + digits[1:]
+        elif digits.startswith("7") and len(digits) == 9:
+            mpesa_phone = "254" + digits
+        if not mpesa_phone:
+            return jsonify(error="valid_customer_phone_required"), 400
+
     sale = Sale(
         business_id=current_user.business_id,
         store_id=current_user.store_id,
@@ -128,7 +141,7 @@ def _record_sale(data, allow_offline=False):
         subtotal=subtotal,
         total=subtotal,
         status="COMPLETED" if paid_now else "PENDING",
-        payment_status="PAID" if paid_now else "PENDING",
+        payment_status="PAID" if paid_now else "PENDING_APPROVAL",
         completed_at=now() if paid_now else None,
     )
     db.session.add(sale)
@@ -141,6 +154,15 @@ def _record_sale(data, allow_offline=False):
         ))
         if payment_method == "MPESA" and not paid_now:
             sp.reserved_quantity = Decimal(sp.reserved_quantity or 0) + qty
+
+    gateway_payment = None
+    if payment_method == "MPESA" and not paid_now:
+        gateway_payment = Payment(
+            business_id=current_user.business_id, store_id=current_user.store_id, sale_id=sale.id,
+            provider="SAFARICOM", method="MPESA_GATEWAY_INTENT", amount=subtotal, currency="KES",
+            status="PENDING", phone_number=mpesa_phone,
+        )
+        db.session.add(gateway_payment)
 
     if paid_now:
         for sp, qty, _ in prepared:
@@ -162,9 +184,16 @@ def _record_sale(data, allow_offline=False):
             ))
 
     db.session.commit()
+    if gateway_payment:
+        try:
+            from routes.api import reconcile_gateway_intent
+            reconcile_gateway_intent(gateway_payment)
+        except Exception:
+            db.session.rollback()
     audit("SALE_CREATED", "Sale", sale.id,
           new_values={"total": str(sale.total), "payment_method": payment_method, "offline": allow_offline})
     return jsonify(ok=True, sale_id=sale.id, receipt_number=receipt_number,
+                   payment_id=gateway_payment.id if gateway_payment else None,
                    payment_status=sale.payment_status, total=str(sale.total))
 
 

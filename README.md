@@ -68,7 +68,7 @@ The receiving API is:
 
 `POST /api/payment-gateway/sms?key=<business-gateway-key>`
 
-The Android gateway supplies only a sanitized payment summary: SIM slot, device ID, transaction ID, exact paid amount, payer name/phone when available, and the active POS payment context. Raw M-PESA SMS bodies are never uploaded by the Denmart Android gateway. Unambiguous exact-context payments are settled automatically; ambiguous messages stay `UNMATCHED`.
+The Android gateway listens continuously for M-PESA payment notifications and uploads only sanitized facts: SIM slot, device ID, transaction ID, paid amount, payer name/phone when available. It no longer depends on the POS page or a visible WebView context. The server compares each event against recent online and POS payment intents; unambiguous phone+amount matches are settled automatically, while ambiguous/personal messages remain `UNMATCHED`. The gateway also sends a lightweight heartbeat so the connection can be monitored.
 
 SQLite backups use a real attachment response with `as_attachment=True` and are available from **Control → Backups**.
 

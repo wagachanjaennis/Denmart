@@ -19,7 +19,7 @@
     try{
       const r=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),credentials:'same-origin'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Order could not be placed');
       if(paymentMethod==='till'){
-        const approvalMode=document.querySelector('input[name="approvalMode"]:checked')?.value||'AUTO';
+        const approvalMode='AUTO';
         const p=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:document.getElementById('mpesaReference')?.value.trim()||'',approval_mode:approvalMode}),credentials:'same-origin'});
         const pd=await p.json();
         save([]);

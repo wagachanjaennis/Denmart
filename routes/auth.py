@@ -43,6 +43,12 @@ def _login(target):
                            pwa_manifest="/merchant/manifest.webmanifest" if target == "pos" else None)
 
 
+@bp.route("/merchants", methods=["GET", "POST"])
+def merchants_compat():
+    """Legacy compatibility alias for old clients that still request /merchants."""
+    return pos_login()
+
+
 @bp.route("/merchant", methods=["GET", "POST"])
 def pos_login():
     if current_user.is_authenticated and session.get("portal") == "pos" and current_user.is_active and current_user.business_id:

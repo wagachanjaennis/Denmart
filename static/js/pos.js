@@ -116,28 +116,13 @@ async function makeSale(method){
   if(method==='MPESA')setGatewayContext({expectedAmount:cart.reduce((t,x)=>t+(Number(x.price)*Number(x.qty)),0),phone});
   const reference=method==='CARD'?prompt('Card / external payment reference',''):null;
   if(method==='CARD'&&!reference)return toast('Payment not recorded');
-  const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference})});
+  const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference,phone_number:phone||''})});
   if(!r.ok)return toast(d.error||'Sale failed');
   if(method==='MPESA'){
-    // Android Denmart Gateway is the primary M-PESA confirmation path. It works
-    // without Daraja by listening to the merchant phone's M-PESA SMS.
-    const g=await apiJSON('/api/payments/gateway/await',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,phone_number:phone})});
-    if(g.r.ok){
-      setGatewayContext({paymentId:g.d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
-      toast('Ask customer to pay to the M-PESA line · listening for exact confirmation');
-      waitForPayment(g.d.payment_id,d.receipt_number);
-    }else{
-      // Optional Daraja remains available for a later deployment, but is not
-      // required for this SMS-gateway build.
-      const p=await apiJSON('/api/payments/mpesa/initiate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sale_id:d.sale_id,amount:d.total,phone_number:phone})});
-      if(p.r.ok){
-        setGatewayContext({paymentId:p.d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
-        toast('M-PESA prompt sent');
-        waitForPayment(p.d.payment_id,d.receipt_number);
-      }else{
-        return toast(g.d.message||g.d.error||p.d.message||p.d.error||'M-PESA payment could not start');
-      }
-    }
+    if(!d.payment_id)return toast('M-PESA monitoring could not be armed');
+    setGatewayContext({paymentId:d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
+    toast('M-PESA listening · customer can pay to the configured Till');
+    waitForPayment(d.payment_id,d.receipt_number);
   }else{
     setGatewayContext();
     toast('Sale complete · '+d.receipt_number);window.open('/merchant/receipt/'+encodeURIComponent(d.receipt_number),'_blank','noopener');cart=[];renderCart();
@@ -183,7 +168,7 @@ async function waitForPayment(paymentId,receiptNumber){
   poll();
 }
 
-async function openShift(){const cash=prompt('Opening cash (KES)','0');if(cash===null)return;const {r,d}=await apiJSON('/api/pos/shifts/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({opening_cash:cash})});toast(r.ok?'Shift opened.':(d.error||'Could not open shift'));if(r.ok)location.reload()}
+async function openShift(){const cash='0';const {r,d}=await apiJSON('/api/pos/shifts/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({opening_cash:cash})});toast(r.ok?'Shift opened.':(d.error||'Could not open shift'));if(r.ok)location.reload()}
 async function closeShift(){const cash=prompt('Counted closing cash (KES)','0');if(cash===null)return;const {r,d}=await apiJSON('/api/pos/shifts/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({closing_cash:cash})});toast(r.ok?`Shift closed · difference ${money(d.difference)}`:(d.error||'Could not close shift'));if(r.ok)setTimeout(()=>location.reload(),900)}
 window.loadDaySummary=async function(){const {r,d}=await apiJSON('/api/pos/day-summary');if(!r.ok)return toast(d.error||'Summary unavailable');const el=$('#summaryCards');if(el)el.innerHTML=`<div class="mini-stat"><small>Paid sales</small><strong>${d.sales_count}</strong></div><div class="mini-stat"><small>Sales total</small><strong>${money(d.sales_total)}</strong></div><div class="mini-stat"><small>Cash</small><strong>${money(d.cash_sales)}</strong></div>`};
 window.cashDrawer=async function(kind){const amount=prompt('Amount (KES)','0');if(!amount)return;const notes=prompt('Note','')||'';const {r,d}=await apiJSON('/api/pos/cash-drawer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:kind,amount,notes})});toast(r.ok?'Drawer entry recorded.':(d.error||'Drawer entry failed'))};
@@ -207,4 +192,7 @@ function handleKeyboardScanner(e){
 window.addEventListener('keydown',handleKeyboardScanner);
 $('#posSearch')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchPOS()}});
 function refreshSessionChrome(){const el=$('#posSessionClock');if(el){const d=new Date();el.textContent=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});}const status=$('#networkStatus');if(status){status.textContent=navigator.onLine?'ONLINE':'OFFLINE';status.style.opacity=navigator.onLine?'1':'.65'}}
-window.addEventListener('online',refreshSessionChrome);window.addEventListener('offline',refreshSessionChrome);setInterval(refreshSessionChrome,30000);refreshSessionChrome();setupViews();renderCart();renderHeld();warmCache();if(navigator.onLine){syncOffline();refreshMpesaFeed();}setInterval(refreshMpesaFeed,3000);renderOfflineQueueBadge();
+window.addEventListener('online',refreshSessionChrome);window.addEventListener('offline',refreshSessionChrome);setInterval(refreshSessionChrome,30000);refreshSessionChrome();setupViews();renderCart();renderHeld();warmCache();if(navigator.onLine){syncOffline();refreshMpesaFeed();}setInterval(refreshMpesaFeed,3000);
+// Keep non-payment POS views synchronized with server-side auto approvals.
+setInterval(()=>{const panel=document.querySelector('.agent-view.active');if(panel?.dataset.panel==='orders')loadOrders();if(panel?.dataset.panel==='summary')loadDaySummary();},10000);
+renderOfflineQueueBadge();
