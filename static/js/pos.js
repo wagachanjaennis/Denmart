@@ -111,16 +111,17 @@ async function makeSale(method){
   if(!cart.length)return toast('Add an item first');
   if(method==='MPESA'&&!navigator.onLine)return toast('M-PESA needs an internet connection');
   if(!navigator.onLine && method!=='MPESA')return queueOfflineSale(method);
-  const phone=method==='MPESA'?prompt('Customer M-PESA number (07xx xxx xxx)',''):null;
-  if(method==='MPESA'&&!phone)return toast('Payment not started');
-  if(method==='MPESA')setGatewayContext({expectedAmount:cart.reduce((t,x)=>t+(Number(x.price)*Number(x.qty)),0),phone});
+  // Counter M-PESA matching is amount-driven. A payer phone is optional evidence,
+  // not a prerequisite for creating or settling the POS sale.
+  const phone=null;
+  if(method==='MPESA')setGatewayContext({expectedAmount:cart.reduce((t,x)=>t+(Number(x.price)*Number(x.qty)),0)});
   const reference=method==='CARD'?prompt('Card / external payment reference',''):null;
   if(method==='CARD'&&!reference)return toast('Payment not recorded');
   const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference,phone_number:phone||''})});
   if(!r.ok)return toast(d.error||'Sale failed');
   if(method==='MPESA'){
     if(!d.payment_id)return toast('M-PESA monitoring could not be armed');
-    setGatewayContext({paymentId:d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number,phone});
+    setGatewayContext({paymentId:d.payment_id,saleId:d.sale_id,expectedAmount:d.total,receipt:d.receipt_number});
     toast('M-PESA listening · customer can pay to the configured Till');
     waitForPayment(d.payment_id,d.receipt_number);
   }else{
@@ -135,7 +136,8 @@ function paintMpesaPaymentCard(d, receiptNumber){
   const outstanding=Math.max(0,Number(d.outstanding_amount ?? (total-received)));
   el.hidden=false;
   if(d.status==='PAID'){
-    el.innerHTML=`<div class="mpesa-card-state ok"> M-PESA PAYMENT COMPLETE</div><strong>${money(received)}</strong><small>${esc(receiptNumber)} · Fully paid</small>`;
+    const over=Number(d.overpayment_amount||0);
+    el.innerHTML=`<div class="mpesa-card-state ok"> M-PESA PAYMENT COMPLETE</div><strong>${money(received)}</strong><small>${esc(receiptNumber)} · Fully paid${over>0?` · Overpayment ${money(over)}`:''}</small>`;
   } else if(received>0){
     el.innerHTML=`<div class="mpesa-card-state partial">◔ PART PAYMENT RECEIVED</div><strong>${money(received)} / ${money(total)}</strong><small>${esc(receiptNumber)} · Remaining ${money(outstanding)} · Ask customer to pay the balance</small>`;
   } else {

@@ -322,7 +322,22 @@ def _intent_status_for_entity(entity, gateway_method):
 
 
 def _normalise_person_name(value):
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    """Normalize customer names while discarding provider labels added by SMS gateways.
+
+    Safaricom/Till notifications can expose the payer as e.g.
+    ``AIRTEL MONEY - JEAN PROMISE`` even though the money arrived on the
+    merchant's Safaricom line. The provider label is transport metadata, not
+    the customer's name, so it must never cause a valid name comparison to fail.
+    """
+    text = str(value or "").strip().lower()
+    # Only strip a provider label when it is a leading SMS-style prefix.
+    text = re.sub(
+        r"^(?:airtel\s+money|airtel|m[-\s]?pesa|safaricom)\s*(?:[-:|]+\s*)+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def _name_similarity(a, b):
@@ -388,7 +403,15 @@ def _gateway_intent_entity(intent):
 
 
 def _gateway_candidate_score(event, intent):
-    """Return a confidence score or None. Never auto-match an ambiguous candidate."""
+    """Return a confidence score or None. Never auto-match an ambiguous candidate.
+
+    Matching priority:
+    1. An explicitly entered M-PESA transaction code must match exactly.
+    2. Online orders can match by strong payer identity (normalized name and/or phone).
+    3. Counter/POS sales can match by the currently open sale amount when there is
+       no customer identity available. Ambiguous same-amount POS sales are handled
+       later by the candidate tie-breaker and remain unmatched.
+    """
     if not _gateway_intent_open(intent):
         return None
     entity = _gateway_intent_entity(intent)
@@ -401,56 +424,94 @@ def _gateway_candidate_score(event, intent):
     if amount <= 0:
         return None
     outstanding = order_outstanding(entity) if isinstance(entity, Order) else sale_outstanding(entity)
-    if outstanding <= 0 or amount > outstanding:
+    if outstanding <= 0:
         return None
 
-    score = 40
-    if amount == outstanding:
-        score += 25
-
-    incoming_phone = normalize_ke_phone(event.customer_phone)
-    expected_phone = normalize_ke_phone(intent.phone_number)
-    if expected_phone:
-        if incoming_phone:
-            if not _phone_match(incoming_phone, expected_phone):
-                return None
-            # Full MSISDN is stronger than a masked suffix.
-            score += 60 if normalize_ke_phone(incoming_phone) else 45
-        else:
-            # A missing phone can still be verified by a strong customer name on an online order,
-            # but a POS sale has no customer record to use as a fallback.
-            if isinstance(entity, Sale):
-                return None
-            customer = db.session.get(Customer, entity.customer_id) if getattr(entity, "customer_id", None) else None
-            if not customer or _name_similarity(event.customer, customer.name) < 0.85:
-                return None
-            score += 20
-    elif incoming_phone:
-        score += 35
-    else:
-        customer = db.session.get(Customer, entity.customer_id) if getattr(entity, "customer_id", None) else None
-        if not customer or _name_similarity(event.customer, customer.name) < 0.85:
+    # POS payments are expected to happen immediately at the counter. Do not let an
+    # old abandoned POS intent capture an unrelated payment many hours later.
+    if isinstance(entity, Sale):
+        created_at = getattr(intent, "created_at", None)
+        if created_at and created_at < now() - timedelta(hours=2):
             return None
-        score += 25
-
-    if isinstance(entity, Order) and entity.customer_id and event.customer:
-        customer = db.session.get(Customer, entity.customer_id)
-        if customer:
-            similarity = _name_similarity(event.customer, customer.name)
-            if similarity >= 0.95:
-                score += 15
-            elif similarity >= 0.75:
-                score += 8
-            elif incoming_phone and expected_phone and incoming_phone == expected_phone:
-                # SMS names can be truncated/abbreviated. Exact phone+amount remains authoritative.
-                score += 0
-            else:
-                return None
 
     reference = (event.transaction_id or "").strip().upper()
     expected_reference = (intent.external_reference or "").strip().upper()
-    if reference and expected_reference and reference == expected_reference:
-        score += 100
+    if expected_reference and reference == expected_reference:
+        # A transaction code supplied by the customer is the strongest identity
+        # signal. The amount may be partial, exact, or greater than the outstanding
+        # balance; settlement will accumulate the payment and complete when covered.
+        score = 400
+        if amount == outstanding:
+            score += 40
+        elif amount > outstanding:
+            score += 30
+        else:
+            score += 20
+        return score
+    if expected_reference and isinstance(entity, Sale):
+        # POS has no customer identity requirement. If a code was manually supplied
+        # for a POS intent but the incoming transaction carries a different code, do
+        # not fall back to amount-only matching; otherwise an unrelated transfer could
+        # close the wrong till sale. Online orders may still fall back to name/phone.
+        return None
+
+    # Base amount evidence. Exact amount outranks a partial payment, and an
+    # overpayment still remains valid so the sale can complete and show the excess.
+    score = 40
+    if amount == outstanding:
+        score += 35
+    elif amount > outstanding:
+        score += 30
+    else:
+        score += 15
+
+    incoming_phone = str(event.customer_phone or "").strip()
+    expected_phone = normalize_ke_phone(intent.phone_number)
+    phone_matches = bool(incoming_phone and expected_phone and _phone_match(incoming_phone, expected_phone))
+    phone_mismatch = bool(incoming_phone and expected_phone and not phone_matches)
+
+    if isinstance(entity, Sale):
+        # A cashier sale does not need the payer's name or phone. If one is present,
+        # matching phone/name only boosts confidence; amount remains the core signal.
+        if phone_matches:
+            score += 70
+        elif phone_mismatch:
+            score -= 10
+        if event.customer:
+            # There is no customer_id on Sale, but a payer name still provides a small
+            # evidence boost when the POS flow happened to capture one.
+            normalized = _normalise_person_name(event.customer)
+            if normalized:
+                score += 5
+        return score
+
+    # Online order: name is intentionally sufficient; phone is optional but useful.
+    customer = db.session.get(Customer, entity.customer_id) if getattr(entity, "customer_id", None) else None
+    if not customer:
+        # An online order without a linked customer cannot be matched by identity.
+        return None
+
+    name_similarity = _name_similarity(event.customer, customer.name) if event.customer else 0.0
+    if name_similarity >= 0.95:
+        score += 45
+    elif name_similarity >= 0.85:
+        score += 30
+    elif name_similarity >= 0.75:
+        score += 18
+    elif phone_matches:
+        # A strong phone match can rescue a truncated/missing payer name.
+        score += 10
+    else:
+        return None
+
+    if phone_matches:
+        score += 65
+    elif phone_mismatch:
+        # A mismatched phone is evidence against the match, but it does not override
+        # an exact normalized customer name because some provider SMS formats mask or
+        # transform the displayed number. An explicit transaction code above remains
+        # the authoritative path when the customer enters one.
+        score -= 10
 
     return score
 
@@ -492,7 +553,7 @@ def _settle_gateway_intent(intent, event):
     if intent.order_id:
         order = db.session.get(Order, intent.order_id)
         outstanding = order_outstanding(order) if order else Decimal("0")
-        if not order or outstanding < amount:
+        if not order or outstanding <= 0:
             return False, None
         if amount == outstanding:
             from services.payments.settlement import _reserved_order_stock_ok
@@ -515,7 +576,7 @@ def _settle_gateway_intent(intent, event):
     if intent.sale_id:
         sale = db.session.get(Sale, intent.sale_id)
         outstanding = sale_outstanding(sale) if sale else Decimal("0")
-        if not sale or outstanding < amount:
+        if not sale or outstanding <= 0:
             return False, None
         if amount == outstanding:
             from services.payments.settlement import _reserved_sale_stock_ok
@@ -765,17 +826,17 @@ def till_payment_submit():
     order_id = data.get("order_id")
     reference = re.sub(r"[^A-Za-z0-9]", "", str(data.get("mpesa_reference") or "").strip()).upper()
     phone = normalize_ke_phone(data.get("phone_number"))
-    if not order_id or not phone:
-        return jsonify(error="order_and_valid_phone_required"), 400
+    if not order_id:
+        return jsonify(error="order_required"), 400
     if reference and (len(reference) < 6 or len(reference) > 20):
         return jsonify(error="invalid_mpesa_reference"), 400
     order = db.session.get(Order, order_id)
     if not order:
         return jsonify(error="order_not_found"), 404
-    if order.customer_id:
-        customer = db.session.get(Customer, order.customer_id)
-        if customer and normalize_ke_phone(customer.phone) and normalize_ke_phone(customer.phone) != phone:
-            return jsonify(error="phone_does_not_match_order"), 403
+    # Phone is useful evidence when available, but it is not required. Some payer
+    # receipts expose a name only, and a transaction code is independently sufficient.
+    # A phone mismatch therefore lowers matching confidence rather than blocking the
+    # submission outright.
     if order.payment_status == "PAID":
         return jsonify(error="already_paid"), 409
     till_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="mpesa_till_number").first()
@@ -829,8 +890,6 @@ def payment_gateway_await():
     phone = normalize_ke_phone(data.get("phone_number"))
     if not sale_id:
         return jsonify(error="sale_required"), 400
-    if not phone:
-        return jsonify(error="valid_phone_required"), 400
     sale = db.session.get(Sale, sale_id)
     if not sale or sale.business_id != current_user.business_id or sale.store_id != current_user.store_id:
         return jsonify(error="sale_not_found"), 404
@@ -870,6 +929,23 @@ def payment_status(payment_id):
     payment = db.session.get(Payment, payment_id)
     if not payment:
         return jsonify(error="payment_not_found"), 404
+
+    # Self-heal payments whose M-PESA SMS arrived before the payment intent was
+    # created, or while the old matcher could not identify the payer. Polling the
+    # known payment now re-runs the same server-side reconciliation against recent
+    # UNMATCHED gateway events; no second SMS is required.
+    gateway_methods = {
+        "MPESA_TILL_INTENT", "MPESA_TILL", "MPESA_TILL_MANUAL",
+        "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY",
+    }
+    if payment.method in gateway_methods and payment.status in {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"}:
+        try:
+            reconcile_gateway_intent(payment)
+            db.session.expire(payment)
+            payment = db.session.get(Payment, payment_id)
+        except Exception:
+            db.session.rollback()
+
     data = {"ok": True, "payment_id": payment.id, "status": payment.status, "amount": str(payment.amount),
             "receipt": payment.provider_transaction_id, "message": payment.failure_message}
     if payment.order_id:
@@ -877,9 +953,11 @@ def payment_status(payment_id):
         received = order_received_total(order) if order else Decimal("0")
         total = Decimal(str(order.total or 0)) if order else Decimal("0")
         outstanding = max(Decimal("0"), total - received)
+        overpayment = max(Decimal("0"), received - total)
         data.update({"order_status": order.status if order else None, "payment_status": order.payment_status if order else None,
                      "fulfillment_status": order.fulfillment_status if order else None, "required_amount": str(total),
-                     "received_amount": str(received), "outstanding_amount": str(outstanding)})
+                     "received_amount": str(received), "outstanding_amount": str(outstanding),
+                     "overpayment_amount": str(overpayment)})
         if order and received >= total > 0:
             data["status"] = "PAID"
         elif received > 0:
@@ -889,8 +967,10 @@ def payment_status(payment_id):
         received = sale_received_total(sale) if sale else Decimal("0")
         total = Decimal(str(sale.total or 0)) if sale else Decimal("0")
         outstanding = max(Decimal("0"), total - received)
+        overpayment = max(Decimal("0"), received - total)
         data.update({"payment_status": sale.payment_status if sale else None, "required_amount": str(total),
-                     "received_amount": str(received), "outstanding_amount": str(outstanding)})
+                     "received_amount": str(received), "outstanding_amount": str(outstanding),
+                     "overpayment_amount": str(overpayment)})
         if sale and received >= total > 0:
             data["status"] = "PAID"
         elif received > 0:
