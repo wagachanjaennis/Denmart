@@ -31,7 +31,7 @@
     </section>
 
     <section class="control-panel">
-      <div class="panel-title"><div><span class="eyebrow">SIM ROUTING</span><h2>Keep every line in its own mart</h2><p class="muted">SIM 1 and SIM 2 are identified by the Android phone. Leave a SIM unassigned when it is not a Real Mart payment line.</p></div></div>
+      <div class="panel-title"><div><span class="eyebrow">SIM ROUTING</span><h2>Keep every line in its own mart</h2><p class="muted">SIM 1 and SIM 2 are identified by the Android phone. Leave a SIM unassigned when it is not a Denmart payment line.</p></div></div>
       <form method="post" action="/control/payment-gateway/routing" class="gateway-routing-grid">
         <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
         <label><strong>SIM 1</strong><span>Android slot 0</span><select class="admin-input wide" name="sim_0_store_id"><option value="">Not assigned</option>{% for s in stores %}<option value="{{s.id}}" {% if routes[0]==s.id %}selected{% endif %}>{{s.name}} · {{s.code}}</option>{% endfor %}</select></label>

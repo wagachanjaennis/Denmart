@@ -54,13 +54,13 @@ Product photos now use a strict hierarchy: an administrator can upload an exact 
 
 The public shop exposes a compact QR code for the `/shop` URL with Save/Share controls. Database recovery includes complete JSON and portable SQLite snapshots; restore creates the current schema before replacing it, including on an empty fresh deployment.
 
-## Real Mart M-PESA phone gateway
+## Denmart M-PESA phone gateway
 
 The web application now includes a protected live payment monitor at `/control/payment-gateway`.
 
 1. Open **Control → Payment monitor**.
 2. Copy the generated HTTPS gateway URL.
-3. Paste that single URL into the native Real Mart Android gateway app.
+3. Paste that single URL into the native Denmart Android gateway app.
 4. Assign **SIM 1** and **SIM 2** to the correct mart/branch.
 5. Incoming M-PESA SMS messages are stored, displayed live, deduplicated, and can auto-match pending online Till payments and recent POS gateway payments.
 
@@ -68,7 +68,7 @@ The receiving API is:
 
 `POST /api/payment-gateway/sms?key=<business-gateway-key>`
 
-The Android gateway supplies the SIM slot, device ID, transaction ID, amount, customer text, and raw message. Unambiguous payment matches are settled automatically; ambiguous messages stay `UNMATCHED`.
+The Android gateway supplies only a sanitized payment summary: SIM slot, device ID, transaction ID, exact paid amount, payer name/phone when available, and the active POS payment context. Raw M-PESA SMS bodies are never uploaded by the Denmart Android gateway. Unambiguous exact-context payments are settled automatically; ambiguous messages stay `UNMATCHED`.
 
 SQLite backups use a real attachment response with `as_attachment=True` and are available from **Control → Backups**.
 
@@ -76,7 +76,7 @@ SQLite backups use a real attachment response with `as_attachment=True` and are 
 
 Backup guarantees
 ------------------
-- JSON restore accepts Real Mart JSON backups by content, including UTF-8 BOM files and normal browser MIME variations.
+- JSON restore accepts Denmart JSON backups by content, including UTF-8 BOM files and normal browser MIME variations.
 - SQLite export streams every table in bounded batches, writes a manifest, verifies row counts, runs SQLite integrity and foreign-key checks, then streams the verified file to the browser.
 - SQLite restore validates integrity and requires every current application table before replacing the live database.
 - Uploaded product images stored inside database records are included automatically in both database backup formats. External image URLs remain URLs.
