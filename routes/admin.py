@@ -600,13 +600,16 @@ def orders():
 @admin_required("payments.view")
 def approve_order_payment(order_id):
     order = db.session.get(Order, order_id)
-    payment = (Payment.query.filter(Payment.order_id == order_id, Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL"]))
+    payment = (Payment.query.filter(
+                   Payment.order_id == order_id,
+                   Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"]),
+                   Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
                .order_by(Payment.created_at.desc()).first())
     if not order or order.business_id != current_user.business_id or not payment:
         flash("Order or pending Till payment was not found.", "error")
         return redirect(url_for("admin.orders"))
-    if payment.status != "PENDING_APPROVAL":
-        flash("That payment is no longer awaiting approval.", "error")
+    if payment.status == "PAID":
+        flash("That payment is already approved.", "success")
         return redirect(url_for("admin.orders"))
     reference = re.sub(r"[^A-Za-z0-9]", "", str(request.form.get("reference") or "").strip()).upper()
     if reference:
@@ -626,11 +629,11 @@ def approve_order_payment(order_id):
     except Exception:
         db.session.rollback()
 
-    if not _settle_order_payment(order, payment):
-        db.session.rollback()
-        flash("Payment could not be approved. The matching M-PESA event or transaction code was not verified, or stock is no longer reserved.", "error")
-        return redirect(url_for("admin.orders"))
-    db.session.commit()
+    # Normal approval is intentionally evidence-based: a reference typed by an admin is
+    # not enough on its own. The M-PESA listener must have delivered a matching receipt.
+    db.session.rollback()
+    flash("Payment is still awaiting a verified M-PESA confirmation from the Denmart listener. No manual override was applied.", "error")
+    return redirect(url_for("admin.orders"))
     audit("ORDER_PAYMENT_APPROVED", "Order", order.id, new_values={"payment_id": payment.id, "reference": payment.provider_transaction_id})
     flash(f"{order.order_number} payment approved.", "success")
     return redirect(url_for("admin.orders"))
@@ -640,13 +643,16 @@ def approve_order_payment(order_id):
 @admin_required("payments.view")
 def reject_order_payment(order_id):
     order = db.session.get(Order, order_id)
-    payment = (Payment.query.filter(Payment.order_id == order_id, Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL"]))
+    payment = (Payment.query.filter(
+                   Payment.order_id == order_id,
+                   Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"]),
+                   Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
                .order_by(Payment.created_at.desc()).first())
     if not order or order.business_id != current_user.business_id or not payment:
         flash("Order or pending Till payment was not found.", "error")
         return redirect(url_for("admin.orders"))
-    if payment.status != "PENDING_APPROVAL":
-        flash("That payment is no longer awaiting approval.", "error")
+    if payment.status == "PAID":
+        flash("That payment is already approved.", "success")
         return redirect(url_for("admin.orders"))
     reason = request.form.get("reason", "Payment reference could not be verified.").strip()[:500]
     payment.status = "FAILED"

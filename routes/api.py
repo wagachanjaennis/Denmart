@@ -244,13 +244,18 @@ def _gateway_business_for_secret(secret):
 
 
 def _gateway_is_payment_message(sender, message):
-    text = f"{sender} {message}".lower()
-    if not re.search(r"mpesa|m-pesa|safaricom", text):
+    raw_sender = str(sender or "").strip().upper().replace(" ", "")
+    text = str(message or "")
+    upper = text.upper()
+    # Only Safaricom/MPESA receipt senders can feed the Denmart M-PESA matcher.
+    # Airtel and other mobile-money messages are ignored even if their text mentions M-PESA.
+    if raw_sender not in {"MPESA", "M-PESA", "SAFARICOM"}:
         return False
-    # Never forward merchant balance/statement/airtime-only messages as receipts.
-    if re.search(r"balance|available balance|mini[- ]?statement|statement|airtime|bundle|data balance|new balance", text):
+    if not re.search(r"\b(?:received|paid)\b", upper) or not re.search(r"\bconfirmed\b", upper):
         return False
-    return bool(re.search(r"received|paid|payment|confirmed|transaction", text))
+    if re.search(r"mini[- ]?statement|statement|airtime|data bundle|bundle|withdraw|sent to|paid to", upper):
+        return False
+    return _gateway_parse_amount(text) is not None and _gateway_parse_transaction(text) is not None
 
 
 def _gateway_parse_amount(message):
@@ -288,7 +293,9 @@ def _gateway_parse_customer(message):
         str(message or ""),
         re.IGNORECASE,
     )
-    return match.group(1).strip(" .,-")[:240] if match else ""
+    value = match.group(1).strip(" .,-") if match else ""
+    value = re.sub(r"\s+(?:\+?254|0)(?:7|1)[xX*]{2,7}\d{3,4}$", "", value, flags=re.IGNORECASE).strip()
+    return value[:240]
 
 
 def _gateway_parse_phone(message):
@@ -332,6 +339,22 @@ def _name_similarity(a, b):
     if a in b or b in a:
         return max(overlap, 0.80)
     return overlap
+
+
+def _phone_match(incoming, expected):
+    incoming = str(incoming or "").strip()
+    expected = normalize_ke_phone(expected)
+    if not incoming or not expected:
+        return False
+    full = normalize_ke_phone(incoming)
+    if full:
+        return full == expected
+    # Compare only the digits visible in a masked Safaricom merchant SMS.
+    m = re.search(r"(?:254|0)(?:7|1)[xX*]+([0-9]{3,4})$", incoming)
+    if not m:
+        return False
+    visible = m.group(1)
+    return expected.endswith(visible)
 
 
 def _event_name_matches_order(event, order):
@@ -389,9 +412,10 @@ def _gateway_candidate_score(event, intent):
     expected_phone = normalize_ke_phone(intent.phone_number)
     if expected_phone:
         if incoming_phone:
-            if incoming_phone != expected_phone:
+            if not _phone_match(incoming_phone, expected_phone):
                 return None
-            score += 50
+            # Full MSISDN is stronger than a masked suffix.
+            score += 60 if normalize_ke_phone(incoming_phone) else 45
         else:
             # A missing phone can still be verified by a strong customer name on an online order,
             # but a POS sale has no customer record to use as a fallback.
@@ -586,6 +610,7 @@ def payment_gateway_ping():
 
 @csrf.exempt
 @bp.post("/payment-gateway/sms")
+@bp.post("/mpesa-listener/event")
 def payment_gateway_sms():
     supplied_key = (request.args.get("key") or request.headers.get("X-Denmart-Gateway-Key") or request.headers.get("X-RealMart-Gateway-Key") or "").strip()
     secret = _gateway_secret()
