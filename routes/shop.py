@@ -384,7 +384,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v21-checkout-gateway";
+    js = '''const CACHE_VERSION = "denmart-public-v21-checkout-fix";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
@@ -411,12 +411,13 @@ self.addEventListener("fetch", event => {
     return;
   }
   if (request.destination === "style" || request.destination === "script") {
-    // Network-first keeps critical checkout/payment JavaScript fresh after deployment;
-    // the cached copy remains an offline fallback.
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok) caches.open(STATIC_CACHE).then(c => c.put(request, response.clone()));
-      return response;
-    }).catch(() => caches.match(request)));
+    event.respondWith(caches.match(request).then(cached => {
+      const update = fetch(request).then(response => {
+        if (response.ok) caches.open(STATIC_CACHE).then(c => c.put(request, response.clone()));
+        return response;
+      }).catch(() => cached);
+      return cached || update;
+    }));
     return;
   }
   if (request.mode === "navigate") {

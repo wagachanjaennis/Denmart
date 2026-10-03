@@ -94,7 +94,7 @@
       }
 
       const orderPayload={
-        store_code,
+        store_code: storeCode,
         items:c.map(x=>({store_product_id:x.id,quantity:x.qty})),
         customer:{name,phone,email},
         delivery_address:deliveryAddress,
@@ -140,25 +140,11 @@
       }
     }catch(e){
       setBusy(false,'Place order & continue to payment');
-      reportClientError(e.message||'Checkout failed','','','', 'CHECKOUT_REQUEST_FAILED');
       toast(e.message||'Checkout failed. Your basket has been kept so you can retry.');
     }
   };
 
-  const checkoutForm=document.getElementById('checkoutForm');
-  const placeOrderButton=document.getElementById('placeOrderButton');
-  if(checkoutForm){
-    checkoutForm.addEventListener('submit',event=>{
-      event.preventDefault();
-      if(placeOrderButton?.disabled)return;
-      window.placeOrder();
-    });
-  }else{
-    placeOrderButton?.addEventListener('click',event=>{
-      event.preventDefault();
-      window.placeOrder();
-    });
-  }
+  document.getElementById('placeOrderButton')?.addEventListener('click',window.placeOrder);
 
   const tillFields=document.getElementById('tillFields');
   if(tillFields){
