@@ -493,29 +493,11 @@ def payment_gateway_monitor():
                 store_name = e.store.name
         except Exception:
             pass
-        channel = "UNMATCHED"
-        order_number = None
-        receipt_number = None
-        try:
-            paid = e.matched_payment
-            if paid and paid.order_id:
-                order = db.session.get(Order, paid.order_id)
-                if order:
-                    channel = "ONLINE"
-                    order_number = order.order_number
-            elif paid and paid.sale_id:
-                sale = db.session.get(Sale, paid.sale_id)
-                if sale:
-                    channel = "POS"
-                    receipt_number = sale.receipt_number
-        except Exception:
-            pass
         payload_events.append({
             "id": e.id, "time": received_at, "sim": sim, "store": store_name,
             "amount": money(e.amount), "customer": e.customer or "M-PESA customer",
-            "phone": e.customer_phone or "—",
+            "customer_phone": e.customer_phone or "",
             "transaction": e.transaction_id or "—", "status": e.status or "UNMATCHED",
-            "channel": channel, "order_number": order_number, "receipt_number": receipt_number,
         })
 
     return jsonify(
@@ -663,6 +645,28 @@ def payments():
     status_filter = (request.args.get("status") or "").strip().upper()
     source_filter = (request.args.get("source") or "").strip().upper()
     allowed_status = {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID", "PAID", "FAILED", "CLOSED_MANUAL"}
+
+    # Re-run the same matcher against recent unmatched receipts so this screen is not
+    # merely a log. A receipt that arrived just before an order/payment intent exists
+    # gets another chance immediately when the administrator opens Payments.
+    try:
+        from routes.api import _match_gateway_event
+        recent_unmatched = (PaymentGatewayEvent.query
+                             .filter_by(business_id=business_id, status="UNMATCHED")
+                             .order_by(PaymentGatewayEvent.received_at.desc()).limit(120).all())
+        changed = False
+        for event in recent_unmatched:
+            matched, actual = _match_gateway_event(event)
+            if matched and actual:
+                event.status = "MATCHED"
+                event.matched_payment_id = actual.id
+                event.store_id = actual.store_id
+                changed = True
+        if changed:
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
+
     base = Payment.query.filter(Payment.business_id == business_id)
     filtered = base
     if status_filter in allowed_status:
@@ -671,26 +675,151 @@ def payments():
         filtered = filtered.filter(Payment.order_id.isnot(None))
     elif source_filter == "POS":
         filtered = filtered.filter(Payment.sale_id.isnot(None))
-    rows = filtered.order_by(Payment.created_at.desc()).limit(150).all()
+
+    raw_rows = filtered.order_by(Payment.created_at.desc()).limit(220).all()
+    # When a gateway intent is successfully settled, settlement creates the actual PAID
+    # ledger entry. Showing both makes the admin think there were two payments.
+    rows = [p for p in raw_rows if not (p.status == "PAID" and p.method in {
+        "MPESA_TILL_INTENT", "MPESA_GATEWAY_INTENT", "MPESA_TILL_MANUAL"
+    })]
+
     store_rows = Store.query.filter_by(business_id=business_id).order_by(Store.name).all()
     stores = {store.id: store for store in store_rows}
     order_ids = [p.order_id for p in rows if p.order_id]
     sale_ids = [p.sale_id for p in rows if p.sale_id]
     orders_by_id = {o.id:o for o in Order.query.filter(Order.business_id == business_id, Order.id.in_(order_ids)).all()} if order_ids else {}
     sales_by_id = {s.id:s for s in Sale.query.filter(Sale.business_id == business_id, Sale.id.in_(sale_ids)).all()} if sale_ids else {}
-    destinations = PaymentDestination.query.filter_by(business_id=business_id).order_by(PaymentDestination.is_default.desc(), PaymentDestination.is_active.desc(), PaymentDestination.created_at.desc()).all()
-    unmatched_events = (PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED")
-                        .order_by(PaymentGatewayEvent.received_at.desc()).limit(40).all())
+
+    events = (PaymentGatewayEvent.query
+              .filter(PaymentGatewayEvent.business_id == business_id,
+                      PaymentGatewayEvent.received_at >= now() - timedelta(hours=12))
+              .order_by(PaymentGatewayEvent.received_at.desc()).limit(500).all())
+
+    def norm_phone(value):
+        digits = re.sub(r"\D", "", str(value or ""))
+        if digits.startswith("254") and len(digits) == 12:
+            return digits
+        if digits.startswith("0") and len(digits) == 10:
+            return "254" + digits[1:]
+        if digits.startswith("7") and len(digits) == 9:
+            return "254" + digits
+        return ""
+
+    def norm_name(value):
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    def name_score(a, b):
+        a, b = norm_name(a), norm_name(b)
+        if not a or not b:
+            return 0
+        if a == b:
+            return 100
+        ta, tb = set(a.split()), set(b.split())
+        return int(round(100 * len(ta & tb) / max(len(ta), len(tb)))) if ta and tb else 0
+
+    def expected_details(payment, order, sale):
+        if order:
+            customer = db.session.get(Customer, order.customer_id) if order.customer_id else None
+            return {
+                "channel": "ONLINE",
+                "reference": order.order_number,
+                "name": customer.name if customer else "Online customer",
+                "phone": norm_phone((customer.phone if customer else "") or payment.phone_number),
+                "amount": Decimal(str(payment.amount or 0)),
+                "time": payment.created_at,
+            }
+        if sale:
+            return {
+                "channel": "POS",
+                "reference": sale.receipt_number or sale.id,
+                "name": "POS customer",
+                "phone": norm_phone(payment.phone_number),
+                "amount": Decimal(str(payment.amount or 0)),
+                "time": payment.created_at,
+            }
+        return {
+            "channel": "OTHER", "reference": str(payment.id)[:10], "name": "—",
+            "phone": norm_phone(payment.phone_number), "amount": Decimal(str(payment.amount or 0)), "time": payment.created_at,
+        }
+
+    def best_event(payment, expected):
+        # The admin comparison screen must use the exact same authoritative matcher as
+        # the telemetry endpoint; it must never show a looser "valid" result than the
+        # server would actually auto-approve.
+        from routes.api import _gateway_candidate_score
+        direct = next((e for e in events if e.matched_payment_id == payment.id and e.status == "MATCHED"), None)
+        if direct:
+            return direct, _gateway_candidate_score(direct, payment) or 1000
+
+        best = None
+        for event in events:
+            if event.status != "UNMATCHED":
+                continue
+            try:
+                score = _gateway_candidate_score(event, payment)
+            except Exception:
+                score = None
+            if score is None:
+                continue
+            if best is None or score > best[1]:
+                best = (event, score)
+            elif score == best[1]:
+                # Equal evidence is intentionally ambiguous.
+                best = (None, score)
+        return best if best else (None, 0)
+
+
+    reconciliation_rows = []
+    for payment in rows:
+        order = orders_by_id.get(payment.order_id) if payment.order_id else None
+        sale = sales_by_id.get(payment.sale_id) if payment.sale_id else None
+        expected = expected_details(payment, order, sale)
+        event, score = best_event(payment, expected)
+        receipt = None
+        result = "WAITING"
+        comparison = {"name": None, "phone": None, "amount": False, "time_minutes": None}
+        if event:
+            receipt = {
+                "name": event.customer or "M-PESA customer",
+                "phone": norm_phone(event.customer_phone),
+                "amount": Decimal(str(event.amount or 0)),
+                "time": event.received_at,
+                "code": event.transaction_id or "—",
+            }
+            comparison["name"] = name_score(expected["name"], receipt["name"]) if expected["channel"] == "ONLINE" else None
+            comparison["phone"] = bool(expected["phone"] and receipt["phone"] and norm_phone(expected["phone"]) == receipt["phone"]) if expected["phone"] else None
+            comparison["amount"] = receipt["amount"] == expected["amount"]
+            if expected["time"] and receipt["time"]:
+                try:
+                    comparison["time_minutes"] = int(round(abs((receipt["time"] - expected["time"]).total_seconds()) / 60.0))
+                except Exception:
+                    comparison["time_minutes"] = None
+            result = "VALID" if event.status == "MATCHED" or payment.status == "PAID" else "CHECK"
+        elif payment.status == "PAID":
+            result = "VALID"
+        reconciliation_rows.append({"payment": payment, "order": order, "sale": sale,
+                                    "expected": expected, "receipt": receipt, "comparison": comparison, "result": result})
+
     pending_filter = base.filter(Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
     pending_count = pending_filter.count()
     pending_amount = pending_filter.with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
     online_pending = pending_filter.filter(Payment.order_id.isnot(None)).count()
     pos_pending = pending_filter.filter(Payment.sale_id.isnot(None)).count()
     paid_today = base.filter(Payment.status == "PAID", db.func.date(Payment.created_at) == db.func.current_date()).with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
-    return render_template("admin/payments.html", payments=rows, stores=stores, orders=orders_by_id, sales=sales_by_id,
-                           destinations=destinations, unmatched_events=unmatched_events, pending_count=pending_count,
-                           pending_amount=pending_amount, online_pending=online_pending, pos_pending=pos_pending,
-                           paid_today=paid_today, status_filter=status_filter, source_filter=source_filter)
+    auto_today = PaymentGatewayEvent.query.filter(
+        PaymentGatewayEvent.business_id == business_id,
+        PaymentGatewayEvent.status == "MATCHED",
+        db.func.date(PaymentGatewayEvent.received_at) == db.func.current_date()
+    ).count()
+    unmatched_count = PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED").count()
+
+    return render_template("admin/payments.html",
+                           reconciliation_rows=reconciliation_rows, stores=stores,
+                           pending_count=pending_count, pending_amount=pending_amount,
+                           online_pending=online_pending, pos_pending=pos_pending,
+                           paid_today=paid_today, auto_today=auto_today,
+                           unmatched_count=unmatched_count,
+                           status_filter=status_filter, source_filter=source_filter)
 
 
 @bp.post(f"{ADMIN_BASE}/payments/<payment_id>/approve-manual")

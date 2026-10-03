@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 import secrets
+import json
 from flask import Blueprint, jsonify, render_template, request, redirect
 from flask_login import current_user, login_required
 from extensions import csrf, db
@@ -121,6 +122,7 @@ def _record_sale(data, allow_offline=False):
     receipt_number = client_ref or f"DM-{now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
     paid_now = payment_method in {"CASH", "CARD"}
     mpesa_phone = ""
+    mpesa_customer_name = str(data.get("customer_name") or "").strip()[:240]
     if payment_method == "MPESA":
         raw_phone = str(data.get("phone_number") or "").strip()
         digits = "".join(ch for ch in raw_phone if ch.isdigit())
@@ -161,6 +163,7 @@ def _record_sale(data, allow_offline=False):
             business_id=current_user.business_id, store_id=current_user.store_id, sale_id=sale.id,
             provider="SAFARICOM", method="MPESA_GATEWAY_INTENT", amount=subtotal, currency="KES",
             status="PENDING", phone_number=mpesa_phone,
+            raw_provider_reference=json.dumps({"source": "pos_waiting", "customer_name": mpesa_customer_name}) if mpesa_customer_name else None,
         )
         db.session.add(gateway_payment)
 

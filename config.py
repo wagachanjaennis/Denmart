@@ -42,4 +42,4 @@ class Config:
     DARAJA_CALLBACK_URL = os.getenv("DARAJA_CALLBACK_URL", "")
     PAYMENT_CREDENTIAL_ENCRYPTION_KEY = os.getenv("PAYMENT_CREDENTIAL_ENCRYPTION_KEY", "")
     # Fixed merchant destination for the current deployment. Keep this server-side; never bake it into the Android APK.
-    DENMART_MERCHANT_TILL = "0757817361"
+    DENMART_MERCHANT_TILL = "302145"
