@@ -20,7 +20,7 @@
       const r=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),credentials:'same-origin'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Order could not be placed');
       if(paymentMethod==='till'){
         const approvalMode='AUTO';
-        const p=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:document.getElementById('mpesaReference')?.value.trim()||'',approval_mode:approvalMode}),credentials:'same-origin'});
+        const p=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:document.getElementById('mpesaReference')?.value.trim()||'',approval_mode:approvalMode,payment_destination_id:window.DENMART_PAYMENT_DESTINATION_ID||''}),credentials:'same-origin'});
         const pd=await p.json();
         save([]);
         if(!p.ok)throw new Error(pd.error||'Till payment could not be submitted');
@@ -31,7 +31,7 @@
       if(p.ok){save([]);location.href='/order/'+encodeURIComponent(d.order_number)+'?payment='+encodeURIComponent(pd.payment_id);return;}
       // Backup plan: when the API/STK route is unavailable, switch to automatic Till monitoring.
       if((p.status===503||p.status===502) && window.DENMART_TILL){
-        const g=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:'',approval_mode:'AUTO'}),credentials:'same-origin'});
+        const g=await fetch('/api/payments/till/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_id:d.order_id,phone_number:payload.customer.phone,mpesa_reference:'',approval_mode:'AUTO',payment_destination_id:window.DENMART_PAYMENT_DESTINATION_ID||''}),credentials:'same-origin'});
         const gd=await g.json();
         save([]);
         if(g.ok){location.href='/order/'+encodeURIComponent(d.order_number)+'?payment='+encodeURIComponent(gd.payment_id);return;}

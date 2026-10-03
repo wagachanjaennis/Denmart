@@ -8,7 +8,7 @@
 
   <main class="control-main gateway-page">
     <header class="control-header">
-      <div><span class="eyebrow">M-PESA PHONE LISTENER</span><h1>Payment monitor</h1><p>Live M-PESA confirmations arriving from the dedicated Denmart Android listener.</p></div>
+      <div><span class="eyebrow">M-PESA PHONE LISTENER</span><h1>Payment monitor</h1><p>Live incoming Safaricom/M-PESA receipts arriving from the dedicated Denmart Android listener. Airtel, sent-to, balance and utility messages are ignored.</p></div>
       <div class="gateway-live"><span class="gateway-dot" id="gatewayPulse"></span><strong id="gatewayLiveText">LIVE</strong><small id="gatewayLast">Waiting for the first message</small></div>
     </header>
 
@@ -31,7 +31,7 @@
     </section>
 
     <section class="control-panel">
-      <div class="panel-title"><div><span class="eyebrow">SIM ROUTING</span><h2>Keep every line in its own mart</h2><p class="muted">SIM 1 and SIM 2 are identified by the Android phone. Leave a SIM unassigned when it is not a Denmart payment line.</p></div></div>
+      <div class="panel-title"><div><span class="eyebrow">SIM ROUTING</span><h2>Keep every line in its own mart</h2><p class="muted">SIM 1 and SIM 2 are identified by the Android phone. Only incoming Safaricom/M-PESA receipts are eligible; leave a SIM unassigned when it is not a Denmart payment line.</p></div></div>
       <form method="post" action="/control/payment-gateway/routing" class="gateway-routing-grid">
         <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
         <label><strong>SIM 1</strong><span>Android slot 0</span><select class="admin-input wide" name="sim_0_store_id"><option value="">Not assigned</option>{% for s in stores %}<option value="{{s.id}}" {% if routes[0]==s.id %}selected{% endif %}>{{s.name}} · {{s.code}}</option>{% endfor %}</select></label>

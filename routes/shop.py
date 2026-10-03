@@ -7,7 +7,7 @@ from decimal import Decimal
 from PIL import Image, ImageDraw, ImageFont
 from flask import Blueprint, render_template, request, session, send_file, jsonify, Response, redirect, url_for, flash, current_app
 from extensions import db
-from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError
+from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError, PaymentDestination
 from services.search import forgiving_rank
 from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 
@@ -16,6 +16,17 @@ bp = Blueprint("shop", __name__)
 
 def active_stores():
     return Store.query.filter_by(is_active=True).order_by(Store.name).all()
+
+
+def active_payment_destination(business_id, store_id=None):
+    q = PaymentDestination.query.filter_by(business_id=business_id, is_active=True)
+    if store_id:
+        specific = (q.filter_by(store_id=store_id, is_default=True).first() or
+                    q.filter_by(store_id=store_id).order_by(PaymentDestination.created_at.desc()).first())
+        if specific:
+            return specific
+    return (q.filter_by(store_id=None, is_default=True).first() or
+            q.filter_by(store_id=None).order_by(PaymentDestination.created_at.desc()).first())
 
 
 def selected_store():
@@ -88,6 +99,46 @@ def shop():
     return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE", StoreProduct.store_id == store.id).count() if store else 0)
 
 
+@bp.get("/locations")
+def locations():
+    stores = active_stores()
+    return render_template("shop/locations.html", stores=stores, store=selected_store())
+
+
+@bp.get("/locations/<store_code>")
+def location_detail(store_code):
+    stores = active_stores()
+    store = next((item for item in stores if item.code.lower() == store_code.lower() or item.id == store_code), None)
+    if not store:
+        return ("", 404)
+    return render_template("shop/location_detail.html", store=store, stores=stores)
+
+
+@bp.get("/robots.txt")
+def robots_txt():
+    base = request.url_root.rstrip("/")
+    body = f"User-agent: *\nAllow: /\nDisallow: /control\nDisallow: /merchant\nDisallow: /api\nSitemap: {base}/sitemap.xml\n"
+    return Response(body, mimetype="text/plain", headers={"Cache-Control":"public, max-age=3600"})
+
+
+@bp.get("/sitemap.xml")
+def sitemap_xml():
+    base = request.url_root.rstrip("/")
+    stores = active_stores()
+    urls = [base + "/", base + "/shop", base + "/locations"]
+    urls.extend(f"{base}/locations/{store.code}" for store in stores)
+    products = (StoreProduct.query.join(Product)
+                .filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE")
+                .order_by(Product.updated_at.desc()).limit(1000).all())
+    urls.extend(f"{base}/product/{item.product.slug}" for item in products)
+    xml=['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for value in urls:
+        safe=value.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        xml.append(f"<url><loc>{safe}</loc></url>")
+    xml.append("</urlset>")
+    return Response("".join(xml), mimetype="application/xml", headers={"Cache-Control":"public, max-age=1800"})
+
+
 @bp.get("/product/<slug>")
 def product(slug):
     store = selected_store()
@@ -105,9 +156,12 @@ def cart():
 @bp.get("/checkout")
 def checkout():
     store = selected_store()
-    till_setting = SystemSetting.query.filter_by(business_id=store.business_id, key="mpesa_till_number").first() if store else None
-    till_number = str(till_setting.value or "").strip() if till_setting else ""
-    return render_template("shop/checkout.html", store=store, till_number=till_number)
+    destination = active_payment_destination(store.business_id, store.id) if store else None
+    legacy = SystemSetting.query.filter_by(business_id=store.business_id, key="mpesa_till_number").first() if store else None
+    legacy_till = str(legacy.value or "").strip() if legacy else ""
+    if not destination and legacy_till:
+        destination = type("LegacyDestination", (), {"id":"", "channel":"TILL", "number":legacy_till, "account_number":"", "label":"Denmart M-PESA Till", "instructions":"Use this Till after checking the amount shown above."})()
+    return render_template("shop/checkout.html", store=store, till_number=(destination.number if destination else ""), payment_destination=destination)
 
 
 @bp.get("/order/<order_number>")
@@ -116,8 +170,10 @@ def order_confirmation(order_number):
     order = Order.query.filter_by(order_number=order_number).first_or_404()
     items = OrderItem.query.filter_by(order_id=order.id).all()
     store = Store.query.get(order.store_id)
+    destination = active_payment_destination(order.business_id, order.store_id)
     till_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="mpesa_till_number").first()
-    till_number = str(till_setting.value or "").strip() if till_setting else ""
+    legacy_till = str(till_setting.value or "").strip() if till_setting else ""
+    till_number = (destination.number if destination and destination.channel in {"TILL", "PAYBILL"} else legacy_till)
     active_payment = (Payment.query.filter(
         Payment.order_id == order.id,
         Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
@@ -127,7 +183,7 @@ def order_confirmation(order_number):
     received_total = order_received_total(order)
     outstanding_total = order_outstanding(order)
     return render_template("shop/order_confirmation.html", order=order, items=items, store=store, till_number=till_number,
-                           active_payment=active_payment, received_total=received_total, outstanding_total=outstanding_total)
+                           payment_destination=destination, active_payment=active_payment, received_total=received_total, outstanding_total=outstanding_total)
 
 
 @bp.get("/delivery/<order_number>")
@@ -187,11 +243,15 @@ def mpesa_till_qr():
     store = selected_store()
     if not store:
         return ("", 404)
-    setting = SystemSetting.query.filter_by(business_id=store.business_id, key="mpesa_till_number").first()
-    till = str(setting.value or "").strip() if setting else ""
-    if not till:
+    destination = active_payment_destination(store.business_id, store.id)
+    if destination and destination.number:
+        qr_value = destination.number
+    else:
+        setting = SystemSetting.query.filter_by(business_id=store.business_id, key="mpesa_till_number").first()
+        qr_value = str(setting.value or "").strip() if setting else ""
+    if not qr_value:
         return ("", 404)
-    img = qrcode.make(till)
+    img = qrcode.make(qr_value)
     buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
     return send_file(buf, mimetype="image/png", max_age=3600)
 
@@ -322,7 +382,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v19-real-images";
+    js = '''const CACHE_VERSION = "denmart-public-v20-payment-location";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;

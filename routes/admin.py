@@ -18,7 +18,7 @@ from extensions import db
 from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryTransaction, User,
                     AuditLog, Sale, SaleItem, Order, Store, Business, Category, SystemError,
                     Payment, Expense, Role, PaymentIntegration, SystemSetting, Permission, Customer, ProductAlias, ProductImage, OrderItem,
-                    Supplier, PurchaseOrder, PurchaseOrderItem, PaymentGatewayEvent, LoyaltyAccount, LoyaltyTransaction, Shift, CashDrawerTransaction, now)
+                    Supplier, PurchaseOrder, PurchaseOrderItem, PaymentGatewayEvent, PaymentDestination, LoyaltyAccount, LoyaltyTransaction, Shift, CashDrawerTransaction, now)
 from services.audit import audit
 from services.crypto import encrypt, decrypt
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
@@ -570,6 +570,173 @@ def daily_report():
                            items=Decimal(str(items)) + Decimal(str(online_items)), report_date=now())
 
 
+def _ensure_entity_reservation(entity):
+    """Restore only missing reservations, and only when stock is still available."""
+    lines = OrderItem.query.filter_by(order_id=entity.id).all() if isinstance(entity, Order) else SaleItem.query.filter_by(sale_id=entity.id).all()
+    for line in lines:
+        sp = StoreProduct.query.filter_by(store_id=entity.store_id, product_id=line.product_id).first()
+        if not sp:
+            return False
+        needed = Decimal(str(line.quantity or 0))
+        reserved = Decimal(str(sp.reserved_quantity or 0))
+        stock = Decimal(str(sp.stock_quantity or 0))
+        missing = max(Decimal("0"), needed - reserved)
+        if stock - reserved < missing:
+            return False
+    for line in lines:
+        sp = StoreProduct.query.filter_by(store_id=entity.store_id, product_id=line.product_id).first()
+        needed = Decimal(str(line.quantity or 0))
+        reserved = Decimal(str(sp.reserved_quantity or 0))
+        missing = max(Decimal("0"), needed - reserved)
+        sp.reserved_quantity = reserved + missing
+    return True
+
+
+def _manual_approve_payment(payment, reason):
+    entity = db.session.get(Order, payment.order_id) if payment.order_id else db.session.get(Sale, payment.sale_id)
+    if not entity or entity.business_id != current_user.business_id:
+        return False, "The payment is not attached to this business."
+    if payment.status == "PAID":
+        return True, "Payment was already approved."
+
+    from services.payments.settlement import order_outstanding, sale_outstanding, settle_order_payment, settle_sale_payment
+    outstanding = order_outstanding(entity) if isinstance(entity, Order) else sale_outstanding(entity)
+    if outstanding <= 0:
+        payment.status = "CLOSED_MANUAL"
+        payment.failure_message = "Closed by administrator because the entity was already fully paid."
+        db.session.commit()
+        return True, "The transaction was already fully paid."
+    if not _ensure_entity_reservation(entity):
+        return False, "Stock is no longer available to safely approve this transaction manually."
+
+    reference = f"ADMIN-{now().strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(3).upper()}"
+    customer_phone = None
+    if isinstance(entity, Order) and entity.customer_id:
+        customer = db.session.get(Customer, entity.customer_id)
+        customer_phone = customer.phone if customer else None
+    manual = Payment(
+        business_id=entity.business_id, store_id=entity.store_id,
+        order_id=entity.id if isinstance(entity, Order) else None,
+        sale_id=entity.id if isinstance(entity, Sale) else None,
+        provider="ADMIN", method="MANUAL", amount=outstanding,
+        currency=current_app.config.get("CURRENCY", "KES"), status="PENDING",
+        external_reference=reference, provider_transaction_id=reference,
+        phone_number=customer_phone,
+        raw_provider_reference=json.dumps({"source":"admin_manual_approval", "reason":reason}),
+    )
+    db.session.add(manual); db.session.flush()
+    ok = settle_order_payment(entity, manual, current_user.id) if isinstance(entity, Order) else settle_sale_payment(entity, manual, current_user.id)
+    if not ok:
+        db.session.rollback()
+        return False, "The manual approval could not be completed safely."
+    payment.status = "CLOSED_MANUAL"
+    payment.failure_message = f"Closed after manual approval by administrator. {reason}"
+    audit("PAYMENT_MANUAL_APPROVED", "Order" if isinstance(entity, Order) else "Sale", entity.id,
+          new_values={"payment_id":manual.id, "reference":reference, "reason":reason, "source_payment_id":payment.id})
+    db.session.commit()
+    return True, f"Approved manually using {reference}."
+
+
+@bp.get(f"{ADMIN_BASE}/payments")
+@admin_required("payments.view")
+def payments():
+    business_id = current_user.business_id
+    status_filter = (request.args.get("status") or "").strip().upper()
+    source_filter = (request.args.get("source") or "").strip().upper()
+    allowed_status = {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID", "PAID", "FAILED", "CLOSED_MANUAL"}
+    base = Payment.query.filter(Payment.business_id == business_id)
+    filtered = base
+    if status_filter in allowed_status:
+        filtered = filtered.filter(Payment.status == status_filter)
+    if source_filter == "ONLINE":
+        filtered = filtered.filter(Payment.order_id.isnot(None))
+    elif source_filter == "POS":
+        filtered = filtered.filter(Payment.sale_id.isnot(None))
+    rows = filtered.order_by(Payment.created_at.desc()).limit(150).all()
+    store_rows = Store.query.filter_by(business_id=business_id).order_by(Store.name).all()
+    stores = {store.id: store for store in store_rows}
+    order_ids = [p.order_id for p in rows if p.order_id]
+    sale_ids = [p.sale_id for p in rows if p.sale_id]
+    orders_by_id = {o.id:o for o in Order.query.filter(Order.business_id == business_id, Order.id.in_(order_ids)).all()} if order_ids else {}
+    sales_by_id = {s.id:s for s in Sale.query.filter(Sale.business_id == business_id, Sale.id.in_(sale_ids)).all()} if sale_ids else {}
+    destinations = PaymentDestination.query.filter_by(business_id=business_id).order_by(PaymentDestination.is_default.desc(), PaymentDestination.is_active.desc(), PaymentDestination.created_at.desc()).all()
+    unmatched_events = (PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED")
+                        .order_by(PaymentGatewayEvent.received_at.desc()).limit(40).all())
+    pending_filter = base.filter(Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
+    pending_count = pending_filter.count()
+    pending_amount = pending_filter.with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
+    online_pending = pending_filter.filter(Payment.order_id.isnot(None)).count()
+    pos_pending = pending_filter.filter(Payment.sale_id.isnot(None)).count()
+    paid_today = base.filter(Payment.status == "PAID", db.func.date(Payment.created_at) == db.func.current_date()).with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
+    return render_template("admin/payments.html", payments=rows, stores=stores, orders=orders_by_id, sales=sales_by_id,
+                           destinations=destinations, unmatched_events=unmatched_events, pending_count=pending_count,
+                           pending_amount=pending_amount, online_pending=online_pending, pos_pending=pos_pending,
+                           paid_today=paid_today, status_filter=status_filter, source_filter=source_filter)
+
+
+@bp.post(f"{ADMIN_BASE}/payments/<payment_id>/approve-manual")
+@admin_required("payments.view")
+def approve_payment_manual(payment_id):
+    payment = db.session.get(Payment, payment_id)
+    if not payment or payment.business_id != current_user.business_id:
+        flash("Payment was not found.", "error")
+        return redirect(url_for("admin.payments"))
+    if payment.status not in {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"}:
+        flash("Only an open payment can be manually approved.", "error")
+        return redirect(url_for("admin.payments"))
+    reason = (request.form.get("reason") or "Automatic M-PESA matching did not complete; administrator verified the payment.").strip()[:500]
+    ok, msg = _manual_approve_payment(payment, reason)
+    flash(msg, "success" if ok else "error")
+    return redirect(url_for("admin.payments"))
+
+
+@bp.post(f"{ADMIN_BASE}/payments/destinations/create")
+@admin_required("payments.view")
+def create_payment_destination():
+    business_id = current_user.business_id
+    store_id = (request.form.get("store_id") or "").strip() or None
+    if store_id:
+        store = db.session.get(Store, store_id)
+        if not store or store.business_id != business_id:
+            flash("Choose a mart belonging to this business.", "error")
+            return redirect(url_for("admin.payments"))
+    label = (request.form.get("label") or "").strip()
+    channel = (request.form.get("channel") or "TILL").strip().upper()
+    number = re.sub(r"\D", "", request.form.get("number") or "")
+    account = (request.form.get("account_number") or "").strip() or None
+    instructions = (request.form.get("instructions") or "").strip() or None
+    if not label or channel not in {"TILL","PAYBILL"} or not number:
+        flash("Enter a label, payment channel and number.", "error")
+        return redirect(url_for("admin.payments"))
+    if channel == "PAYBILL" and not account:
+        flash("A PayBill destination needs an account/reference.", "error")
+        return redirect(url_for("admin.payments"))
+    is_default = request.form.get("is_default") == "1"
+    existing = PaymentDestination.query.filter_by(business_id=business_id, store_id=store_id).first()
+    if is_default or not existing:
+        PaymentDestination.query.filter_by(business_id=business_id, store_id=store_id, is_default=True).update({"is_default":False})
+        is_default = True
+    db.session.add(PaymentDestination(business_id=business_id, store_id=store_id, label=label[:120], channel=channel, number=number[:40], account_number=account[:80] if account else None, instructions=instructions[:500] if instructions else None, is_active=True, is_default=is_default))
+    db.session.commit()
+    audit("PAYMENT_DESTINATION_CREATED", "Business", business_id, new_values={"label":label, "channel":channel, "store_id":store_id})
+    flash(f"{label} added.", "success")
+    return redirect(url_for("admin.payments"))
+
+
+@bp.post(f"{ADMIN_BASE}/payments/destinations/<destination_id>/toggle")
+@admin_required("payments.view")
+def toggle_payment_destination(destination_id):
+    dest = db.session.get(PaymentDestination, destination_id)
+    if not dest or dest.business_id != current_user.business_id:
+        return "Not found", 404
+    dest.is_active = not dest.is_active
+    if not dest.is_active:
+        dest.is_default = False
+    db.session.commit()
+    flash(f"{dest.label} is now {'active' if dest.is_active else 'inactive'}.", "success")
+    return redirect(url_for("admin.payments"))
+
+
 @bp.get(f"{ADMIN_BASE}/orders")
 @admin_required("sales.view")
 def orders():
@@ -599,43 +766,17 @@ def orders():
 @bp.post(f"{ADMIN_BASE}/orders/<order_id>/payment/approve")
 @admin_required("payments.view")
 def approve_order_payment(order_id):
-    order = db.session.get(Order, order_id)
     payment = (Payment.query.filter(
-                   Payment.order_id == order_id,
-                   Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"]),
-                   Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
-               .order_by(Payment.created_at.desc()).first())
-    if not order or order.business_id != current_user.business_id or not payment:
-        flash("Order or pending Till payment was not found.", "error")
+        Payment.order_id == order_id, Payment.business_id == current_user.business_id,
+        Payment.method.in_(["MPESA_TILL", "MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"]),
+        Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"])
+    ).order_by(Payment.created_at.desc()).first())
+    if not payment:
+        flash("No open payment is waiting for this order.", "error")
         return redirect(url_for("admin.orders"))
-    if payment.status == "PAID":
-        flash("That payment is already approved.", "success")
-        return redirect(url_for("admin.orders"))
-    reference = re.sub(r"[^A-Za-z0-9]", "", str(request.form.get("reference") or "").strip()).upper()
-    if reference:
-        if len(reference) < 6 or len(reference) > 20:
-            flash("Enter a valid M-PESA transaction code (6–20 characters).", "error")
-            return redirect(url_for("admin.orders"))
-        payment.external_reference = reference
-
-    # First reuse the same automatic gateway matcher. This fixes legacy/manual
-    # approvals when the Android listener has already delivered the M-PESA event.
-    try:
-        from routes.api import reconcile_gateway_intent
-        matched, _actual = reconcile_gateway_intent(payment)
-        if matched:
-            flash(f"{order.order_number} payment approved automatically.", "success")
-            return redirect(url_for("admin.orders"))
-    except Exception:
-        db.session.rollback()
-
-    # Normal approval is intentionally evidence-based: a reference typed by an admin is
-    # not enough on its own. The M-PESA listener must have delivered a matching receipt.
-    db.session.rollback()
-    flash("Payment is still awaiting a verified M-PESA confirmation from the Denmart listener. No manual override was applied.", "error")
-    return redirect(url_for("admin.orders"))
-    audit("ORDER_PAYMENT_APPROVED", "Order", order.id, new_values={"payment_id": payment.id, "reference": payment.provider_transaction_id})
-    flash(f"{order.order_number} payment approved.", "success")
+    reason = (request.form.get("reason") or "Automatic M-PESA matching did not complete; administrator verified the payment.").strip()[:500]
+    ok, msg = _manual_approve_payment(payment, reason)
+    flash(msg, "success" if ok else "error")
     return redirect(url_for("admin.orders"))
 
 
@@ -1005,6 +1146,12 @@ def toggle_product_availability(store_product_id):
     audit("PRODUCT_VISIBILITY_CHANGED", "StoreProduct", item.id,
           new_values={"online": item.available_online, "pos": item.available_pos, "enabled": item.is_available})
     flash("Product availability updated.", "success")
+    return redirect(url_for("admin.products"))
+
+
+@bp.get(f"{ADMIN_BASE}/products/<store_product_id>/price")
+@admin_required("products.edit")
+def update_price_get(store_product_id):
     return redirect(url_for("admin.products"))
 
 
@@ -1436,12 +1583,23 @@ def stores():
         code = (request.form.get("code") or "").strip().upper()
         phone = (request.form.get("phone") or "").strip() or None
         address = (request.form.get("address") or "").strip() or None
+        def _store_num(v):
+            try:
+                return float(v) if str(v or "").strip() else None
+            except ValueError:
+                return None
+        latitude = _store_num(request.form.get("latitude"))
+        longitude = _store_num(request.form.get("longitude"))
+        if latitude is not None and not -90 <= latitude <= 90:
+            latitude = None
+        if longitude is not None and not -180 <= longitude <= 180:
+            longitude = None
         if not name or not code:
             flash("Mart name and code are required.", "error")
         elif Store.query.filter_by(business_id=business_id, code=code).first():
             flash("That mart code is already in use.", "error")
         else:
-            store = Store(business_id=business_id, name=name, code=code, phone=phone, address=address, is_active=True)
+            store = Store(business_id=business_id, name=name, code=code, phone=phone, address=address, latitude=latitude, longitude=longitude, is_active=True)
             db.session.add(store)
             db.session.commit()
             audit("MART_CREATED", "Store", store.id, new_values={"name": name, "code": code})

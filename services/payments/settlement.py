@@ -6,7 +6,7 @@ from services.loyalty import award_purchase_points
 
 
 COUNTED_PAYMENT_METHODS = {
-    "MPESA", "MPESA_TILL", "MPESA_GATEWAY", "CASH", "CARD", "BANK", "OTHER"
+    "MPESA", "MPESA_TILL", "MPESA_GATEWAY", "MANUAL", "CASH", "CARD", "BANK", "OTHER"
 }
 
 

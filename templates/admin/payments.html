@@ -1,0 +1,124 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="control-shell">
+  {% set admin_sidebar_class = 'control-sidebar' %}
+  {% include 'admin/_nav.html' %}
+  <main class="control-main">
+    <header class="control-header">
+      <div>
+        <span class="eyebrow">PAYMENT CONTROL CENTRE</span>
+        <h1>Payments</h1>
+        <p>One queue for online orders and physical-mart sales. Automatic Safaricom M-PESA matching runs first; manual approval is available when a verified payment needs intervention.</p>
+      </div>
+      <div class="control-user">{{current_user.username}}<small>Master administrator</small></div>
+    </header>
+
+    <section class="admin-stat-grid">
+      <div class="admin-stat"><small>OPEN PAYMENTS</small><strong>{{pending_count}}</strong><span class="muted">KES {{'%.2f'|format(pending_amount|float)}} awaiting completion</span></div>
+      <div class="admin-stat"><small>ONLINE WAITING</small><strong>{{online_pending}}</strong><span class="muted">Customer orders</span></div>
+      <div class="admin-stat"><small>POS WAITING</small><strong>{{pos_pending}}</strong><span class="muted">Physical mart sales</span></div>
+      <div class="admin-stat"><small>PAID TODAY</small><strong>KES {{'%.2f'|format(paid_today|float)}}</strong><span class="muted">All methods</span></div>
+      <div class="admin-stat"><small>UNMATCHED SMS</small><strong>{{unmatched_events|length}}</strong><span class="muted"><a href="/control/payment-gateway">Review listener feed</a></span></div>
+    </section>
+
+    <section class="admin-panel">
+      <div class="toolbar">
+        <div><strong>Payment queue</strong><div class="muted">Pending and historical records are scoped to this business. Use manual approval only after confirming the actual M-PESA receipt.</div></div>
+        <form method="get">
+          <select class="admin-input" name="source">
+            <option value="">Online + POS</option>
+            <option value="ONLINE" {% if source_filter=='ONLINE' %}selected{% endif %}>Online</option>
+            <option value="POS" {% if source_filter=='POS' %}selected{% endif %}>Physical mart / POS</option>
+          </select>
+          <select class="admin-input" name="status">
+            <option value="">All statuses</option>
+            {% for s in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID','PAID','FAILED','CLOSED_MANUAL'] %}<option value="{{s}}" {% if status_filter==s %}selected{% endif %}>{{s.replace('_',' ').title()}}</option>{% endfor %}
+          </select>
+          <button class="admin-action">Filter</button>
+        </form>
+      </div>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <tr><th>When</th><th>Source / mart</th><th>Customer / sale</th><th>Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>Action</th></tr>
+          {% for payment in payments %}
+          {% set order = orders.get(payment.order_id) if payment.order_id else None %}
+          {% set sale = sales.get(payment.sale_id) if payment.sale_id else None %}
+          {% set store = stores.get(payment.store_id) if payment.store_id else None %}
+          <tr>
+            <td><strong>{{payment.created_at.strftime('%d %b %H:%M') if payment.created_at else '—'}}</strong><br><small>{{payment.provider or '—'}}</small></td>
+            <td><strong>{% if order %}ONLINE ORDER{% elif sale %}PHYSICAL MART / POS{% else %}PAYMENT{% endif %}</strong><br><small>{{store.name if store else 'Business-wide'}}</small></td>
+            <td>{% if order %}{{order.order_number}}<br><small>Customer order</small>{% elif sale %}{{sale.receipt_number or sale.id}}<br><small>POS sale</small>{% else %}Unattached{% endif %}</td>
+            <td><strong>KES {{'%.2f'|format(payment.amount|float)}}</strong></td>
+            <td>{{payment.method.replace('_',' ').title()}}{% if payment.phone_number %}<br><small>{{payment.phone_number}}</small>{% endif %}</td>
+            <td><span class="admin-badge {% if payment.status=='FAILED' %}off{% elif payment.status=='PAID' %}gateway-ok{% elif payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] %}gateway-warn{% endif %}">{{payment.status.replace('_',' ').title()}}</span></td>
+            <td><code>{{payment.provider_transaction_id or payment.external_reference or '—'}}</code></td>
+            <td style="white-space:normal;min-width:220px">
+              {% if payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] and (order or sale) %}
+              <form method="post" action="/control/payments/{{payment.id}}/approve-manual" onsubmit="return confirm('Confirm that the money has actually been received before manually approving this payment. Continue?');">
+                <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+                <input type="hidden" name="reason" value="Administrator verified the incoming Safaricom M-PESA receipt after automatic matching did not complete.">
+                <button class="admin-action" type="submit">Approve manually</button>
+              </form>
+              {% else %}<span class="muted">No action</span>{% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="8">No payment records match this filter.</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-panel">
+      <div class="toolbar"><div><strong>M-PESA destinations</strong><div class="muted">Configure a separate Till or PayBill for each mart/business area. The checkout and POS gateway use these destinations automatically.</div></div></div>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <tr><th>Destination</th><th>Mart</th><th>Channel</th><th>Number</th><th>Account</th><th>State</th><th></th></tr>
+          {% for destination in destinations %}
+          <tr>
+            <td><strong>{{destination.label}}</strong><br><small>{% if destination.is_default %}Default{% else %}Additional{% endif %}</small></td>
+            <td>{{stores.get(destination.store_id).name if destination.store_id and stores.get(destination.store_id) else 'Business-wide'}}</td>
+            <td>{{destination.channel}}</td>
+            <td><strong>{{destination.number}}</strong></td>
+            <td>{{destination.account_number or '—'}}</td>
+            <td><span class="admin-badge">{{'Active' if destination.is_active else 'Inactive'}}</span></td>
+            <td><form method="post" action="/control/payments/destinations/{{destination.id}}/toggle"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button class="admin-action">{{'Disable' if destination.is_active else 'Enable'}}</button></form></td>
+          </tr>
+          {% else %}<tr><td colspan="7">No payment destinations configured yet. The legacy M-PESA Till will continue to work until you add one here.</td></tr>{% endfor %}
+        </table>
+      </div>
+      <form method="post" action="/control/payments/destinations/create" class="payment-destination-form">
+        <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+        <label><span>Label</span><input class="admin-input wide" name="label" placeholder="Main Mart Till" required></label>
+        <label><span>Mart</span><select class="admin-input wide" name="store_id"><option value="">Business-wide</option>{% for s in stores.values()|sort(attribute='name') %}<option value="{{s.id}}">{{s.name}} · {{s.code}}</option>{% endfor %}</select></label>
+        <label><span>Channel</span><select class="admin-input wide" name="channel" onchange="this.closest('form').querySelector('.paybill-account').hidden=this.value!=='PAYBILL'"><option value="TILL">M-PESA Till</option><option value="PAYBILL">M-PESA PayBill</option></select></label>
+        <label><span>Number</span><input class="admin-input wide" name="number" inputmode="numeric" placeholder="Till / PayBill number" required></label>
+        <label class="paybill-account"><span>Account / reference</span><input class="admin-input wide" name="account_number" placeholder="Required for PayBill"></label>
+        <label><span>Instructions</span><input class="admin-input wide" name="instructions" placeholder="Use the Till after checking the amount shown above."></label>
+        <label class="destination-check"><input type="checkbox" name="is_default" value="1" checked> Use as default for the selected mart</label>
+        <button class="admin-action" type="submit">Add destination</button>
+      </form>
+    </section>
+
+    <section class="admin-panel">
+      <div class="toolbar"><div><strong>Unmatched Safaricom receipts</strong><div class="muted">These are incoming M-PESA events that were accepted as receipts but could not be safely associated with an open payment intent.</div></div><a class="admin-action" href="/control/payment-gateway">Open monitor</a></div>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <tr><th>Received</th><th>Mart</th><th>Customer</th><th>Amount</th><th>Transaction</th><th>Reason</th></tr>
+          {% for event in unmatched_events %}
+          <tr><td>{{event.received_at.strftime('%d %b %H:%M') if event.received_at else '—'}}</td><td>{{stores.get(event.store_id).name if event.store_id and stores.get(event.store_id) else 'Unassigned'}}</td><td>{{event.customer or '—'}}<br><small>{{event.customer_phone or '—'}}</small></td><td>KES {{'%.2f'|format(event.amount|float) if event.amount is not none else '—'}}</td><td><code>{{event.transaction_id or '—'}}</code></td><td>{{event.status}}</td></tr>
+          {% else %}<tr><td colspan="6">Nothing is waiting for manual investigation.</td></tr>{% endfor %}
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+const channelSelect=document.querySelector('select[name="channel"]');
+const accountBox=document.querySelector('.paybill-account');
+function paintPaymentDestinationForm(){if(channelSelect&&accountBox)accountBox.hidden=channelSelect.value!=='PAYBILL';}
+channelSelect?.addEventListener('change',paintPaymentDestinationForm);paintPaymentDestinationForm();
+</script>{% endblock %}
