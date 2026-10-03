@@ -23,6 +23,7 @@ from services.audit import audit
 from services.crypto import encrypt, decrypt
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
 from services.search import forgiving_rank
+from config import DENMART_MERCHANT_TILL
 
 bp = Blueprint("admin", __name__)
 ADMIN_BASE = "/control"
@@ -408,7 +409,7 @@ def payment_gateway():
     ).count()
     return render_template(
         "admin/payment_gateway.html",
-        stores=stores, routes=routes, gateway_url=url,
+        stores=stores, routes=routes, gateway_url=url, merchant_till=DENMART_MERCHANT_TILL,
         events=events, received_total=received_total, received_count=received_count,
         matched_total=matched_total, matched_count=matched_count,
         unmatched_total=unmatched_total, unmatched_count=unmatched_count,
@@ -496,8 +497,8 @@ def payment_gateway_monitor():
         payload_events.append({
             "id": e.id, "time": received_at, "sim": sim, "store": store_name,
             "amount": money(e.amount), "customer": e.customer or "M-PESA customer",
-            "customer_phone": e.customer_phone or "—",
-            "transaction": e.transaction_id or "—", "status": e.status or "UNMATCHED",
+            "customer_phone": e.customer_phone or "—", "transaction": e.transaction_id or "—",
+            "status": e.status or "UNMATCHED", "merchant_till": DENMART_MERCHANT_TILL,
         })
 
     return jsonify(
@@ -509,7 +510,7 @@ def payment_gateway_monitor():
         unmatched_total=money(unmatched_q.with_entities(db.func.coalesce(db.func.sum(PaymentGatewayEvent.amount), 0)).scalar()),
         unmatched_count=unmatched_q.count(),
         last_received=(events[0].received_at.isoformat() if events and events[0].received_at else None),
-        stores=store_totals,
+        stores=store_totals, merchant_till=DENMART_MERCHANT_TILL,
         events=payload_events,
     )
 
@@ -663,19 +664,17 @@ def payments():
     customer_ids = [o.customer_id for o in orders_by_id.values() if o.customer_id]
     customers_by_id = {c.id:c for c in Customer.query.filter(Customer.business_id == business_id, Customer.id.in_(customer_ids)).all()} if customer_ids else {}
     destinations = PaymentDestination.query.filter_by(business_id=business_id).order_by(PaymentDestination.is_default.desc(), PaymentDestination.is_active.desc(), PaymentDestination.created_at.desc()).all()
-    gateway_events = (PaymentGatewayEvent.query.filter_by(business_id=business_id)
-                      .order_by(PaymentGatewayEvent.received_at.desc()).limit(500).all())
-    gateway_by_entity = {}
-    gateway_by_payment = {}
-    for event in gateway_events:
-        if event.matched_payment_id:
-            gateway_by_payment[event.matched_payment_id] = event
-            matched = event.matched_payment
-            if matched and matched.order_id:
-                gateway_by_entity[f"order:{matched.order_id}"] = event
-            elif matched and matched.sale_id:
-                gateway_by_entity[f"sale:{matched.sale_id}"] = event
-    unmatched_events = [e for e in gateway_events if e.status == "UNMATCHED"][:40]
+    payment_ids = [p.id for p in rows]
+    gateway_evidence = {}
+    if payment_ids:
+        linked_events = (PaymentGatewayEvent.query.filter(
+            PaymentGatewayEvent.business_id == business_id,
+            PaymentGatewayEvent.matched_payment_id.in_(payment_ids),
+        ).order_by(PaymentGatewayEvent.received_at.desc()).all())
+        for event in linked_events:
+            gateway_evidence.setdefault(event.matched_payment_id, event)
+    unmatched_events = (PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED")
+                        .order_by(PaymentGatewayEvent.received_at.desc()).limit(40).all())
     pending_filter = base.filter(Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
     pending_count = pending_filter.count()
     pending_amount = pending_filter.with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
@@ -683,10 +682,10 @@ def payments():
     pos_pending = pending_filter.filter(Payment.sale_id.isnot(None)).count()
     paid_today = base.filter(Payment.status == "PAID", db.func.date(Payment.created_at) == db.func.current_date()).with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
     return render_template("admin/payments.html", payments=rows, stores=stores, orders=orders_by_id, sales=sales_by_id, customers=customers_by_id,
-                           destinations=destinations, unmatched_events=unmatched_events, gateway_by_entity=gateway_by_entity,
-                           gateway_by_payment=gateway_by_payment, pending_count=pending_count, pending_amount=pending_amount,
-                           online_pending=online_pending, pos_pending=pos_pending, paid_today=paid_today,
-                           status_filter=status_filter, source_filter=source_filter)
+                           destinations=destinations, unmatched_events=unmatched_events, gateway_evidence=gateway_evidence,
+                           merchant_till=DENMART_MERCHANT_TILL, pending_count=pending_count,
+                           pending_amount=pending_amount, online_pending=online_pending, pos_pending=pos_pending,
+                           paid_today=paid_today, status_filter=status_filter, source_filter=source_filter)
 
 
 @bp.post(f"{ADMIN_BASE}/payments/<payment_id>/approve-manual")
@@ -718,6 +717,8 @@ def create_payment_destination():
     label = (request.form.get("label") or "").strip()
     channel = (request.form.get("channel") or "TILL").strip().upper()
     number = re.sub(r"\D", "", request.form.get("number") or "")
+    if channel == "TILL":
+        number = DENMART_MERCHANT_TILL
     account = (request.form.get("account_number") or "").strip() or None
     instructions = (request.form.get("instructions") or "").strip() or None
     if not label or channel not in {"TILL","PAYBILL"} or not number:
@@ -1841,7 +1842,7 @@ def settings():
     return render_template(
         "admin/settings.html", business=business,
         integration=integration,
-        till_number=current_app.config.get("MPESA_GATEWAY_TILL", "302145"),
+        till_number=DENMART_MERCHANT_TILL,
         transaction_type=get_setting("mpesa_transaction_type", "CustomerPayBillOnline"),
         callback_url=integration.callback_url if integration else "",
         loyalty_points_per_100=get_setting("loyalty_points_per_100", "1"),
@@ -1854,12 +1855,14 @@ def settings():
 @bp.post(f"{ADMIN_BASE}/settings/till")
 @admin_required()
 def save_till():
-    requested = (request.form.get("till_number") or "").strip()
-    fixed_till = str(current_app.config.get("MPESA_GATEWAY_TILL", "302145")).strip()
-    if requested and not requested.isdigit():
+    value = (request.form.get("till_number") or "").strip()
+    if value and not value.isdigit():
         flash("Till number must contain digits only.", "error")
         return redirect(url_for("admin.settings"))
-    value = fixed_till
+    if value and value != DENMART_MERCHANT_TILL:
+        flash(f"This Denmart gateway is server-locked to Till {DENMART_MERCHANT_TILL}; the saved Till was not changed.", "error")
+        return redirect(url_for("admin.settings"))
+    value = DENMART_MERCHANT_TILL
     row = SystemSetting.query.filter_by(business_id=current_user.business_id, key="mpesa_till_number").first()
     if not row:
         row = SystemSetting(business_id=current_user.business_id, key="mpesa_till_number")

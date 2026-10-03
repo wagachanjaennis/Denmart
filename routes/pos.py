@@ -1,6 +1,5 @@
 from decimal import Decimal, InvalidOperation
 import secrets
-import json
 from flask import Blueprint, jsonify, render_template, request, redirect
 from flask_login import current_user, login_required
 from extensions import csrf, db
@@ -122,8 +121,9 @@ def _record_sale(data, allow_offline=False):
     receipt_number = client_ref or f"DM-{now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
     paid_now = payment_method in {"CASH", "CARD"}
     mpesa_phone = ""
-    mpesa_name = str(data.get("payer_name") or "").strip()[:240]
     if payment_method == "MPESA":
+        # The payer is learned from the M-PESA receipt on the merchant phone.
+        # Do not force the cashier to invent/guess the payer number before money arrives.
         raw_phone = str(data.get("phone_number") or "").strip()
         digits = "".join(ch for ch in raw_phone if ch.isdigit())
         if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
@@ -132,8 +132,6 @@ def _record_sale(data, allow_offline=False):
             mpesa_phone = "254" + digits[1:]
         elif digits.startswith("7") and len(digits) == 9:
             mpesa_phone = "254" + digits
-        if not mpesa_phone:
-            return jsonify(error="valid_customer_phone_required"), 400
 
     sale = Sale(
         business_id=current_user.business_id,
@@ -163,7 +161,6 @@ def _record_sale(data, allow_offline=False):
             business_id=current_user.business_id, store_id=current_user.store_id, sale_id=sale.id,
             provider="SAFARICOM", method="MPESA_GATEWAY_INTENT", amount=subtotal, currency="KES",
             status="PENDING", phone_number=mpesa_phone,
-            raw_provider_reference=(json.dumps({"payer_name": mpesa_name}) if mpesa_name else None),
         )
         db.session.add(gateway_payment)
 
@@ -195,9 +192,16 @@ def _record_sale(data, allow_offline=False):
             db.session.rollback()
     audit("SALE_CREATED", "Sale", sale.id,
           new_values={"total": str(sale.total), "payment_method": payment_method, "offline": allow_offline})
-    return jsonify(ok=True, sale_id=sale.id, receipt_number=receipt_number,
-                   payment_id=gateway_payment.id if gateway_payment else None,
-                   payment_status=sale.payment_status, total=str(sale.total))
+    response = dict(ok=True, sale_id=sale.id, receipt_number=receipt_number,
+                    payment_id=gateway_payment.id if gateway_payment else None,
+                    payment_status=sale.payment_status, total=str(sale.total))
+    if gateway_payment:
+        try:
+            from routes.api import merchant_till_number
+            response["till_number"] = merchant_till_number(current_user.business_id, current_user.store_id)
+        except Exception:
+            pass
+    return jsonify(response)
 
 
 @csrf.exempt

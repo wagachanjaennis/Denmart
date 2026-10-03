@@ -4,6 +4,13 @@ from urllib.parse import urlparse, urlunparse
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# Merchant M-PESA destination for the current Denmart deployment.
+# This is intentionally server-side only; the Android listener never decides
+# which Till is being paid. Any phone number found in an M-PESA receipt is a payer.
+DENMART_MERCHANT_TILL = "302145"
+MPESA_ONLINE_MATCH_WINDOW_MINUTES = 120
+MPESA_POS_MATCH_WINDOW_MINUTES = 30
+
 
 def normalize_db_url(url: str | None) -> str:
     url = url or f"sqlite:///{BASE_DIR / 'instance' / 'real_mart.db'}"
@@ -41,5 +48,3 @@ class Config:
     DARAJA_PASSKEY = os.getenv("DARAJA_PASSKEY", "")
     DARAJA_CALLBACK_URL = os.getenv("DARAJA_CALLBACK_URL", "")
     PAYMENT_CREDENTIAL_ENCRYPTION_KEY = os.getenv("PAYMENT_CREDENTIAL_ENCRYPTION_KEY", "")
-    # Merchant Till used by the Android M-PESA listener for this deployment.
-    MPESA_GATEWAY_TILL = "302145"
