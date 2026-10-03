@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -158,7 +159,7 @@ def create_order():
     business=store.business
     import secrets
     order_number=f"DM-{now().strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
-    c=data.get("customer") or {}; raw_phone=(c.get("phone") or "").strip(); phone=normalize_ke_phone(raw_phone) or raw_phone; email=(c.get("email") or "").strip().lower(); name=(c.get("name") or "").strip()
+    c=data.get("customer") or {}; phone=(c.get("phone") or "").strip(); email=(c.get("email") or "").strip().lower(); name=(c.get("name") or "").strip()
     customer=None
     if phone or email:
         matches=[]
@@ -227,9 +228,11 @@ def configured_daraja(business_id, store_id=None):
                 extra = {}
         destination = active_payment_destination(business_id, store_id=store_id)
         transaction_type = extra.get("transaction_type", "CustomerPayBillOnline")
-        till_number = str(current_app.config.get("DENMART_MERCHANT_TILL") or "").strip()
-        destination_channel = "TILL" if till_number else (str(destination.channel or "").upper() if destination else "")
+        till_setting = SystemSetting.query.filter_by(business_id=business_id, key="mpesa_till_number").first()
+        legacy_till = str(till_setting.value or "").strip() if till_setting else ""
         destination_number = str(destination.number or "").strip() if destination else ""
+        destination_channel = str(destination.channel or "").upper() if destination else ""
+        till_number = destination_number if destination_channel == "TILL" else legacy_till
         if destination_channel == "PAYBILL":
             transaction_type = "CustomerPayBillOnline"
             effective_shortcode = destination_number or shortcode
@@ -267,38 +270,45 @@ def _gateway_business_for_secret(secret):
 
 
 def _gateway_is_payment_message(sender, message, payload=None):
-    """Accept only inbound Safaricom/M-PESA receipts.
+    """Accept incoming Safaricom/M-PESA receipts.
 
-    The Android listener already validates the real SMS and sends explicit payment
-    facts (amount + transaction code + payer). Its UI summary does not necessarily
-    preserve Safaricom's original sentence order, so the server must not reject a
-    valid event merely because the compact message summary lacks the word FROM/BY.
+    The current Android gateway sends the complete SMS. Older gateway builds sent a
+    parsed summary such as "Jane received KSh 100. transaction ABC123 confirmed."
+    Accept that legacy shape only when the signed gateway request also supplies a
+    plausible amount + transaction identity + payer identity; the request is still
+    server-authenticated by the private gateway key.
     """
-    payload = payload or {}
     raw_sender = re.sub(r"\s+", "", str(sender or "").upper())
     text = str(message or "")
     upper = text.upper()
+    payload = payload if isinstance(payload, dict) else {}
     if "AIRTEL" in raw_sender or "AIRTEL MONEY" in upper:
         return False
     if not (raw_sender in {"MPESA", "M-PESA", "SAFARICOM"} or "MPESA" in raw_sender):
         return False
-    if re.search(r"MINI[- ]?STATEMENT|STATEMENT|AIRTIME|DATA BUNDLE|\bBUNDLE\b|WITHDRAW|SENT TO|PAID TO", upper) and "RECEIVED" not in upper:
+    if re.search(r"MINI[- ]?STATEMENT|STATEMENT|AIRTIME|DATA BUNDLE|\bBUNDLE\b|WITHDRAW|SENT TO|PAID TO", upper):
         return False
-
-    # Trust the gateway app's already-parsed facts after the gateway secret is
-    # authenticated. This is the path used by the Denmart Android listener.
-    source = str(payload.get("source") or "").lower()
-    supplied_tx = str(payload.get("transaction_id") or "").strip()
-    try:
-        supplied_amount = Decimal(str(payload.get("amount"))) if payload.get("amount") not in (None, "") else None
-    except InvalidOperation:
-        supplied_amount = None
-    if source.startswith("android_sms") and supplied_tx and supplied_amount is not None and supplied_amount > 0:
+    received = re.search(r"\bRECEIVED\b(?:\s+(?:(?:A|AN)\s+)?(?:(?:KSH|KSHS|KES)\s*)?[0-9]|\s+(?:FROM|BY)\b)", upper)
+    from_phrase = re.search(r"\bRECEIVED\b[^.]{0,160}\b(?:FROM|BY)\b", upper)
+    if received and from_phrase and _gateway_parse_amount(text) is not None and _gateway_parse_transaction(text) is not None:
         return True
 
-    received = re.search(r"\bRECEIVED\b", upper)
-    from_phrase = re.search(r"\bRECEIVED\b[^.]{0,180}\b(?:FROM|BY)\b", upper)
-    return bool(received and from_phrase and _gateway_parse_amount(text) is not None and _gateway_parse_transaction(text) is not None)
+    # Backwards-compatible acceptance for the previously shipped Android APK.
+    # Its summary is insufficient by itself, so all three identity/value hints must be present.
+    try:
+        hint_amount = Decimal(str(payload.get("amount"))).quantize(Decimal("0.01")) if payload.get("amount") not in (None, "") else Decimal("0")
+    except (InvalidOperation, ValueError):
+        hint_amount = Decimal("0")
+    hint_tx = str(payload.get("transaction_id") or "").strip().upper()
+    hint_customer = str(payload.get("customer") or "").strip()
+    hint_phone = normalize_ke_phone(payload.get("customer_phone"))
+    legacy_shape = (
+        hint_amount > 0 and
+        bool(re.fullmatch(r"[A-Z0-9]{8,20}", hint_tx)) and
+        bool(hint_customer or hint_phone) and
+        ("RECEIVED" in upper or "CONFIRMED" in upper)
+    )
+    return legacy_shape
 
 
 def _gateway_parse_amount(message):
@@ -543,16 +553,11 @@ def _gateway_candidate_score(event, intent):
 
     # Online order: name is intentionally sufficient; phone is optional but useful.
     customer = db.session.get(Customer, entity.customer_id) if getattr(entity, "customer_id", None) else None
-    expected_name = customer.name if customer else ""
-    expected_phone = expected_phone or normalize_ke_phone(getattr(customer, "phone", ""))
-
-    # A valid online intent must have at least one durable customer identity. A name
-    # is enough; phone is a strong additional signal. This also handles legacy orders
-    # where the customer row was not linked but the payment intent retained the phone.
-    if not expected_name and not expected_phone:
+    if not customer:
+        # An online order without a linked customer cannot be matched by identity.
         return None
 
-    name_similarity = _name_similarity(event.customer, expected_name) if event.customer and expected_name else 0.0
+    name_similarity = _name_similarity(event.customer, customer.name) if event.customer else 0.0
     if name_similarity >= 0.95:
         score += 45
     elif name_similarity >= 0.85:
@@ -743,35 +748,25 @@ def payment_gateway_sms():
     business_setting = _gateway_business_for_secret(supplied_key)
     if not business_setting:
         return jsonify(error="gateway_not_authorized"), 401
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+        raw_body = request.get_data(cache=True, as_text=True).strip()
+        if raw_body and not request.is_json:
+            payload["raw_message"] = raw_body
+
     event_id = (request.headers.get("X-Denmart-Event-Id") or request.headers.get("X-RealMart-Event-Id") or payload.get("event_id") or "").strip()
     device_id = (request.headers.get("X-Denmart-Gateway-Id") or request.headers.get("X-RealMart-Gateway-Id") or payload.get("gateway_device_id") or "").strip()[:120]
-    message = str(payload.get("message") or "").strip()
+    message = str(payload.get("raw_message") or payload.get("message") or "").strip()
     sender = str(payload.get("sender") or "").strip()[:120]
     source = str(payload.get("source") or "android_sms").strip()[:40]
     if not event_id or not device_id or not message:
-        return jsonify(error="event_id_device_id_message_required"), 400
-
-    # Parse the explicit facts before validation because the Android listener sends a
-    # compact summary in `message` and carries the actual payment code separately.
-    amount = None
-    try:
-        raw_amount = payload.get("amount")
-        if raw_amount not in (None, ""):
-            amount = Decimal(str(raw_amount).replace(",", ""))
-    except InvalidOperation:
-        amount = None
-    if amount is None:
-        amount = _gateway_parse_amount(message)
-
-    transaction_id = str(payload.get("transaction_id") or "").strip().upper()[:160] or _gateway_parse_transaction(message)
-    if not transaction_id:
-        transaction_id = f"EVENT-{event_id}"[:160]
-
+        current_app.logger.warning("DENMART_GATEWAY_REJECTED missing_fields event=%s device=%s message=%s", event_id[:80], device_id[:80], bool(message))
+        return jsonify(ok=False, accepted=False, error="event_id_device_id_message_required"), 400
+    current_app.logger.info("DENMART_GATEWAY_RECEIVED event=%s device=%s bytes=%d sender=%s", event_id[:80], device_id[:80], len(message.encode("utf-8")), sender[:40])
     if not _gateway_is_payment_message(sender, message, payload):
-        return jsonify(ok=True, ignored=True, reason="not_a_payment_notification"), 200
-    if amount is None or amount <= 0:
-        return jsonify(ok=True, ignored=True, reason="payment_amount_missing"), 200
+        current_app.logger.info("DENMART_GATEWAY_IGNORED event=%s reason=not_a_payment_notification", event_id[:80])
+        return jsonify(ok=True, accepted=True, stored=False, ignored=True, reason="not_a_payment_notification"), 200
     business_setting = _gateway_business_for_secret(supplied_key)
     if not business_setting:
         return jsonify(error="gateway_not_authorized"), 401
@@ -781,12 +776,24 @@ def payment_gateway_sms():
     except (TypeError, ValueError):
         sim_slot = 0
     sim_slot = 0 if sim_slot < 0 else min(sim_slot, 1)
+    amount = None
+    try:
+        raw_amount = payload.get("amount")
+        if raw_amount not in (None, ""):
+            amount = Decimal(str(raw_amount).replace(",", ""))
+    except InvalidOperation:
+        amount = None
+    parsed_amount = _gateway_parse_amount(message)
+    if parsed_amount is not None:
+        amount = parsed_amount
+    transaction_id = (_gateway_parse_transaction(message) or str(payload.get("transaction_id") or "").strip().upper()[:160])
+    if not transaction_id:
+        transaction_id = f"EVENT-{event_id}"[:160]
     existing = PaymentGatewayEvent.query.filter_by(business_id=business_id, gateway_device_id=device_id, transaction_id=transaction_id).first()
     if existing:
-        return jsonify(ok=True, duplicate=True, event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED"), 200
-    customer = str(payload.get("customer") or "").strip()[:240] or _gateway_parse_customer(message)
-    customer_phone = normalize_ke_phone(payload.get("customer_phone")) or _gateway_parse_phone(str(payload.get("receipt") or message))
-    raw_receipt = str(payload.get("receipt") or payload.get("raw_message") or message).strip()[:12000]
+        return jsonify(ok=True, accepted=True, stored=True, duplicate=True, event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED"), 200
+    customer = _gateway_parse_customer(message) or str(payload.get("customer") or "").strip()[:240]
+    customer_phone = _gateway_parse_phone(message) or normalize_ke_phone(payload.get("customer_phone"))
     try:
         received_at = datetime.fromtimestamp(int(payload.get("received_at")) / 1000, tz=timezone.utc) if payload.get("received_at") else now()
     except Exception:
@@ -795,11 +802,19 @@ def payment_gateway_sms():
     event = PaymentGatewayEvent(
         business_id=business_id, store_id=store.id if store else None, gateway_device_id=device_id,
         sim_slot=sim_slot, subscription_id=int(payload.get("subscription_id")) if str(payload.get("subscription_id") or "").isdigit() else None,
-        source=source or "android_sms", sender=sender, message=raw_receipt, received_at=received_at,
+        source=source or "android_sms", sender=sender, message=message, received_at=received_at,
         transaction_id=transaction_id, amount=amount or Decimal("0"), customer=customer, customer_phone=customer_phone,
-        status="UNMATCHED", raw_payload=payload,
+        status="UNMATCHED", raw_payload={**payload, "raw_message": message, "server_received_at": now().isoformat(), "server_parsed": True},
     )
-    db.session.add(event); db.session.flush()
+    try:
+        db.session.add(event); db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        existing = PaymentGatewayEvent.query.filter_by(business_id=business_id, gateway_device_id=device_id, transaction_id=transaction_id).first()
+        if existing:
+            return jsonify(ok=True, accepted=True, stored=True, duplicate=True, event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED"), 200
+        current_app.logger.exception("DENMART_GATEWAY_DB_REJECTED event=%s", event_id[:80])
+        return jsonify(ok=False, accepted=False, error="gateway_event_storage_failed"), 503
 
     context_payment_id = str(payload.get("payment_id") or "").strip()
     matched = False; actual = None
@@ -816,7 +831,8 @@ def payment_gateway_sms():
     if matched and actual:
         event.store_id = actual.store_id
     db.session.commit()
-    return jsonify(ok=True, event_id=event.id, matched=matched, transaction_id=transaction_id,
+    current_app.logger.info("DENMART_GATEWAY_STORED event=%s status=%s matched=%s tx=%s amount=%s", event.id, event.status, matched, transaction_id[:80], str(amount or 0))
+    return jsonify(ok=True, accepted=True, stored=True, event_id=event.id, matched=matched, transaction_id=transaction_id,
                    amount=str(amount or 0), store_id=event.store_id, status=event.status,
                    payment_id=actual.id if actual else None), 200
 
@@ -913,8 +929,13 @@ def till_payment_submit():
     # submission outright.
     if order.payment_status == "PAID":
         return jsonify(error="already_paid"), 409
-    # The receiving Till is a server concern, never an APK value or a customer-supplied value.
-    till_number = str(current_app.config.get("DENMART_MERCHANT_TILL") or "").strip()
+    destination_id = str(data.get("payment_destination_id") or "").strip()
+    destination = db.session.get(PaymentDestination, destination_id) if destination_id else active_payment_destination(order.business_id, order.store_id)
+    if destination and (destination.business_id != order.business_id or (destination.store_id not in (None, order.store_id)) or not destination.is_active):
+        return jsonify(error="invalid_payment_destination"), 400
+    till_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="mpesa_till_number").first()
+    legacy_till = str(till_setting.value or "").strip() if till_setting else ""
+    till_number = str(destination.number or "").strip() if destination and destination.channel in {"TILL", "PAYBILL"} else legacy_till
     if not till_number:
         return jsonify(error="mpesa_till_not_configured"), 503
 
