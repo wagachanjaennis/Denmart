@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 import json
 import re
+from zoneinfo import ZoneInfo
 from flask import Blueprint, current_app, jsonify, request, session
 from flask_login import current_user, login_required
 from extensions import csrf, db
@@ -328,14 +329,64 @@ def _gateway_parse_transaction(message):
 
 def _gateway_parse_customer(message):
     text = re.sub(r"\s+", " ", str(message or "")).strip()
+
+    # Common Safaricom form: "received ... from JOHN DOE 2547..."
     match = re.search(
         r"\b(?:received|credited)\s+(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|at\s+\d)|\s+(?:\+?254|0)(?:7|1)\d{8}\b|\s*$)",
         text,
         re.IGNORECASE,
     )
     value = match.group(1).strip(" .,-") if match else ""
-    value = re.sub(r"\s+(?:\+?254|0)(?:7|1)\d{8}.*$", "", value, flags=re.IGNORECASE).strip()
+
+    # Some merchant notices put the payer phone before the payer name:
+    # "received ... from 0712345678 - JANE DOE on ..."
+    if not value:
+        match = re.search(
+            r"\b(?:received|credited)\b.+?\b(?:from|by)\s+(?:\+?254|0)(?:7|1)\d{8}\s*[-:|,]?\s*(.+?)(?=\s+on\b|\s+at\s+\d|\s*$)",
+            text,
+            re.IGNORECASE,
+        )
+        value = match.group(1).strip(" .,-") if match else ""
+
+    # Generic fallback: take the payer segment and remove a phone/date fragment.
+    if not value:
+        match = re.search(r"\b(?:received|credited)\b.+?\b(?:from|by)\s+(.+)$", text, re.IGNORECASE)
+        if match:
+            value = match.group(1)
+            value = re.split(r"\s+on\s+\d|\s+at\s+\d", value, maxsplit=1, flags=re.IGNORECASE)[0]
+
+    value = re.sub(r"(?:\+?254|0)(?:7|1)\d{8}", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value).strip(" .,-")
     return value[:240]
+
+
+def _gateway_parse_receipt_time(message):
+    """Extract the Kenyan M-PESA transaction time from a receipt when present."""
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    patterns = [
+        r"\bon\s+(\d{1,2})/(\d{1,2})/(\d{2,4})(?:\s+at)?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\b",
+        r"\bon\s+(\d{1,2})-(\d{1,2})-(\d{2,4})(?:\s+at)?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            hour, minute = int(m.group(4)), int(m.group(5))
+            second = int(m.group(6) or 0)
+            meridiem = (m.group(7) or "").upper()
+            if year < 100:
+                year += 2000
+            if meridiem == "PM" and hour < 12:
+                hour += 12
+            elif meridiem == "AM" and hour == 12:
+                hour = 0
+            local_dt = datetime(year, month, day, hour, minute, second, tzinfo=ZoneInfo("Africa/Nairobi"))
+            return local_dt.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _gateway_parse_phone(message):
@@ -396,9 +447,15 @@ def _name_similarity(a, b):
     ta, tb = set(a.split()), set(b.split())
     if not ta or not tb:
         return 0.0
-    overlap = len(ta & tb) / max(len(ta), len(tb))
+    shared = ta & tb
+    # Real M-PESA names can contain an extra middle name or provider-added text.
+    # Requiring the shorter name's tokens to be contained is still strict while
+    # avoiding false negatives such as "JEAN GIFT" vs "JEAN GIFT TOROR".
+    if ta.issubset(tb) or tb.issubset(ta):
+        return 0.95
+    overlap = len(shared) / max(len(ta), len(tb))
     if a in b or b in a:
-        return max(overlap, 0.80)
+        return max(overlap, 0.82)
     return overlap
 
 
@@ -793,9 +850,13 @@ def payment_gateway_sms():
     customer_phone = _gateway_parse_phone(raw_message)
     raw_receipt = raw_message[:12000]
     try:
-        received_at = datetime.fromtimestamp(int(payload.get("received_at")) / 1000, tz=timezone.utc) if payload.get("received_at") else now()
+        telemetry_received_at = (
+            datetime.fromtimestamp(int(payload.get("received_at")) / 1000, tz=timezone.utc)
+            if payload.get("received_at") else now()
+        )
     except Exception:
-        received_at = now()
+        telemetry_received_at = now()
+    received_at = _gateway_parse_receipt_time(raw_receipt) or telemetry_received_at
     store = _gateway_store(business_id, sim_slot)
     event = PaymentGatewayEvent(
         business_id=business_id, store_id=store.id if store else None, gateway_device_id=device_id,
@@ -808,6 +869,7 @@ def payment_gateway_sms():
             "parsed_amount": str(amount or 0),
             "parsed_customer": customer,
             "parsed_customer_phone": customer_phone,
+            "telemetry_received_at": telemetry_received_at.isoformat(),
         }},
     )
     db.session.add(event); db.session.flush()

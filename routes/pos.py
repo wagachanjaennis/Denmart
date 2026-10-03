@@ -122,7 +122,7 @@ def _record_sale(data, allow_offline=False):
     receipt_number = client_ref or f"DM-{now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
     paid_now = payment_method in {"CASH", "CARD"}
     mpesa_phone = ""
-    mpesa_customer_name = str(data.get("customer_name") or "").strip()[:240]
+    mpesa_customer_name = str(data.get("customer_name") or data.get("payer_name") or "").strip()[:240]
     if payment_method == "MPESA":
         raw_phone = str(data.get("phone_number") or "").strip()
         digits = "".join(ch for ch in raw_phone if ch.isdigit())

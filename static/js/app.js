@@ -140,11 +140,25 @@
       }
     }catch(e){
       setBusy(false,'Place order & continue to payment');
+      reportClientError(e.message||'Checkout failed','','','', 'CHECKOUT_REQUEST_FAILED');
       toast(e.message||'Checkout failed. Your basket has been kept so you can retry.');
     }
   };
 
-  document.getElementById('placeOrderButton')?.addEventListener('click',window.placeOrder);
+  const checkoutForm=document.getElementById('checkoutForm');
+  const placeOrderButton=document.getElementById('placeOrderButton');
+  if(checkoutForm){
+    checkoutForm.addEventListener('submit',event=>{
+      event.preventDefault();
+      if(placeOrderButton?.disabled)return;
+      window.placeOrder();
+    });
+  }else{
+    placeOrderButton?.addEventListener('click',event=>{
+      event.preventDefault();
+      window.placeOrder();
+    });
+  }
 
   const tillFields=document.getElementById('tillFields');
   if(tillFields){
