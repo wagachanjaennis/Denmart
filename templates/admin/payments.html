@@ -41,19 +41,20 @@
       </div>
       <div class="table-wrap">
         <table class="admin-table">
-          <tr><th>When</th><th>Source / mart</th><th>Customer / sale</th><th>Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>Action</th></tr>
+          <tr><th>Payment time</th><th>Source / mart</th><th>Customer / payer</th><th>Amount</th><th>Method</th><th>Status</th><th>M-PESA code</th><th>Action</th></tr>
           {% for payment in payments %}
           {% set order = orders.get(payment.order_id) if payment.order_id else None %}
           {% set sale = sales.get(payment.sale_id) if payment.sale_id else None %}
           {% set store = stores.get(payment.store_id) if payment.store_id else None %}
+          {% set event = gateway_events.get(payment.id) if gateway_events else None %}
           <tr>
-            <td><strong>{{payment.created_at.strftime('%d %b %H:%M') if payment.created_at else '—'}}</strong><br><small>{{payment.provider or '—'}}</small></td>
+            <td><strong>{{(event.received_at if event else payment.created_at).strftime('%d %b %Y %H:%M:%S') if (event and event.received_at) or payment.created_at else '—'}}</strong><br><small>{{payment.provider or '—'}}</small></td>
             <td><strong>{% if order %}ONLINE ORDER{% elif sale %}PHYSICAL MART / POS{% else %}PAYMENT{% endif %}</strong><br><small>{{store.name if store else 'Business-wide'}}</small></td>
-            <td>{% if order %}{{order.order_number}}<br><small>Customer order</small>{% elif sale %}{{sale.receipt_number or sale.id}}<br><small>POS sale</small>{% else %}Unattached{% endif %}</td>
+            <td>{% if event and event.customer %}<strong>{{event.customer}}</strong>{% elif order %}Online customer{% elif sale %}POS customer{% else %}Unattached{% endif %}{% if event and event.customer_phone %}<br><small>{{event.customer_phone}}</small>{% elif payment.phone_number %}<br><small>{{payment.phone_number}}</small>{% endif %}{% if order %}<br><small>{{order.order_number}} · online</small>{% elif sale %}<br><small>{{sale.receipt_number or sale.id}} · POS</small>{% endif %}</td>
             <td><strong>KES {{'%.2f'|format(payment.amount|float)}}</strong></td>
             <td>{{payment.method.replace('_',' ').title()}}{% if payment.phone_number %}<br><small>{{payment.phone_number}}</small>{% endif %}</td>
             <td><span class="admin-badge {% if payment.status=='FAILED' %}off{% elif payment.status=='PAID' %}gateway-ok{% elif payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] %}gateway-warn{% endif %}">{{payment.status.replace('_',' ').title()}}</span></td>
-            <td><code>{{payment.provider_transaction_id or payment.external_reference or '—'}}</code></td>
+            <td><code>{{event.transaction_id if event and event.transaction_id else (payment.provider_transaction_id or payment.external_reference or '—')}}</code></td>
             <td style="white-space:normal;min-width:220px">
               {% if payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] and (order or sale) %}
               <form method="post" action="/control/payments/{{payment.id}}/approve-manual" onsubmit="return confirm('Confirm that the money has actually been received before manually approving this payment. Continue?');">

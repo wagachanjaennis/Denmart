@@ -431,14 +431,13 @@ def _gateway_intent_entity(intent):
 
 
 def _gateway_candidate_score(event, intent):
-    """Return a confidence score or None. Never auto-match an ambiguous candidate.
+    """Score a received merchant M-PESA receipt against one open payment.
 
-    Matching priority:
-    1. An explicitly entered M-PESA transaction code must match exactly.
-    2. Online orders can match by strong payer identity (normalized name and/or phone).
-    3. Counter/POS sales can match by the currently open sale amount when there is
-       no customer identity available. Ambiguous same-amount POS sales are handled
-       later by the candidate tie-breaker and remain unmatched.
+    Merchant identity is the business' configured Till/PayBill, represented by the
+    Android SIM→mart routing. Any phone number inside the SMS is treated as the payer,
+    never as the merchant destination. For online orders, payer name is the primary
+    fallback identity when the payer phone differs from the order phone; names are
+    normalized case-insensitively, and receipt time breaks same-name ties.
     """
     if not _gateway_intent_open(intent):
         return None
@@ -458,53 +457,39 @@ def _gateway_candidate_score(event, intent):
     event_time = event.received_at or now()
     intent_time = getattr(intent, "created_at", None) or getattr(entity, "created_at", None)
     time_bonus = 0
+    time_delta = None
     if intent_time:
         try:
-            delta = abs((event_time - intent_time).total_seconds())
-            if delta <= 15 * 60: time_bonus = 25
-            elif delta <= 60 * 60: time_bonus = 15
-            elif delta <= 6 * 3600: time_bonus = 8
-            elif delta <= 24 * 3600: time_bonus = 2
+            time_delta = abs((event_time - intent_time).total_seconds())
+            if time_delta <= 10 * 60: time_bonus = 40
+            elif time_delta <= 30 * 60: time_bonus = 30
+            elif time_delta <= 2 * 3600: time_bonus = 18
+            elif time_delta <= 6 * 3600: time_bonus = 8
+            elif time_delta <= 24 * 3600: time_bonus = 2
         except Exception:
-            time_bonus = 0
+            time_delta = None
 
-    # POS payments are expected to happen immediately at the counter. Do not let an
-    # old abandoned POS intent capture an unrelated payment many hours later.
-    if isinstance(entity, Sale):
-        created_at = getattr(intent, "created_at", None)
-        if created_at and created_at < now() - timedelta(hours=2):
-            return None
+    if isinstance(entity, Sale) and intent_time and time_delta is not None and time_delta > 2 * 3600:
+        return None
 
     reference = (event.transaction_id or "").strip().upper()
     expected_reference = (intent.external_reference or "").strip().upper()
     if expected_reference and reference == expected_reference:
-        # A transaction code supplied by the customer is the strongest identity
-        # signal. The amount may be partial, exact, or greater than the outstanding
-        # balance; settlement will accumulate the payment and complete when covered.
-        score = 400
-        if amount == outstanding:
-            score += 40
-        elif amount > outstanding:
-            score += 30
-        else:
-            score += 20
-        return score
-    if expected_reference and isinstance(entity, Sale):
-        # POS has no customer identity requirement. If a code was manually supplied
-        # for a POS intent but the incoming transaction carries a different code, do
-        # not fall back to amount-only matching; otherwise an unrelated transfer could
-        # close the wrong till sale. Online orders may still fall back to name/phone.
+        score = 500
+    elif expected_reference and isinstance(entity, Sale):
+        # A cashier can explicitly enter a receipt code. Do not let a different code
+        # close that POS sale by amount alone. Online orders can still fall back to the
+        # payer identity because customers may omit/mistype a reference during checkout.
         return None
-
-    # Base amount evidence. Exact amount outranks a partial payment, and an
-    # overpayment still remains valid so the sale can complete and show the excess.
-    score = 40
-    if amount == outstanding:
-        score += 35
-    elif amount > outstanding:
-        score += 30
     else:
-        score += 15
+        score = 100
+
+    if amount == outstanding:
+        score += 60
+    elif amount > outstanding:
+        score += 45
+    else:
+        score += 20
 
     incoming_phone = str(event.customer_phone or "").strip()
     expected_phone = normalize_ke_phone(intent.phone_number)
@@ -512,48 +497,40 @@ def _gateway_candidate_score(event, intent):
     phone_mismatch = bool(incoming_phone and expected_phone and not phone_matches)
 
     if isinstance(entity, Sale):
-        # A cashier sale does not need the payer's name or phone. If one is present,
-        # matching phone/name only boosts confidence; amount remains the core signal.
         if phone_matches:
-            score += 70
+            score += 100
         elif phone_mismatch:
-            score -= 10
+            score -= 5
         if event.customer:
-            # There is no customer_id on Sale, but a payer name still provides a small
-            # evidence boost when the POS flow happened to capture one.
-            normalized = _normalise_person_name(event.customer)
-            if normalized:
-                score += 5
+            score += 10
         return score + time_bonus
 
-    # Online order: name is intentionally sufficient; phone is optional but useful.
     customer = db.session.get(Customer, entity.customer_id) if getattr(entity, "customer_id", None) else None
     if not customer:
-        # An online order without a linked customer cannot be matched by identity.
         return None
 
     name_similarity = _name_similarity(event.customer, customer.name) if event.customer else 0.0
-    if name_similarity >= 0.95:
-        score += 45
-    elif name_similarity >= 0.85:
-        score += 30
-    elif name_similarity >= 0.75:
-        score += 18
+    exact_name = bool(event.customer and customer.name and _normalise_person_name(event.customer) == _normalise_person_name(customer.name))
+
+    # Online identity rule: exact payer phone OR matching customer name. A phone
+    # mismatch does not cancel an exact name match; the SMS number belongs to the payer.
+    if exact_name:
+        score += 130
     elif phone_matches:
-        # A strong phone match can rescue a truncated/missing payer name.
-        score += 10
+        score += 110
+    elif name_similarity >= 0.85:
+        score += 80
     else:
         return None
 
     if phone_matches:
-        score += 65
-    elif phone_mismatch:
-        # A mismatched phone is evidence against the match, but it does not override
-        # an exact normalized customer name because some provider SMS formats mask or
-        # transform the displayed number. An explicit transaction code above remains
-        # the authoritative path when the customer enters one.
-        score -= 10
+        score += 70
+    elif phone_mismatch and not exact_name:
+        score -= 15
 
+    # Receipt time is deliberately a strong secondary signal. This means two open
+    # orders for the same customer name are resolved by the order whose payment
+    # window is closest to when the merchant receipt arrived.
     return score + time_bonus
 
 
@@ -661,11 +638,22 @@ def _match_gateway_event(event, *, intent_id=None):
     candidates = _gateway_candidates_for_event(event, intent_id=intent_id)
     if not candidates:
         return False, None
-    best_score = max(score for score, _ in candidates)
-    best = [intent for score, intent in candidates if score == best_score]
-    if len(best) != 1:
-        return False, None
-    return _settle_gateway_intent(best[0], event)
+
+    def ranking(item):
+        score, intent = item
+        created = getattr(intent, "created_at", None)
+        try:
+            delta = abs(((event.received_at or now()) - (created or event.received_at or now())).total_seconds())
+        except Exception:
+            delta = 10**12
+        try:
+            created_epoch = created.timestamp() if created else 0
+        except Exception:
+            created_epoch = 0
+        return score, -delta, created_epoch
+
+    best = max(candidates, key=ranking)[1]
+    return _settle_gateway_intent(best, event)
 
 
 def reconcile_gateway_intent(intent):
@@ -703,6 +691,23 @@ def _gateway_store(business_id, sim_slot):
     # A one-store business should not require a pointless SIM-routing setup.
     active = Store.query.filter_by(business_id=business_id, is_active=True).order_by(Store.created_at).all()
     return active[0] if len(active) == 1 else None
+
+
+def _gateway_till_for(business_id, store_id=None):
+    """Return the merchant destination saved in Admin. SMS phone numbers are payer data."""
+    legacy = SystemSetting.query.filter_by(business_id=business_id, key="mpesa_till_number").first()
+    value = re.sub(r"\D", "", str(legacy.value or "")) if legacy and legacy.value else ""
+    if value:
+        return value
+    q = PaymentDestination.query.filter_by(business_id=business_id, is_active=True)
+    if store_id:
+        q = q.filter(PaymentDestination.store_id.in_([store_id, None]))
+    destination = q.order_by(
+        PaymentDestination.is_default.desc(),
+        PaymentDestination.store_id.desc(),
+        PaymentDestination.created_at.desc(),
+    ).first()
+    return re.sub(r"\D", "", str(destination.number or "")) if destination and destination.number else ""
 
 
 @csrf.exempt
@@ -756,7 +761,24 @@ def payment_gateway_sms():
         transaction_id = f"EVENT-{event_id}"[:160]
     existing = PaymentGatewayEvent.query.filter_by(business_id=business_id, gateway_device_id=device_id, transaction_id=transaction_id).first()
     if existing:
-        return jsonify(ok=True, duplicate=True, event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED"), 200
+        # A receipt may be posted once before its online payment intent exists.
+        # Re-run matching on duplicate deliveries so the same SMS can self-heal later.
+        if not existing.customer and payload.get("customer"):
+            existing.customer = str(payload.get("customer")).strip()[:240]
+        if not existing.customer_phone and payload.get("customer_phone"):
+            existing.customer_phone = normalize_ke_phone(payload.get("customer_phone"))
+        matched = existing.status == "MATCHED"
+        actual = db.session.get(Payment, existing.matched_payment_id) if existing.matched_payment_id else None
+        if not matched:
+            context_payment_id = str(payload.get("payment_id") or "").strip()
+            matched, actual = _match_gateway_event(existing, intent_id=context_payment_id or None)
+            if matched and actual:
+                existing.status = "MATCHED"
+                existing.matched_payment_id = actual.id
+                existing.store_id = actual.store_id
+        db.session.commit()
+        return jsonify(ok=True, duplicate=True, event_id=existing.id, status=existing.status, matched=matched,
+                       payment_id=actual.id if actual else existing.matched_payment_id), 200
     customer = str(payload.get("customer") or "").strip()[:240] or _gateway_parse_customer(message)
     customer_phone = normalize_ke_phone(payload.get("customer_phone")) or _gateway_parse_phone(message)
     try:
@@ -764,12 +786,15 @@ def payment_gateway_sms():
     except Exception:
         received_at = now()
     store = _gateway_store(business_id, sim_slot)
+    configured_till = _gateway_till_for(business_id, store.id if store else None)
+    if not configured_till:
+        return jsonify(error="mpesa_till_not_configured", message="Save the merchant M-PESA Till in Admin before enabling automatic approval."), 503
     event = PaymentGatewayEvent(
         business_id=business_id, store_id=store.id if store else None, gateway_device_id=device_id,
         sim_slot=sim_slot, subscription_id=int(payload.get("subscription_id")) if str(payload.get("subscription_id") or "").isdigit() else None,
         source=source or "android_sms", sender=sender, message=message, received_at=received_at,
         transaction_id=transaction_id, amount=amount or Decimal("0"), customer=customer, customer_phone=customer_phone,
-        status="UNMATCHED", raw_payload=payload,
+        status="UNMATCHED", raw_payload={**payload, "merchant_till": configured_till},
     )
     db.session.add(event); db.session.flush()
 
@@ -789,7 +814,9 @@ def payment_gateway_sms():
         event.store_id = actual.store_id
     db.session.commit()
     return jsonify(ok=True, event_id=event.id, matched=matched, transaction_id=transaction_id,
-                   amount=str(amount or 0), store_id=event.store_id, status=event.status,
+                   amount=str(amount or 0), customer=customer or "M-PESA customer",
+                   customer_phone=customer_phone or None, received_at=received_at.isoformat(),
+                   merchant_till=configured_till, store_id=event.store_id, status=event.status,
                    payment_id=actual.id if actual else None), 200
 
 
