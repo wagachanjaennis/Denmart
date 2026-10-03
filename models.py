@@ -386,6 +386,26 @@ class Payment(db.Model):
     updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
 
 
+class PaymentDestination(db.Model):
+    """Business-owned M-PESA destinations used by checkout, POS and gateway routing."""
+    __tablename__ = "payment_destinations"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
+    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), index=True)
+    label = db.Column(db.String(120), nullable=False)
+    channel = db.Column(db.String(20), nullable=False, default="TILL")
+    number = db.Column(db.String(40), nullable=False)
+    account_number = db.Column(db.String(80))
+    instructions = db.Column(db.String(500))
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    is_default = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
+    __table_args__ = (
+        db.Index("ix_payment_destination_business_store_active", "business_id", "store_id", "is_active"),
+    )
+
+
 class PaymentIntegration(db.Model):
     __tablename__ = "payment_integrations"
     id = db.Column(db.String(36), primary_key=True, default=uid)

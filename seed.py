@@ -6,7 +6,7 @@ from decimal import Decimal
 from extensions import db
 from models import (
     Business, Store, Role, Permission, User, Category, Product, ProductAlias,
-    PricingRule, StoreProduct, SystemSetting,
+    PricingRule, StoreProduct, SystemSetting, PaymentDestination,
 )
 from catalog_data import CATALOG, PRICE_BANDS
 from services.product_images import real_product_image_url
@@ -211,6 +211,17 @@ def seed_defaults():
 
             if not ProductAlias.query.filter_by(product_id=product.id, alias=name).first():
                 db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
+
+    # Backward-compatible payment destination: existing single Till settings are
+    # promoted to the new business/store-scoped destination table once.
+    legacy_till = SystemSetting.query.filter_by(business_id=business.id, key="mpesa_till_number").first()
+    till_value = str(legacy_till.value or "").strip() if legacy_till else ""
+    if till_value and not PaymentDestination.query.filter_by(business_id=business.id).first():
+        db.session.add(PaymentDestination(
+            business_id=business.id, store_id=store.id, label="Main M-PESA Till",
+            channel="TILL", number=till_value, is_active=True, is_default=True,
+            instructions="Use this Till after checking the amount shown above.",
+        ))
 
     defaults = {
         "footer_text": "All rights reserved · Denmart Merchants",
