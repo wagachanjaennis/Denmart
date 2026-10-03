@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # Merchant M-PESA destination for the current Denmart deployment.
 # This is intentionally server-side only; the Android listener never decides
 # which Till is being paid. Any phone number found in an M-PESA receipt is a payer.
-DENMART_MERCHANT_TILL = "302145"
+DENMART_MERCHANT_TILL = "0757817361"
 MPESA_ONLINE_MATCH_WINDOW_MINUTES = 120
 MPESA_POS_MATCH_WINDOW_MINUTES = 30
 
