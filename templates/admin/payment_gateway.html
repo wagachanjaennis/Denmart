@@ -19,8 +19,7 @@
     </section>
 
     <section class="control-panel gateway-setup-panel">
-      <div class="panel-title"><div><span class="eyebrow">ANDROID SETUP</span><h2>One link to paste into the gateway app</h2><p class="muted">The Android app sends its M-PESA confirmations to this exact Denmart listener. The merchant Till remains the Admin-saved Till; payer numbers in SMS are never treated as the Till.</p></div><span class="admin-badge">HTTPS</span></div>
-      <div class="gateway-live" style="margin:8px 0 12px"><strong>Merchant Till: {{gateway_till or 'NOT SAVED'}}</strong><small>Use this exact Till for online payments.</small></div>
+      <div class="panel-title"><div><span class="eyebrow">ANDROID SETUP</span><h2>One link to paste into the gateway app</h2><p class="muted">The Android app sends only relevant Safaricom/M-PESA receipt facts to this exact URL. Keep the link private.</p></div><span class="admin-badge">HTTPS</span></div>
       <div class="gateway-url-row">
         <input id="gatewayUrl" class="admin-input gateway-url-input" readonly value="{{gateway_url}}">
         <button class="admin-action" type="button" onclick="copyGatewayUrl()">Copy link</button>
@@ -32,7 +31,7 @@
     </section>
 
     <section class="control-panel">
-      <div class="panel-title"><div><span class="eyebrow">SIM ROUTING</span><h2>Keep every line in its own mart</h2><p class="muted">SIM 1 and SIM 2 are identified by the Android phone. Only incoming Safaricom/M-PESA receipts are eligible; leave a SIM unassigned when it is not a Denmart payment line.</p></div></div>
+      <div class="panel-title"><div><span class="eyebrow">MERCHANT PAYMENT LINE</span><h2>Gateway Till: 302145</h2><p class="muted">The Android gateway treats 302145 as the merchant destination. Numbers inside an M-PESA receipt are payer numbers, never the Till. Matching uses payer identity, amount and payment/order time across open business payments.</p></div></div>
       <form method="post" action="/control/payment-gateway/routing" class="gateway-routing-grid">
         <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
         <label><strong>SIM 1</strong><span>Android slot 0</span><select class="admin-input wide" name="sim_0_store_id"><option value="">Not assigned</option>{% for s in stores %}<option value="{{s.id}}" {% if routes[0]==s.id %}selected{% endif %}>{{s.name}} · {{s.code}}</option>{% endfor %}</select></label>
@@ -44,14 +43,14 @@
     <section class="gateway-store-grid" id="storeTotals"></section>
 
     <section class="control-panel">
-      <div class="panel-title"><div><span class="eyebrow">LIVE FEED</span><h2>Incoming M-PESA messages</h2></div><span class="muted">Updates automatically</span></div>
+      <div class="panel-title"><div><span class="eyebrow">LIVE FEED</span><h2>Incoming M-PESA messages</h2></div><span class="muted">Updates automatically · Till 302145</span></div>
       <div class="table-wrap">
-        <table class="admin-table gateway-table"><thead><tr><th>Date / time</th><th>Line</th><th>Mart</th><th>Payer name</th><th>Payer phone</th><th>M-PESA code</th><th>Amount</th><th>Status</th></tr></thead>
+        <table class="admin-table gateway-table"><thead><tr><th>Date / time</th><th>Line</th><th>Mart</th><th>Payer</th><th>M-PESA code</th><th>Amount</th><th>Status</th></tr></thead>
         <tbody id="gatewayFeed">
         {% for e in events %}
-        <tr><td>{{e.received_at.strftime('%d %b %Y %H:%M:%S') if e.received_at else '—'}}</td><td>SIM {{e.sim_slot + 1}}</td><td>{{e.store.name if e.store else 'Unassigned'}}</td><td>{{e.customer or 'M-PESA customer'}}</td><td>{{e.customer_phone or '—'}}</td><td><code>{{e.transaction_id or '—'}}</code></td><td><strong>KES {{'%.2f'|format(e.amount|float)}}</strong></td><td><span class="admin-badge {% if e.status=='MATCHED' %}gateway-ok{% else %}gateway-warn{% endif %}">{{e.status}}</span></td></tr>
+        <tr><td>{{e.received_at.strftime('%d %b %Y %H:%M:%S') if e.received_at else '—'}}</td><td>SIM {{e.sim_slot + 1}}</td><td>{{e.store.name if e.store else 'Business-wide'}}</td><td>{{e.customer or 'M-PESA customer'}}<br><small>{{e.customer_phone or '—'}}</small></td><td><code>{{e.transaction_id}}</code></td><td><strong>KES {{'%.2f'|format(e.amount|float)}}</strong></td><td><span class="admin-badge {% if e.status=='MATCHED' %}gateway-ok{% else %}gateway-warn{% endif %}">{{e.status}}</span></td></tr>
         {% else %}
-        <tr><td colspan="8">No M-PESA messages received yet. Make a small test payment to the configured line.</td></tr>
+        <tr><td colspan="7">No M-PESA messages received yet. Make a small test payment to the configured line.</td></tr>
         {% endfor %}
         </tbody>
         </table>
@@ -60,7 +59,7 @@
 
     <section class="gateway-note">
       <strong>How matching works</strong>
-      <span>The Admin-saved Till is the merchant destination. Any number found in an incoming receipt is the payer number. Online orders match by amount plus payer identity: customer name is case-insensitive and is the primary fallback when the payer phone differs; receipt time helps choose the correct order. POS payments use the correct mart/SIM route plus amount and time. Matched receipts show the payer name, date/time and M-PESA code here.</span>
+      <span>Online Till and POS payments are matched automatically by mart + payer phone + amount, with payer name used as an additional confidence check when available. Payments can be partial: each confirmed amount is added to the balance until the exact total is reached. Ambiguous, mismatched, personal, or overpaid messages remain UNMATCHED instead of being assigned to the wrong sale.</span>
     </section>
   </main>
 </div>
@@ -71,7 +70,7 @@
 (function(){
   const money = v => 'KES ' + Number(v || 0).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2});
   const esc = s => String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-  const fmtTime = iso => { if(!iso) return '—'; const d=new Date(iso); return d.toLocaleString('en-KE',{dateStyle:'medium',timeStyle:'medium'}); };
+  const fmtTime = iso => { if(!iso) return '—'; const d=new Date(iso); return d.toLocaleTimeString('en-KE',{hour12:false}); };
 
   window.copyGatewayUrl = async function(){
     const input=document.getElementById('gatewayUrl');
@@ -96,8 +95,9 @@
 
       document.getElementById('storeTotals').innerHTML=(d.stores||[]).map(s=>`<div class="gateway-store"><small>${esc(s.name)}</small><strong>${money(s.total)}</strong><span>${s.count} messages today</span></div>`).join('');
 
-      const rows=(d.events||[]).map(e=>`<tr><td>${esc(fmtTime(e.time))}</td><td>SIM ${esc(e.sim)}</td><td>${esc(e.store)}</td><td>${esc(e.customer)}</td><td>${esc(e.phone||'—')}</td><td><code>${esc(e.transaction)}</code></td><td><strong>${money(e.amount)}</strong></td><td><span class="admin-badge ${e.status==='MATCHED'?'gateway-ok':'gateway-warn'}">${esc(e.status)}</span></td></tr>`).join('');
-      document.getElementById('gatewayFeed').innerHTML=rows||'<tr><td colspan="8">No M-PESA messages received yet.</td></tr>';
+      const fmtDateTime = iso => { if(!iso) return '—'; const d=new Date(iso); return d.toLocaleString('en-KE',{dateStyle:'medium',timeStyle:'medium'}); };
+      const rows=(d.events||[]).map(e=>`<tr><td>${esc(fmtDateTime(e.time))}</td><td>SIM ${esc(e.sim)}</td><td>${esc(e.store)}</td><td>${esc(e.customer)}<br><small>${esc(e.customer_phone||'—')}</small></td><td><code>${esc(e.transaction)}</code></td><td><strong>${money(e.amount)}</strong></td><td><span class="admin-badge ${e.status==='MATCHED'?'gateway-ok':'gateway-warn'}">${esc(e.status)}</span></td></tr>`).join('');
+      document.getElementById('gatewayFeed').innerHTML=rows||'<tr><td colspan="7">No M-PESA messages received yet.</td></tr>';
     }catch(e){
       document.getElementById('gatewayLast').textContent='Monitor temporarily unavailable';
       document.getElementById('gatewayPulse').classList.remove('gateway-dot-active');

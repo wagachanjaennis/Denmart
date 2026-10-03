@@ -41,3 +41,5 @@ class Config:
     DARAJA_PASSKEY = os.getenv("DARAJA_PASSKEY", "")
     DARAJA_CALLBACK_URL = os.getenv("DARAJA_CALLBACK_URL", "")
     PAYMENT_CREDENTIAL_ENCRYPTION_KEY = os.getenv("PAYMENT_CREDENTIAL_ENCRYPTION_KEY", "")
+    # Merchant Till used by the Android M-PESA listener for this deployment.
+    MPESA_GATEWAY_TILL = "302145"

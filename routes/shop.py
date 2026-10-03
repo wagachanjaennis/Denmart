@@ -161,7 +161,10 @@ def checkout():
     legacy_till = str(legacy.value or "").strip() if legacy else ""
     if not destination and legacy_till:
         destination = type("LegacyDestination", (), {"id":"", "channel":"TILL", "number":legacy_till, "account_number":"", "label":"Denmart M-PESA Till", "instructions":"Use this Till after checking the amount shown above."})()
-    return render_template("shop/checkout.html", store=store, till_number=(destination.number if destination else ""), payment_destination=destination)
+    till_number = (current_app.config.get("MPESA_GATEWAY_TILL", "302145")
+                   if destination and destination.channel == "TILL"
+                   else (destination.number if destination else legacy_till))
+    return render_template("shop/checkout.html", store=store, till_number=till_number, payment_destination=destination)
 
 
 @bp.get("/order/<order_number>")
@@ -173,7 +176,12 @@ def order_confirmation(order_number):
     destination = active_payment_destination(order.business_id, order.store_id)
     till_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="mpesa_till_number").first()
     legacy_till = str(till_setting.value or "").strip() if till_setting else ""
-    till_number = (destination.number if destination and destination.channel in {"TILL", "PAYBILL"} else legacy_till)
+    if destination and destination.channel == "TILL":
+        till_number = current_app.config.get("MPESA_GATEWAY_TILL", "302145")
+    elif destination and destination.channel == "PAYBILL":
+        till_number = destination.number
+    else:
+        till_number = legacy_till or current_app.config.get("MPESA_GATEWAY_TILL", "302145")
     active_payment = (Payment.query.filter(
         Payment.order_id == order.id,
         Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
@@ -244,11 +252,14 @@ def mpesa_till_qr():
     if not store:
         return ("", 404)
     destination = active_payment_destination(store.business_id, store.id)
-    if destination and destination.number:
+    if destination and destination.channel == "TILL":
+        qr_value = current_app.config.get("MPESA_GATEWAY_TILL", "302145")
+    elif destination and destination.number:
         qr_value = destination.number
     else:
         setting = SystemSetting.query.filter_by(business_id=store.business_id, key="mpesa_till_number").first()
         qr_value = str(setting.value or "").strip() if setting else ""
+        qr_value = qr_value or current_app.config.get("MPESA_GATEWAY_TILL", "302145")
     if not qr_value:
         return ("", 404)
     img = qrcode.make(qr_value)

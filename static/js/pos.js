@@ -92,32 +92,26 @@ window.denmartGatewayPaymentConfirmed=function(data){
   }
 };
 async function refreshMpesaFeed(){
-  const headline=$('#posMpesaLast'), today=$('#posMpesaToday'); if(!headline||!navigator.onLine)return;
-  try{
-    const {r,d}=await apiJSON('/api/pos/mpesa-feed'); if(!r.ok)return;
-    if(today)today.textContent=`KES ${Number(d.received_total||0).toFixed(2)} today · ${Number(d.matched_total||0).toFixed(2)} matched`;
-    const e=(d.events||[])[0];
-    if(!e){headline.textContent='Waiting';return;}
-    const ref=e.order_number?`Order ${e.order_number}`:(e.receipt_number?`Receipt ${e.receipt_number}`:(e.transaction||'M-PESA'));
-    const progress=e.received_amount!=null ? ` · ${money(e.received_amount)}/${money(e.required_amount)}` : '';
-    const state=e.status==='MATCHED' ? (e.outstanding_amount>0?'PART':'PAID') : 'WAIT';
-    headline.textContent=`${e.status==='MATCHED'?'':'•'} ${money(e.amount)} · ${state} · ${ref}`;
-    headline.title=`${e.customer||'M-PESA customer'} · ${e.payment_label||'Received'}${progress}${e.outstanding_amount!=null&&Number(e.outstanding_amount)>0?` · Remaining ${money(e.outstanding_amount)}`:''}`;
-    if(e.transaction && e.transaction!==lastMpesaTransaction){ lastMpesaTransaction=e.transaction; if(e.status==='MATCHED') beep(true); }
-  }catch(e){}
+  const headline=$('#posMpesaLast'), today=$('#posMpesaToday'); if(!headline)return;
+  if(today)today.textContent='Merchant terminal · current sale only';
+  const active=window.DenmartGatewayContext?.active;
+  headline.textContent=active?'Listening for this M-PESA payment':'Ready for M-PESA';
 }
 
 async function makeSale(method){
   if(!cart.length)return toast('Add an item first');
   if(method==='MPESA'&&!navigator.onLine)return toast('M-PESA needs an internet connection');
   if(!navigator.onLine && method!=='MPESA')return queueOfflineSale(method);
-  // Counter M-PESA matching is amount-driven. A payer phone is optional evidence,
-  // not a prerequisite for creating or settling the POS sale.
-  const phone=null;
+  let phone=null, payerName=null;
+  if(method==='MPESA'){
+    payerName=prompt('Customer name (as shown by M-PESA)','')?.trim()||'';
+    phone=prompt('Customer M-PESA phone number','07')?.trim()||'';
+    if(!payerName || !phone)return toast('Customer name and M-PESA phone are required');
+  }
   if(method==='MPESA')setGatewayContext({expectedAmount:cart.reduce((t,x)=>t+(Number(x.price)*Number(x.qty)),0)});
   const reference=method==='CARD'?prompt('Card / external payment reference',''):null;
   if(method==='CARD'&&!reference)return toast('Payment not recorded');
-  const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference,phone_number:phone||''})});
+  const {r,d}=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_method:method,items:cart.map(x=>({store_product_id:x.id,quantity:x.qty})),payment_reference:reference,phone_number:phone||'',payer_name:payerName||''})});
   if(!r.ok)return toast(d.error||'Sale failed');
   if(method==='MPESA'){
     if(!d.payment_id)return toast('M-PESA monitoring could not be armed');

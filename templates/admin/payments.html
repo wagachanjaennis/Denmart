@@ -46,17 +46,28 @@
           {% set order = orders.get(payment.order_id) if payment.order_id else None %}
           {% set sale = sales.get(payment.sale_id) if payment.sale_id else None %}
           {% set store = stores.get(payment.store_id) if payment.store_id else None %}
-          {% set event = gateway_events.get(payment.id) if gateway_events else None %}
+          {% set entity_key = ('order:' ~ order.id) if order else (('sale:' ~ sale.id) if sale else '') %}
+          {% set event = gateway_by_entity.get(entity_key) if entity_key else None %}
+          {% set customer = customers.get(order.customer_id) if order and order.customer_id else None %}
           <tr>
-            <td><strong>{{(event.received_at if event else payment.created_at).strftime('%d %b %Y %H:%M:%S') if (event and event.received_at) or payment.created_at else '—'}}</strong><br><small>{{payment.provider or '—'}}</small></td>
-            <td><strong>{% if order %}ONLINE ORDER{% elif sale %}PHYSICAL MART / POS{% else %}PAYMENT{% endif %}</strong><br><small>{{store.name if store else 'Business-wide'}}</small></td>
-            <td>{% if event and event.customer %}<strong>{{event.customer}}</strong>{% elif order %}Online customer{% elif sale %}POS customer{% else %}Unattached{% endif %}{% if event and event.customer_phone %}<br><small>{{event.customer_phone}}</small>{% elif payment.phone_number %}<br><small>{{payment.phone_number}}</small>{% endif %}{% if order %}<br><small>{{order.order_number}} · online</small>{% elif sale %}<br><small>{{sale.receipt_number or sale.id}} · POS</small>{% endif %}</td>
+            <td><strong>{{(event.received_at if event else payment.created_at).strftime('%d %b %Y %H:%M:%S') if (event or payment.created_at) else '—'}}</strong><br><small>{{'M-PESA receipt' if event else 'Payment intent'}}</small></td>
+            <td><strong>{% if order %}ONLINE ORDER{% elif sale %}PHYSICAL MART / POS{% else %}PAYMENT{% endif %}</strong><br><small>{{store.name if store else 'Business-wide'}}{% if event %} · Till {{event.raw_payload.get('merchant_till', '') if event.raw_payload else '302145'}}{% endif %}</small></td>
+            <td>
+              {% if event %}
+                <strong>{{event.customer or (customer.name if customer else 'M-PESA customer')}}</strong><br><small>{{event.customer_phone or (customer.phone if customer else payment.phone_number or '—')}}</small>
+              {% elif customer %}
+                <strong>{{customer.name}}</strong><br><small>{{customer.phone or payment.phone_number or '—'}}</small>
+              {% elif sale %}
+                <strong>POS customer</strong><br><small>{{payment.phone_number or '—'}}</small>
+              {% else %}Unattached{% endif %}
+            </td>
             <td><strong>KES {{'%.2f'|format(payment.amount|float)}}</strong></td>
-            <td>{{payment.method.replace('_',' ').title()}}{% if payment.phone_number %}<br><small>{{payment.phone_number}}</small>{% endif %}</td>
+            <td>{{payment.method.replace('_',' ').title()}}</td>
             <td><span class="admin-badge {% if payment.status=='FAILED' %}off{% elif payment.status=='PAID' %}gateway-ok{% elif payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] %}gateway-warn{% endif %}">{{payment.status.replace('_',' ').title()}}</span></td>
-            <td><code>{{event.transaction_id if event and event.transaction_id else (payment.provider_transaction_id or payment.external_reference or '—')}}</code></td>
+            <td><code>{{event.transaction_id if event else (payment.provider_transaction_id or payment.external_reference or '—')}}</code></td>
             <td style="white-space:normal;min-width:220px">
               {% if payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] and (order or sale) %}
+              <small class="block-note">Gateway watches Till <strong>302145</strong> and compares payer identity + amount + time.</small>
               <form method="post" action="/control/payments/{{payment.id}}/approve-manual" onsubmit="return confirm('Confirm that the money has actually been received before manually approving this payment. Continue?');">
                 <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
                 <input type="hidden" name="reason" value="Administrator verified the incoming Safaricom M-PESA receipt after automatic matching did not complete.">
@@ -107,10 +118,10 @@
       <div class="toolbar"><div><strong>Unmatched Safaricom receipts</strong><div class="muted">These are incoming M-PESA events that were accepted as receipts but could not be safely associated with an open payment intent.</div></div><a class="admin-action" href="/control/payment-gateway">Open monitor</a></div>
       <div class="table-wrap">
         <table class="admin-table">
-          <tr><th>Received</th><th>Mart</th><th>Customer</th><th>Amount</th><th>Transaction</th><th>Reason</th></tr>
+          <tr><th>Date / time</th><th>Merchant Till</th><th>Payer</th><th>Amount</th><th>M-PESA code</th><th>State</th></tr>
           {% for event in unmatched_events %}
-          <tr><td>{{event.received_at.strftime('%d %b %H:%M') if event.received_at else '—'}}</td><td>{{stores.get(event.store_id).name if event.store_id and stores.get(event.store_id) else 'Unassigned'}}</td><td>{{event.customer or '—'}}<br><small>{{event.customer_phone or '—'}}</small></td><td>KES {{'%.2f'|format(event.amount|float) if event.amount is not none else '—'}}</td><td><code>{{event.transaction_id or '—'}}</code></td><td>{{event.status}}</td></tr>
-          {% else %}<tr><td colspan="6">Nothing is waiting for manual investigation.</td></tr>{% endfor %}
+          <tr><td><strong>{{event.received_at.strftime('%d %b %Y %H:%M:%S') if event.received_at else '—'}}</strong></td><td><strong>{{event.raw_payload.get('merchant_till', '302145') if event.raw_payload else '302145'}}</strong><br><small>{{stores.get(event.store_id).name if event.store_id and stores.get(event.store_id) else 'Business-wide'}}</small></td><td><strong>{{event.customer or 'M-PESA customer'}}</strong><br><small>{{event.customer_phone or '—'}}</small></td><td><strong>KES {{'%.2f'|format(event.amount|float) if event.amount is not none else '—'}}</strong></td><td><code>{{event.transaction_id or '—'}}</code></td><td>{{event.status}}</td></tr>
+          {% else %}<tr><td colspan="6">No unmatched M-PESA receipts.</td></tr>{% endfor %}
         </table>
       </div>
     </section>
