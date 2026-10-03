@@ -23,7 +23,6 @@ from services.audit import audit
 from services.crypto import encrypt, decrypt
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
 from services.search import forgiving_rank
-from config import DENMART_MERCHANT_TILL
 
 bp = Blueprint("admin", __name__)
 ADMIN_BASE = "/control"
@@ -409,7 +408,7 @@ def payment_gateway():
     ).count()
     return render_template(
         "admin/payment_gateway.html",
-        stores=stores, routes=routes, gateway_url=url, merchant_till=DENMART_MERCHANT_TILL,
+        stores=stores, routes=routes, gateway_url=url,
         events=events, received_total=received_total, received_count=received_count,
         matched_total=matched_total, matched_count=matched_count,
         unmatched_total=unmatched_total, unmatched_count=unmatched_count,
@@ -497,8 +496,8 @@ def payment_gateway_monitor():
         payload_events.append({
             "id": e.id, "time": received_at, "sim": sim, "store": store_name,
             "amount": money(e.amount), "customer": e.customer or "M-PESA customer",
-            "customer_phone": e.customer_phone or "—", "transaction": e.transaction_id or "—",
-            "status": e.status or "UNMATCHED", "merchant_till": DENMART_MERCHANT_TILL,
+            "customer_phone": e.customer_phone or "",
+            "transaction": e.transaction_id or "—", "status": e.status or "UNMATCHED",
         })
 
     return jsonify(
@@ -510,7 +509,7 @@ def payment_gateway_monitor():
         unmatched_total=money(unmatched_q.with_entities(db.func.coalesce(db.func.sum(PaymentGatewayEvent.amount), 0)).scalar()),
         unmatched_count=unmatched_q.count(),
         last_received=(events[0].received_at.isoformat() if events and events[0].received_at else None),
-        stores=store_totals, merchant_till=DENMART_MERCHANT_TILL,
+        stores=store_totals,
         events=payload_events,
     )
 
@@ -646,6 +645,28 @@ def payments():
     status_filter = (request.args.get("status") or "").strip().upper()
     source_filter = (request.args.get("source") or "").strip().upper()
     allowed_status = {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID", "PAID", "FAILED", "CLOSED_MANUAL"}
+
+    # Re-run the same matcher against recent unmatched receipts so this screen is not
+    # merely a log. A receipt that arrived just before an order/payment intent exists
+    # gets another chance immediately when the administrator opens Payments.
+    try:
+        from routes.api import _match_gateway_event
+        recent_unmatched = (PaymentGatewayEvent.query
+                             .filter_by(business_id=business_id, status="UNMATCHED")
+                             .order_by(PaymentGatewayEvent.received_at.desc()).limit(120).all())
+        changed = False
+        for event in recent_unmatched:
+            matched, actual = _match_gateway_event(event)
+            if matched and actual:
+                event.status = "MATCHED"
+                event.matched_payment_id = actual.id
+                event.store_id = actual.store_id
+                changed = True
+        if changed:
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
+
     base = Payment.query.filter(Payment.business_id == business_id)
     filtered = base
     if status_filter in allowed_status:
@@ -654,38 +675,184 @@ def payments():
         filtered = filtered.filter(Payment.order_id.isnot(None))
     elif source_filter == "POS":
         filtered = filtered.filter(Payment.sale_id.isnot(None))
-    rows = filtered.order_by(Payment.created_at.desc()).limit(150).all()
+
+    raw_rows = filtered.order_by(Payment.created_at.desc()).limit(220).all()
+    # When a gateway intent is successfully settled, settlement creates the actual PAID
+    # ledger entry. Showing both makes the admin think there were two payments.
+    rows = [p for p in raw_rows if not (p.status == "PAID" and p.method in {
+        "MPESA_TILL_INTENT", "MPESA_GATEWAY_INTENT", "MPESA_TILL_MANUAL"
+    })]
+
     store_rows = Store.query.filter_by(business_id=business_id).order_by(Store.name).all()
     stores = {store.id: store for store in store_rows}
     order_ids = [p.order_id for p in rows if p.order_id]
     sale_ids = [p.sale_id for p in rows if p.sale_id]
     orders_by_id = {o.id:o for o in Order.query.filter(Order.business_id == business_id, Order.id.in_(order_ids)).all()} if order_ids else {}
     sales_by_id = {s.id:s for s in Sale.query.filter(Sale.business_id == business_id, Sale.id.in_(sale_ids)).all()} if sale_ids else {}
-    customer_ids = [o.customer_id for o in orders_by_id.values() if o.customer_id]
-    customers_by_id = {c.id:c for c in Customer.query.filter(Customer.business_id == business_id, Customer.id.in_(customer_ids)).all()} if customer_ids else {}
-    destinations = PaymentDestination.query.filter_by(business_id=business_id).order_by(PaymentDestination.is_default.desc(), PaymentDestination.is_active.desc(), PaymentDestination.created_at.desc()).all()
-    payment_ids = [p.id for p in rows]
-    gateway_evidence = {}
-    if payment_ids:
-        linked_events = (PaymentGatewayEvent.query.filter(
-            PaymentGatewayEvent.business_id == business_id,
-            PaymentGatewayEvent.matched_payment_id.in_(payment_ids),
-        ).order_by(PaymentGatewayEvent.received_at.desc()).all())
-        for event in linked_events:
-            gateway_evidence.setdefault(event.matched_payment_id, event)
-    unmatched_events = (PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED")
-                        .order_by(PaymentGatewayEvent.received_at.desc()).limit(40).all())
+
+    events = (PaymentGatewayEvent.query
+              .filter(PaymentGatewayEvent.business_id == business_id,
+                      PaymentGatewayEvent.received_at >= now() - timedelta(hours=12))
+              .order_by(PaymentGatewayEvent.received_at.desc()).limit(500).all())
+
+    def norm_phone(value):
+        digits = re.sub(r"\D", "", str(value or ""))
+        if digits.startswith("254") and len(digits) == 12:
+            return digits
+        if digits.startswith("0") and len(digits) == 10:
+            return "254" + digits[1:]
+        if digits.startswith("7") and len(digits) == 9:
+            return "254" + digits
+        return ""
+
+    def norm_name(value):
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    def name_score(a, b):
+        a, b = norm_name(a), norm_name(b)
+        if not a or not b:
+            return 0
+        if a == b:
+            return 100
+        ta, tb = set(a.split()), set(b.split())
+        return int(round(100 * len(ta & tb) / max(len(ta), len(tb)))) if ta and tb else 0
+
+    def expected_details(payment, order, sale):
+        if order:
+            customer = db.session.get(Customer, order.customer_id) if order.customer_id else None
+            return {
+                "channel": "ONLINE",
+                "reference": order.order_number,
+                "name": customer.name if customer else "Online customer",
+                "phone": norm_phone((customer.phone if customer else "") or payment.phone_number),
+                "amount": Decimal(str(payment.amount or 0)),
+                "time": payment.created_at,
+            }
+        if sale:
+            return {
+                "channel": "POS",
+                "reference": sale.receipt_number or sale.id,
+                "name": "POS customer",
+                "phone": norm_phone(payment.phone_number),
+                "amount": Decimal(str(payment.amount or 0)),
+                "time": payment.created_at,
+            }
+        return {
+            "channel": "OTHER", "reference": str(payment.id)[:10], "name": "—",
+            "phone": norm_phone(payment.phone_number), "amount": Decimal(str(payment.amount or 0)), "time": payment.created_at,
+        }
+
+    def best_event(payment, expected):
+        direct = next((e for e in events if e.matched_payment_id == payment.id), None)
+        if direct:
+            return direct, 1000
+        if payment.provider_transaction_id:
+            reference = (payment.provider_transaction_id or "").upper()
+            direct = next((e for e in events if (e.transaction_id or "").upper() == reference), None)
+            if direct:
+                return direct, 1000
+        best = None
+        for event in events:
+            if event.status != "UNMATCHED":
+                continue
+            amount = Decimal(str(event.amount or 0))
+            if amount <= 0 or amount != expected["amount"]:
+                continue
+            if expected["time"] and event.received_at:
+                try:
+                    delta = abs((event.received_at - expected["time"]).total_seconds())
+                except Exception:
+                    delta = 999999
+            else:
+                delta = 999999
+            if expected["channel"] == "POS" and delta > 2 * 3600:
+                continue
+            if expected["channel"] == "ONLINE" and delta > 6 * 3600:
+                continue
+
+            score = 40  # exact amount
+            expected_phone = norm_phone(expected["phone"])
+            incoming_phone = norm_phone(event.customer_phone)
+            phone_exact = bool(expected_phone and incoming_phone and expected_phone == incoming_phone)
+            if expected_phone and incoming_phone:
+                score += 110 if phone_exact else -25
+
+            ns = name_score(expected["name"], event.customer)
+            if ns == 100:
+                score += 100
+            elif ns >= 75:
+                score += 55
+            elif expected["channel"] == "ONLINE" and not phone_exact:
+                continue
+
+            if delta <= 10 * 60:
+                score += 35
+            elif delta <= 30 * 60:
+                score += 25
+            elif delta <= 120 * 60:
+                score += 12
+            if score < 85:
+                continue
+
+            if best is None or score > best[1]:
+                best = (event, score)
+            elif score == best[1]:
+                # Equal evidence means an administrator should not be shown a false
+                # "valid" comparison for two simultaneous same-amount buyers.
+                best = (None, score)
+        return best if best else (None, 0)
+
+    reconciliation_rows = []
+    for payment in rows:
+        order = orders_by_id.get(payment.order_id) if payment.order_id else None
+        sale = sales_by_id.get(payment.sale_id) if payment.sale_id else None
+        expected = expected_details(payment, order, sale)
+        event, score = best_event(payment, expected)
+        receipt = None
+        result = "WAITING"
+        comparison = {"name": None, "phone": None, "amount": False, "time_minutes": None}
+        if event:
+            receipt = {
+                "name": event.customer or "M-PESA customer",
+                "phone": norm_phone(event.customer_phone),
+                "amount": Decimal(str(event.amount or 0)),
+                "time": event.received_at,
+                "code": event.transaction_id or "—",
+            }
+            comparison["name"] = name_score(expected["name"], receipt["name"]) if expected["channel"] == "ONLINE" else None
+            comparison["phone"] = bool(expected["phone"] and receipt["phone"] and norm_phone(expected["phone"]) == receipt["phone"]) if expected["phone"] else None
+            comparison["amount"] = receipt["amount"] == expected["amount"]
+            if expected["time"] and receipt["time"]:
+                try:
+                    comparison["time_minutes"] = int(round(abs((receipt["time"] - expected["time"]).total_seconds()) / 60.0))
+                except Exception:
+                    comparison["time_minutes"] = None
+            result = "VALID" if event.status == "MATCHED" or payment.status == "PAID" else "CHECK"
+        elif payment.status == "PAID":
+            result = "VALID"
+        reconciliation_rows.append({"payment": payment, "order": order, "sale": sale,
+                                    "expected": expected, "receipt": receipt, "comparison": comparison, "result": result})
+
     pending_filter = base.filter(Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]))
     pending_count = pending_filter.count()
     pending_amount = pending_filter.with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
     online_pending = pending_filter.filter(Payment.order_id.isnot(None)).count()
     pos_pending = pending_filter.filter(Payment.sale_id.isnot(None)).count()
     paid_today = base.filter(Payment.status == "PAID", db.func.date(Payment.created_at) == db.func.current_date()).with_entities(db.func.coalesce(db.func.sum(Payment.amount),0)).scalar() or 0
-    return render_template("admin/payments.html", payments=rows, stores=stores, orders=orders_by_id, sales=sales_by_id, customers=customers_by_id,
-                           destinations=destinations, unmatched_events=unmatched_events, gateway_evidence=gateway_evidence,
-                           merchant_till=DENMART_MERCHANT_TILL, pending_count=pending_count,
-                           pending_amount=pending_amount, online_pending=online_pending, pos_pending=pos_pending,
-                           paid_today=paid_today, status_filter=status_filter, source_filter=source_filter)
+    auto_today = PaymentGatewayEvent.query.filter(
+        PaymentGatewayEvent.business_id == business_id,
+        PaymentGatewayEvent.status == "MATCHED",
+        db.func.date(PaymentGatewayEvent.received_at) == db.func.current_date()
+    ).count()
+    unmatched_count = PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED").count()
+
+    return render_template("admin/payments.html",
+                           reconciliation_rows=reconciliation_rows, stores=stores,
+                           pending_count=pending_count, pending_amount=pending_amount,
+                           online_pending=online_pending, pos_pending=pos_pending,
+                           paid_today=paid_today, auto_today=auto_today,
+                           unmatched_count=unmatched_count,
+                           status_filter=status_filter, source_filter=source_filter)
 
 
 @bp.post(f"{ADMIN_BASE}/payments/<payment_id>/approve-manual")
@@ -717,8 +884,6 @@ def create_payment_destination():
     label = (request.form.get("label") or "").strip()
     channel = (request.form.get("channel") or "TILL").strip().upper()
     number = re.sub(r"\D", "", request.form.get("number") or "")
-    if channel == "TILL":
-        number = DENMART_MERCHANT_TILL
     account = (request.form.get("account_number") or "").strip() or None
     instructions = (request.form.get("instructions") or "").strip() or None
     if not label or channel not in {"TILL","PAYBILL"} or not number:
@@ -1842,7 +2007,7 @@ def settings():
     return render_template(
         "admin/settings.html", business=business,
         integration=integration,
-        till_number=DENMART_MERCHANT_TILL,
+        till_number=get_setting("mpesa_till_number", ""),
         transaction_type=get_setting("mpesa_transaction_type", "CustomerPayBillOnline"),
         callback_url=integration.callback_url if integration else "",
         loyalty_points_per_100=get_setting("loyalty_points_per_100", "1"),
@@ -1859,10 +2024,6 @@ def save_till():
     if value and not value.isdigit():
         flash("Till number must contain digits only.", "error")
         return redirect(url_for("admin.settings"))
-    if value and value != DENMART_MERCHANT_TILL:
-        flash(f"This Denmart gateway is server-locked to Till {DENMART_MERCHANT_TILL}; the saved Till was not changed.", "error")
-        return redirect(url_for("admin.settings"))
-    value = DENMART_MERCHANT_TILL
     row = SystemSetting.query.filter_by(business_id=current_user.business_id, key="mpesa_till_number").first()
     if not row:
         row = SystemSetting(business_id=current_user.business_id, key="mpesa_till_number")

@@ -1,4 +1,3 @@
-from config import DENMART_MERCHANT_TILL
 from io import BytesIO
 import base64
 import mimetypes
@@ -29,6 +28,11 @@ def active_payment_destination(business_id, store_id=None):
     return (q.filter_by(store_id=None, is_default=True).first() or
             q.filter_by(store_id=None).order_by(PaymentDestination.created_at.desc()).first())
 
+
+
+
+def fixed_merchant_till():
+    return str(current_app.config.get("DENMART_MERCHANT_TILL") or "").strip()
 
 def selected_store():
     stores = active_stores()
@@ -157,13 +161,13 @@ def cart():
 @bp.get("/checkout")
 def checkout():
     store = selected_store()
-    destination = active_payment_destination(store.business_id, store.id) if store else None
-    # The Denmart gateway has one authoritative Till. A saved/legacy Till must not
-    # cause the shopper to pay a different merchant destination. Preserve PayBill
-    # destinations when explicitly configured; otherwise expose Till 302145.
-    if not destination or str(destination.channel or "").upper() != "PAYBILL":
-        destination = type("LockedTillDestination", (), {"id":"", "channel":"TILL", "number":DENMART_MERCHANT_TILL, "account_number":"", "label":"Denmart M-PESA Till", "instructions":"Use this Till after checking the amount shown above."})()
-    return render_template("shop/checkout.html", store=store, till_number=(destination.number if destination else ""), payment_destination=destination)
+    till_number = fixed_merchant_till()
+    destination = type("FixedTill", (), {
+        "id":"", "channel":"TILL", "number":till_number, "account_number":"",
+        "label":"Denmart M-PESA Till",
+        "instructions":"Pay the exact order total to the Denmart merchant Till."
+    })() if till_number else None
+    return render_template("shop/checkout.html", store=store, till_number=till_number, payment_destination=destination)
 
 
 @bp.get("/order/<order_number>")
@@ -172,10 +176,11 @@ def order_confirmation(order_number):
     order = Order.query.filter_by(order_number=order_number).first_or_404()
     items = OrderItem.query.filter_by(order_id=order.id).all()
     store = Store.query.get(order.store_id)
-    destination = active_payment_destination(order.business_id, order.store_id)
-    if not destination or str(destination.channel or "").upper() != "PAYBILL":
-        destination = type("LockedTillDestination", (), {"id":"", "channel":"TILL", "number":DENMART_MERCHANT_TILL, "account_number":"", "label":"Denmart M-PESA Till", "instructions":"Use this Till after checking the amount shown above."})()
-    till_number = str(destination.number or "").strip()
+    till_number = fixed_merchant_till()
+    destination = type("FixedTill", (), {
+        "id":"", "channel":"TILL", "number":till_number, "account_number":"",
+        "label":"Denmart M-PESA Till", "instructions":"Pay the exact order total to the Denmart merchant Till."
+    })() if till_number else None
     active_payment = (Payment.query.filter(
         Payment.order_id == order.id,
         Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
@@ -245,11 +250,7 @@ def mpesa_till_qr():
     store = selected_store()
     if not store:
         return ("", 404)
-    destination = active_payment_destination(store.business_id, store.id)
-    if destination and str(destination.channel or "").upper() == "PAYBILL":
-        qr_value = str(destination.number or "").strip()
-    else:
-        qr_value = DENMART_MERCHANT_TILL
+    qr_value = fixed_merchant_till()
     if not qr_value:
         return ("", 404)
     img = qrcode.make(qr_value)

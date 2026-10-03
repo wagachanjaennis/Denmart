@@ -122,8 +122,6 @@ def _record_sale(data, allow_offline=False):
     paid_now = payment_method in {"CASH", "CARD"}
     mpesa_phone = ""
     if payment_method == "MPESA":
-        # The payer is learned from the M-PESA receipt on the merchant phone.
-        # Do not force the cashier to invent/guess the payer number before money arrives.
         raw_phone = str(data.get("phone_number") or "").strip()
         digits = "".join(ch for ch in raw_phone if ch.isdigit())
         if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
@@ -132,6 +130,8 @@ def _record_sale(data, allow_offline=False):
             mpesa_phone = "254" + digits[1:]
         elif digits.startswith("7") and len(digits) == 9:
             mpesa_phone = "254" + digits
+        # Payer phone is optional for POS. When entered it becomes a strong identity
+        # signal; the Android M-PESA receipt can still supply the payer details later.
 
     sale = Sale(
         business_id=current_user.business_id,
@@ -192,16 +192,9 @@ def _record_sale(data, allow_offline=False):
             db.session.rollback()
     audit("SALE_CREATED", "Sale", sale.id,
           new_values={"total": str(sale.total), "payment_method": payment_method, "offline": allow_offline})
-    response = dict(ok=True, sale_id=sale.id, receipt_number=receipt_number,
-                    payment_id=gateway_payment.id if gateway_payment else None,
-                    payment_status=sale.payment_status, total=str(sale.total))
-    if gateway_payment:
-        try:
-            from routes.api import merchant_till_number
-            response["till_number"] = merchant_till_number(current_user.business_id, current_user.store_id)
-        except Exception:
-            pass
-    return jsonify(response)
+    return jsonify(ok=True, sale_id=sale.id, receipt_number=receipt_number,
+                   payment_id=gateway_payment.id if gateway_payment else None,
+                   payment_status=sale.payment_status, total=str(sale.total))
 
 
 @csrf.exempt

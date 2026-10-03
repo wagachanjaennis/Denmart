@@ -3,123 +3,127 @@
 {% block chrome %}{% endblock %}
 {% block content %}
 <div class="control-shell">
-  {% set admin_sidebar_class = 'control-sidebar' %}
   {% include 'admin/_nav.html' %}
-  <main class="control-main">
+  <main class="control-main payment-reconciliation-page">
     <header class="control-header">
       <div>
-        <span class="eyebrow">PAYMENT CONTROL CENTRE</span>
+        <span class="eyebrow">PAYMENT RECONCILIATION</span>
         <h1>Payments</h1>
-        <p>One queue for online orders and physical-mart sales. Automatic Safaricom M-PESA matching runs first; manual approval is available when a verified payment needs intervention.</p>
+        <p>Expected customer details are compared directly with the M-PESA receipt before a payment is released.</p>
       </div>
       <div class="control-user">{{current_user.username}}<small>Master administrator</small></div>
     </header>
 
     <section class="admin-stat-grid">
-      <div class="admin-stat"><small>OPEN PAYMENTS</small><strong>{{pending_count}}</strong><span class="muted">KES {{'%.2f'|format(pending_amount|float)}} awaiting completion</span></div>
-      <div class="admin-stat"><small>ONLINE WAITING</small><strong>{{online_pending}}</strong><span class="muted">Customer orders</span></div>
-      <div class="admin-stat"><small>POS WAITING</small><strong>{{pos_pending}}</strong><span class="muted">Physical mart sales</span></div>
-      <div class="admin-stat"><small>PAID TODAY</small><strong>KES {{'%.2f'|format(paid_today|float)}}</strong><span class="muted">All methods</span></div>
-      <div class="admin-stat"><small>UNMATCHED SMS</small><strong>{{unmatched_events|length}}</strong><span class="muted"><a href="/control/payment-gateway">Review listener feed</a></span></div>
+      <div class="admin-stat"><small>OPEN</small><strong>{{pending_count}}</strong><span class="muted">KES {{'%.2f'|format(pending_amount|float)}}</span></div>
+      <div class="admin-stat"><small>ONLINE WAITING</small><strong>{{online_pending}}</strong><span class="muted">Orders</span></div>
+      <div class="admin-stat"><small>POS WAITING</small><strong>{{pos_pending}}</strong><span class="muted">Counter sales</span></div>
+      <div class="admin-stat"><small>AUTO-CONFIRMED TODAY</small><strong>{{auto_today}}</strong><span class="muted">Receipts matched</span></div>
+      <div class="admin-stat"><small>PAID TODAY</small><strong>KES {{'%.2f'|format(paid_today|float)}}</strong><span class="muted">Ledger total</span></div>
     </section>
 
     <section class="admin-panel">
       <div class="toolbar">
-        <div><strong>Payment queue</strong><div class="muted">Merchant Till <strong>{{merchant_till}}</strong> is the receiving destination. Any phone number shown below is the payer, never the Till.</div></div>
-        <form method="get">
+        <div><strong>Live comparison</strong><div class="muted">One payment, one comparison. The Till is intentionally not shown here.</div></div>
+        <form method="get" class="payment-filter-form">
           <select class="admin-input" name="source">
             <option value="">Online + POS</option>
             <option value="ONLINE" {% if source_filter=='ONLINE' %}selected{% endif %}>Online</option>
-            <option value="POS" {% if source_filter=='POS' %}selected{% endif %}>Physical mart / POS</option>
+            <option value="POS" {% if source_filter=='POS' %}selected{% endif %}>POS</option>
           </select>
           <select class="admin-input" name="status">
             <option value="">All statuses</option>
             {% for s in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID','PAID','FAILED','CLOSED_MANUAL'] %}<option value="{{s}}" {% if status_filter==s %}selected{% endif %}>{{s.replace('_',' ').title()}}</option>{% endfor %}
           </select>
-          <button class="admin-action">Filter</button>
+          <button class="admin-action">Refresh</button>
         </form>
       </div>
-      <div class="table-wrap">
-        <table class="admin-table">
-          <tr><th>When</th><th>Receiving Till / mart</th><th>Customer / payer</th><th>Amount</th><th>Method</th><th>Status</th><th>M-PESA receipt</th><th>Action</th></tr>
-          {% for payment in payments %}
-          {% set order = orders.get(payment.order_id) if payment.order_id else None %}
-          {% set sale = sales.get(payment.sale_id) if payment.sale_id else None %}
-          {% set store = stores.get(payment.store_id) if payment.store_id else None %}
-          {% set event = gateway_evidence.get(payment.id) if gateway_evidence else None %}
-          <tr>
-            <td><strong>{{(event.received_at if event and event.received_at else payment.created_at).strftime('%d %b %Y %H:%M:%S') if (event and event.received_at or payment.created_at) else '—'}}</strong><br><small>{{payment.provider or '—'}}</small></td>
-            <td><strong>Till {{merchant_till}}</strong><br><small>{% if order %}ONLINE ORDER · {% elif sale %}PHYSICAL MART / POS · {% endif %}{{store.name if store else 'Business-wide'}}</small></td>
-            <td>{% if event %}<strong>{{event.customer or 'M-PESA customer'}}</strong><br><small>{{event.customer_phone or payment.phone_number or '—'}}</small>{% elif order %}{{(customers.get(order.customer_id).name if order.customer_id and customers is defined and customers.get(order.customer_id) else 'Online customer')}}<br><small>{{payment.phone_number or '—'}}</small>{% elif sale %}<strong>POS customer</strong><br><small>{{payment.phone_number or 'Payer learned from receipt'}}</small>{% else %}Unattached{% endif %}</td>
-            <td><strong>KES {{'%.2f'|format(payment.amount|float)}}</strong></td>
-            <td>{{payment.method.replace('_',' ').title()}}</td>
-            <td><span class="admin-badge {% if payment.status=='FAILED' %}off{% elif payment.status=='PAID' %}gateway-ok{% elif payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] %}gateway-warn{% endif %}">{{payment.status.replace('_',' ').title()}}</span></td>
-            <td>{% if event %}<strong><code>{{event.transaction_id or '—'}}</code></strong><br><small>{{event.received_at.strftime('%d %b %Y %H:%M:%S') if event.received_at else '—'}}</small>{% else %}<code>{{payment.provider_transaction_id or payment.external_reference or '—'}}</code><br><small>Waiting for receipt</small>{% endif %}</td>
-            <td style="white-space:normal;min-width:220px">
-              {% if payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] and (order or sale) %}
-              <form method="post" action="/control/payments/{{payment.id}}/approve-manual" onsubmit="return confirm('Confirm that the money has actually been received before manually approving this payment. Continue?');">
-                <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
-                <input type="hidden" name="reason" value="Administrator verified the incoming Safaricom M-PESA receipt after automatic matching did not complete.">
-                <button class="admin-action" type="submit">Approve manually</button>
-              </form>
-              {% else %}<span class="muted">No action</span>{% endif %}
-            </td>
-          </tr>
+
+      <div class="payment-compare-table-wrap">
+        <table class="admin-table payment-compare-table">
+          <thead>
+            <tr>
+              <th>Expected / order</th>
+              <th>Actual M-PESA receipt</th>
+              <th>Comparison</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for row in reconciliation_rows %}
+            <tr>
+              <td class="payment-side expected-side">
+                <span class="payment-source-tag">{{row.expected.channel}}</span>
+                <strong>{{row.expected.name}}</strong>
+                <small>{{row.expected.phone or 'Phone not captured'}} · {{row.expected.reference}}</small>
+                <div class="payment-side-meta">
+                  <b>KES {{'%.2f'|format(row.expected.amount|float)}}</b>
+                  <span>{{row.expected.time.strftime('%d %b %Y · %H:%M:%S') if row.expected.time else '—'}}</span>
+                </div>
+              </td>
+              <td class="payment-side receipt-side">
+                {% if row.receipt %}
+                  <strong>{{row.receipt.name}}</strong>
+                  <small>{{row.receipt.phone or 'Payer number not visible'}}</small>
+                  <div class="payment-side-meta">
+                    <b>KES {{'%.2f'|format(row.receipt.amount|float)}}</b>
+                    <span>{{row.receipt.time.strftime('%d %b %Y · %H:%M:%S') if row.receipt.time else '—'}}</span>
+                  </div>
+                  <code class="receipt-code">{{row.receipt.code}}</code>
+                {% else %}
+                  <span class="muted">Waiting for M-PESA receipt</span>
+                  <small>The listener has not produced a usable receipt for this payment yet.</small>
+                {% endif %}
+              </td>
+              <td class="payment-result-cell">
+                {% if row.result == 'VALID' %}
+                  <span class="admin-badge gateway-ok">VALID</span>
+                  <small>Auto-confirmed</small>
+                {% elif row.result == 'CHECK' %}
+                  <span class="admin-badge gateway-warn">CHECK</span>
+                  <small>Receipt found, identity/time needs review</small>
+                {% else %}
+                  <span class="admin-badge gateway-warn">WAITING</span>
+                  <small>No usable receipt yet</small>
+                {% endif %}
+                {% if row.receipt %}
+                  <div class="match-breakdown">
+                    {% if row.expected.channel == 'ONLINE' %}<span class="{% if row.comparison.name and row.comparison.name >= 90 %}match-ok{% endif %}">Name {% if row.comparison.name and row.comparison.name >= 90 %}✓{% else %}·{% endif %}</span>{% endif %}
+                    {% if row.expected.phone %}<span class="{% if row.comparison.phone %}match-ok{% endif %}">Number {% if row.comparison.phone %}✓{% else %}·{% endif %}</span>{% endif %}
+                    <span class="{% if row.comparison.amount %}match-ok{% endif %}">Amount {% if row.comparison.amount %}✓{% else %}·{% endif %}</span>
+                    <span class="{% if row.comparison.time_minutes is not none and row.comparison.time_minutes <= 120 %}match-ok{% endif %}">Time {% if row.comparison.time_minutes is not none %}{{row.comparison.time_minutes}}m{% else %}·{% endif %}</span>
+                  </div>
+                {% endif %}
+              </td>
+              <td style="white-space:normal;min-width:180px">
+                {% if row.payment.status in ['PENDING','PENDING_APPROVAL','PARTIALLY_PAID'] and (row.order or row.sale) %}
+                  <form method="post" action="/control/payments/{{row.payment.id}}/approve-manual" onsubmit="return confirm('Confirm the actual M-PESA receipt has been received before approving manually. Continue?');">
+                    <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+                    <input type="hidden" name="reason" value="Administrator verified the incoming M-PESA receipt after automatic comparison did not complete.">
+                    <button class="admin-action" type="submit">Approve manually</button>
+                  </form>
+                {% elif row.result == 'VALID' %}
+                  <span class="muted">Released to accounting</span>
+                {% else %}
+                  <span class="muted">Automatic monitoring</span>
+                {% endif %}
+              </td>
+            </tr>
           {% else %}
-          <tr><td colspan="8">No payment records match this filter.</td></tr>
+            <tr><td colspan="4" class="empty-payment-state">No payment records match this filter.</td></tr>
           {% endfor %}
+          </tbody>
         </table>
       </div>
     </section>
 
-    <section class="admin-panel">
-      <div class="toolbar"><div><strong>M-PESA destinations</strong><div class="muted">Configure a separate Till or PayBill for each mart/business area. The checkout and POS gateway use these destinations automatically.</div></div></div>
-      <div class="table-wrap">
-        <table class="admin-table">
-          <tr><th>Destination</th><th>Mart</th><th>Channel</th><th>Number</th><th>Account</th><th>State</th><th></th></tr>
-          {% for destination in destinations %}
-          <tr>
-            <td><strong>{{destination.label}}</strong><br><small>{% if destination.is_default %}Default{% else %}Additional{% endif %}</small></td>
-            <td>{{stores.get(destination.store_id).name if destination.store_id and stores.get(destination.store_id) else 'Business-wide'}}</td>
-            <td>{{destination.channel}}</td>
-            <td><strong>{{destination.number}}</strong></td>
-            <td>{{destination.account_number or '—'}}</td>
-            <td><span class="admin-badge">{{'Active' if destination.is_active else 'Inactive'}}</span></td>
-            <td><form method="post" action="/control/payments/destinations/{{destination.id}}/toggle"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button class="admin-action">{{'Disable' if destination.is_active else 'Enable'}}</button></form></td>
-          </tr>
-          {% else %}<tr><td colspan="7">No payment destinations configured yet. The legacy M-PESA Till will continue to work until you add one here.</td></tr>{% endfor %}
-        </table>
-      </div>
-      <form method="post" action="/control/payments/destinations/create" class="payment-destination-form">
-        <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
-        <label><span>Label</span><input class="admin-input wide" name="label" placeholder="Main Mart Till" required></label>
-        <label><span>Mart</span><select class="admin-input wide" name="store_id"><option value="">Business-wide</option>{% for s in stores.values()|sort(attribute='name') %}<option value="{{s.id}}">{{s.name}} · {{s.code}}</option>{% endfor %}</select></label>
-        <label><span>Channel</span><select class="admin-input wide" name="channel" onchange="this.closest('form').querySelector('.paybill-account').hidden=this.value!=='PAYBILL'"><option value="TILL">M-PESA Till</option><option value="PAYBILL">M-PESA PayBill</option></select></label>
-        <label><span>Number</span><input class="admin-input wide" name="number" inputmode="numeric" placeholder="Till / PayBill number" required></label>
-        <label class="paybill-account"><span>Account / reference</span><input class="admin-input wide" name="account_number" placeholder="Required for PayBill"></label>
-        <label><span>Instructions</span><input class="admin-input wide" name="instructions" placeholder="Use the Till after checking the amount shown above."></label>
-        <label class="destination-check"><input type="checkbox" name="is_default" value="1" checked> Use as default for the selected mart</label>
-        <button class="admin-action" type="submit">Add destination</button>
-      </form>
+    {% if unmatched_count %}
+    <section class="payment-recon-footer">
+      <span><strong>{{unmatched_count}}</strong> M-PESA receipt{{'' if unmatched_count == 1 else 's'}} currently unmatched.</span>
+      <a class="admin-action" href="/control/payment-gateway">View listener status</a>
     </section>
-
-    <section class="admin-panel">
-      <div class="toolbar"><div><strong>Unmatched Safaricom receipts</strong><div class="muted">These are incoming M-PESA events that were accepted as receipts but could not be safely associated with an open payment intent.</div></div><a class="admin-action" href="/control/payment-gateway">Open monitor</a></div>
-      <div class="table-wrap">
-        <table class="admin-table">
-          <tr><th>Received</th><th>Receiving Till / mart</th><th>Payer</th><th>Amount</th><th>M-PESA code</th><th>Status</th></tr>
-          {% for event in unmatched_events %}
-          <tr><td>{{event.received_at.strftime('%d %b %H:%M') if event.received_at else '—'}}</td><td><strong>Till {{merchant_till}}</strong><br><small>{{stores.get(event.store_id).name if event.store_id and stores.get(event.store_id) else 'Unassigned'}}</small></td><td><strong>{{event.customer or '—'}}</strong><br><small>{{event.customer_phone or '—'}}</small></td><td>KES {{'%.2f'|format(event.amount|float) if event.amount is not none else '—'}}</td><td><code>{{event.transaction_id or '—'}}</code></td><td>{{event.status}}</td></tr>
-          {% else %}<tr><td colspan="6">No unmatched receipts are waiting for investigation.</td></tr>{% endfor %}
-        </table>
-      </div>
-    </section>
+    {% endif %}
   </main>
 </div>
 {% endblock %}
-{% block scripts %}<script>
-const channelSelect=document.querySelector('select[name="channel"]');
-const accountBox=document.querySelector('.paybill-account');
-function paintPaymentDestinationForm(){if(channelSelect&&accountBox)accountBox.hidden=channelSelect.value!=='PAYBILL';}
-channelSelect?.addEventListener('change',paintPaymentDestinationForm);paintPaymentDestinationForm();
-</script>{% endblock %}
+{% block scripts %}{% endblock %}

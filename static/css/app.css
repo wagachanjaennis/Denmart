@@ -212,3 +212,26 @@ body.pwa-standalone{overscroll-behavior-y:none;-webkit-touch-callout:none}
 .location-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:18px 0 40px}.location-card{background:#fff;border:1px solid rgba(24,38,30,.09);border-radius:22px;padding:20px;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 24px rgba(24,38,30,.06)}.location-card h2{margin:4px 0}.location-card p{margin:0;line-height:1.55}.location-card .text-btn{margin-top:auto}.location-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.location-detail-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.8fr);gap:18px;margin:18px 0 40px}.location-detail-grid .control-panel{height:max-content}@media(max-width:800px){.location-detail-grid{grid-template-columns:1fr}}
 
 .payment-destination-form{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line,#e2e7e4)}.payment-destination-form label{display:grid;gap:5px;font-size:.67rem;font-weight:850;color:var(--muted,#748087)}.payment-destination-form .admin-input{width:100%;box-sizing:border-box}.destination-check{grid-column:span 2;display:flex!important;align-items:center;gap:7px}.destination-check input{width:auto}@media(max-width:900px){.payment-destination-form{grid-template-columns:1fr 1fr}.destination-check{grid-column:1/-1}}@media(max-width:560px){.payment-destination-form{grid-template-columns:1fr}.destination-check{grid-column:auto}}
+
+/* Payment reconciliation: compact side-by-side evidence, no Till/debug clutter. */
+.payment-filter-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.payment-compare-table-wrap{overflow:auto}
+.payment-compare-table{min-width:980px}
+.payment-compare-table th{white-space:nowrap}
+.payment-compare-table td{vertical-align:top}
+.payment-side{min-width:290px}
+.payment-side>strong{display:block;font-size:15px;margin:.3rem 0 .12rem}
+.payment-side>small{display:block;color:var(--muted,#6b7280);line-height:1.45}
+.payment-side-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;font-size:12px}
+.payment-side-meta span{color:var(--muted,#6b7280);text-align:right}
+.payment-source-tag{display:inline-block;font-size:10px;letter-spacing:.08em;font-weight:800;padding:4px 7px;border-radius:999px;background:rgba(15,23,42,.07);color:#334155}
+.receipt-code{display:inline-block;margin-top:9px;padding:5px 8px;border-radius:7px;background:#0f172a;color:#fff;font-weight:800;letter-spacing:.04em}
+.payment-result-cell{min-width:150px;text-align:center}
+.payment-result-cell small{display:block;margin-top:7px;color:var(--muted,#6b7280);line-height:1.35}
+.empty-payment-state{text-align:center;padding:40px 20px!important;color:var(--muted,#6b7280)}
+.payment-recon-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:12px 14px;border:1px solid rgba(15,23,42,.09);border-radius:12px;background:rgba(255,255,255,.7)}
+@media (max-width:900px){.payment-filter-form{width:100%}.payment-filter-form .admin-input{flex:1;min-width:120px}.payment-recon-footer{align-items:flex-start;flex-direction:column}}
+
+.match-breakdown{display:flex;justify-content:center;gap:7px;flex-wrap:wrap;margin-top:9px;font-size:10px;color:#64748b}
+.match-breakdown span{padding:3px 5px;border-radius:5px;background:rgba(15,23,42,.05)}
+.match-breakdown .match-ok{color:#087f5b;background:rgba(8,127,91,.09);font-weight:800}
