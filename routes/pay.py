@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import timezone
 import json
 from functools import wraps
 
@@ -42,7 +43,15 @@ def _default_store_from_items(items):
 
 
 def _expire(order):
-    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and order.expires_at and order.expires_at <= now():
+    # PostgreSQL schemas created by older releases may return timestamp columns
+    # without tzinfo even though the model now declares timezone=True. Normalize
+    # both representations before Python compares them.
+    expires_at = order.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    elif expires_at:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and expires_at and expires_at <= now():
         order.payment_status = "EXPIRED"
         order.review_reason = "Payment request expired."
         db.session.add(PayEvent(payment_order_id=order.id, event_type="EXPIRED", source="SYSTEM", note="Payment window expired without approval."))

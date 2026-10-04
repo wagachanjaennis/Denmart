@@ -1,17 +1,18 @@
-DENMART PAY HARDCODE PATCH — 2026-10-04
+# Denmart PAY Emergency Fix — 2026-10-04
 
-Replace these three files in the existing GitHub repository:
-- config.py
-- services/payment_engine.py
-- routes/shop.py
+Replace these five files in the existing GitHub repository, preserving the same paths:
 
-Changes:
-1. Customer PAY defaults to Buy Goods Till 0757817361 when payment settings are blank.
-2. Existing blank pay_settings rows are automatically hydrated with that Till.
-3. New pay_settings rows also use that Till.
-4. Customer order creation has a final fallback so checkout cannot stop on the old “Payment instructions are not configured yet” condition.
-5. routes/shop.py imports Business, fixing the PWA manifest/app-icon 500s shown in Render logs.
+- `config.py`
+- `routes/shop.py`
+- `routes/pay.py`
+- `routes/auth.py`
+- `services/payment_engine.py`
 
-No Procfile, APK, database reset, or unrelated files are required.
+Fixes included:
 
-IMPORTANT: 0757817361 is the Till value found in the original Denmart project. It has not been independently verified here as a live merchant destination. Replace it with the merchant’s verified Till before accepting real payments.
+1. Restores the hard-coded M-PESA Buy Goods destination `0757817361` as the fallback payment destination.
+2. Imports `jsonify` in `routes/shop.py`, fixing `/shop/manifest.webmanifest` and related PWA icon errors.
+3. Makes payment expiry comparison safe when a database timestamp is timezone-aware or timezone-naive.
+4. Fixes the admin `/control` authenticated handoff to call `routes.admin.dashboard()` instead of the removed `_dashboard()` function.
+
+No Procfile, Render configuration, APK, or unrelated project files need to be changed for this emergency fix.
