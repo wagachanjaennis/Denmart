@@ -1,18 +1,30 @@
-# Denmart PAY Emergency Fix — 2026-10-04
+# Denmart M-PESA live matching fix
 
-Replace these five files in the existing GitHub repository, preserving the same paths:
+Replace these files in the existing GitHub repo:
 
-- `config.py`
-- `routes/shop.py`
-- `routes/pay.py`
-- `routes/auth.py`
+- `routes/api.py`
 - `services/payment_engine.py`
+- `routes/pay.py`
+- `templates/pay/approval.html`
 
-Fixes included:
+Root cause fixed: real incoming M-PESA receipts from the Android gateway can contain a bare 9-digit Kenyan number, such as `739952128`, and Airtel receipts can prefix the payer as `AIRTEL MONEY - NAME`. The previous parser rejected the bare phone and included the provider prefix in the payer name, so the PAY matcher was skipped or could not match.
 
-1. Restores the hard-coded M-PESA Buy Goods destination `0757817361` as the fallback payment destination.
-2. Imports `jsonify` in `routes/shop.py`, fixing `/shop/manifest.webmanifest` and related PWA icon errors.
-3. Makes payment expiry comparison safe when a database timestamp is timezone-aware or timezone-naive.
-4. Fixes the admin `/control` authenticated handoff to call `routes.admin.dashboard()` instead of the removed `_dashboard()` function.
+The new parser converts the example message:
 
-No Procfile, Render configuration, APK, or unrelated project files need to be changed for this emergency fix.
+`UJ40P8WT1S Confirmed. You have received Ksh1.00 from AIRTEL MONEY - JOSIAH MUKUNG 739952128 ...`
+
+to:
+
+- transaction code: `UJ40P8WT1S`
+- amount: `1.00`
+- payer name: `JOSIAH MUKUNG`
+- phone: `254739952128`
+
+Matching priority:
+
+1. normalized name + phone + exact amount, if that uniquely identifies one eligible payment
+2. otherwise one unique normalized phone + exact amount candidate is auto-approved
+3. multiple candidates stay `PAYMENT_AMBIGUOUS`
+4. zero exact candidates are checked only for under/overpayment by phone; never auto-approved
+
+The approval page now visibly shows the customer's name, phone, and amount that the server is waiting to compare with the live gateway receipt. Once a receipt is linked, it shows the gateway name, phone, amount, classification, and match method.

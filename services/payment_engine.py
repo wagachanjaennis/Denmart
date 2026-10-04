@@ -205,14 +205,20 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
     code = str(transaction_code or "").strip().upper()[:40]
     total = normalize_amount(amount)
     name = str(payer_name or "").strip()[:160]
+    name_norm = normalize_name(name)
     phone_norm = normalize_phone(phone)
-    if not code or total is None or not phone_norm or not normalize_name(name):
+    received_at = received_at or now()
+    if not code or total is None or not phone_norm or not name_norm:
         return {"classification": "PAYMENT_UNMATCHED", "matched": False, "reason": "INVALID_PARSED_FIELDS"}
 
+    # Transaction code is the immutable de-duplication key.
     existing = PayReceipt.query.filter_by(transaction_code=code).with_for_update().first()
     if existing:
-        return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.payment_order_id}
+        return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
 
+    # First build the exact phone+amount pool. This prevents amount-only or
+    # name-only approvals and keeps every auto-approval tied to the customer's
+    # actual payment request.
     candidates = (PayOrder.query.filter(
         PayOrder.business_id == business_id,
         PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
@@ -221,32 +227,38 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
         or_(PayOrder.expires_at.is_(None), PayOrder.expires_at > now()),
     ).with_for_update().all())
 
-    exact_name = [o for o in candidates if o.customer_name_normalized == normalize_name(name)]
+    name_candidates = [o for o in candidates if o.customer_name_normalized == name_norm]
     order = None
     phone_orders = []
     classification = "PAYMENT_UNMATCHED"
     method = "NO_SAFE_EXACT_MATCH"
     reason = "No safe exact pending match."
 
-    if len(exact_name) == 1:
-        order = exact_name[0]
+    # Highest priority: name + phone + exact amount. If there is one unique
+    # match, approve immediately even when another payment shares the phone+amount.
+    if len(name_candidates) == 1:
+        order = name_candidates[0]
         classification = "PAYMENT_MATCHED"
         method = "NAME_PHONE_AND_AMOUNT"
-        reason = "Exact normalized M-PESA name + phone + amount match."
-    elif len(exact_name) > 1:
+        reason = "Exact normalized M-PESA name, phone and amount match."
+    elif len(name_candidates) > 1:
         classification = "PAYMENT_AMBIGUOUS"
         method = "MULTIPLE_NAME_PHONE_AMOUNT"
-        reason = "More than one pending payment has the same name, phone and amount."
+        reason = "More than one pending payment has the same normalized name, phone and amount."
+    elif len(candidates) == 1:
+        # Safe fallback required by the payment contract: a unique exact phone+
+        # amount candidate cannot be blocked by harmless name formatting/provider text.
+        order = candidates[0]
+        classification = "PAYMENT_MATCHED"
+        method = "PHONE_AND_AMOUNT"
+        reason = "Exactly one eligible pending payment matches the normalized phone and exact amount."
     elif len(candidates) > 1:
         classification = "PAYMENT_AMBIGUOUS"
         method = "MULTIPLE_PHONE_AND_AMOUNT"
-        reason = "More than one pending payment has the same phone and amount."
-    elif len(candidates) == 1:
-        order = candidates[0]
-        classification = "NAME_MISMATCH"
-        method = "PHONE_AND_AMOUNT_NAME_CONFLICT"
-        reason = "One phone+amount candidate exists, but the M-PESA registered name does not agree."
+        reason = "More than one pending payment has the same phone and amount; manual selection is required."
     else:
+        # Nothing matched the exact amount. A phone-only lookup is used only to
+        # classify an under/over payment; it can never auto-approve.
         phone_orders = (PayOrder.query.filter(
             PayOrder.business_id == business_id,
             PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
@@ -255,10 +267,10 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
         ).with_for_update().all())
         if len(phone_orders) == 1:
             order = phone_orders[0]
-            expected = Decimal(str(order.expected_amount)).quantize(TWOPLACES)
-            if total < expected:
+            expected = normalize_amount(order.expected_amount)
+            if expected is not None and total < expected:
                 classification, method, reason = "UNDERPAYMENT", "PHONE_MATCH_AMOUNT_LOW", "Received amount is below the pending amount."
-            elif total > expected:
+            elif expected is not None and total > expected:
                 classification, method, reason = "OVERPAYMENT", "PHONE_MATCH_AMOUNT_HIGH", "Received amount is above the pending amount."
             else:
                 classification, method, reason = "PAYMENT_UNMATCHED", "SAFE_MATCH_FAILED", "Payment details did not pass the safe match path."
@@ -268,21 +280,15 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
     candidate_ids = [o.id for o in (candidates or [])]
     if phone_orders:
         candidate_ids = [o.id for o in phone_orders]
-    if not candidate_ids and order and classification in {"NAME_MISMATCH", "UNDERPAYMENT", "OVERPAYMENT", "PHONE_MISMATCH"}:
-        candidate_ids = [order.id]
-    if classification == "PAYMENT_AMBIGUOUS":
-        phone_pool = [o.id for o in (candidates or [])]
-        if phone_pool:
-            candidate_ids = phone_pool
 
     receipt = PayReceipt(
         business_id=business_id,
         transaction_code=code,
         amount=total,
         payer_name=name,
-        payer_name_normalized=normalize_name(name),
+        payer_name_normalized=name_norm,
         payer_phone=phone_norm,
-        received_at=received_at or now(),
+        received_at=received_at,
         gateway_device_id=str(device_id or "android-gateway")[:120],
         sim_slot=int(sim_slot or 0),
         sender=str(sender or "")[:120],
@@ -297,7 +303,8 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
     db.session.add(receipt)
 
     if order and classification == "PAYMENT_MATCHED":
-        # Safe settlement: lock the payment and its stock before changing either.
+        # Lock the live order and stock rows, then settle the payment and receipt
+        # together so a successful approval cannot exist without its audit record.
         live_order = PayOrder.query.filter_by(id=order.id).with_for_update().first()
         if live_order and live_order.payment_status in {"PENDING", "MANUAL_REVIEW"}:
             for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
@@ -309,10 +316,10 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
                     live_order.last_match_note = "Payment matched, but stock changed before settlement; administrator review required."
                     classification = "STOCK_CONFLICT"
                     receipt.classification = classification
-                    receipt.matching_method = "NAME_PHONE_AMOUNT_STOCK_CONFLICT"
+                    receipt.matching_method = "EXACT_MATCH_STOCK_CONFLICT"
                     db.session.add(PayEvent(payment_order_id=live_order.id, event_type="REVIEW_REQUIRED", source="ANDROID_GATEWAY", note=live_order.last_match_note))
                     db.session.commit()
-                    return {"classification": classification, "matched": False, "payment_order_id": live_order.id, "reason": live_order.last_match_note}
+                    return {"classification": classification, "matched": False, "payment_order_id": live_order.id, "reason": live_order.last_match_note, "method": method}
             for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
                 sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
                 sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
@@ -323,7 +330,7 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
             live_order.paid_amount = total
             live_order.paid_name = name
             live_order.paid_phone = phone_norm
-            live_order.paid_at = received_at or now()
+            live_order.paid_at = received_at
             live_order.paid_source = "ANDROID_GATEWAY_AUTO"
             live_order.matched_by = method
             live_order.review_reason = None
@@ -333,7 +340,7 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
     elif order:
         order.review_reason = reason
         order.last_match_note = reason
-        if order.payment_status == "PENDING" and classification in {"NAME_MISMATCH", "UNDERPAYMENT", "OVERPAYMENT", "PAYMENT_AMBIGUOUS", "PHONE_MISMATCH", "PAYMENT_UNMATCHED"}:
+        if order.payment_status == "PENDING" and classification in {"UNDERPAYMENT", "OVERPAYMENT", "PAYMENT_AMBIGUOUS", "PAYMENT_UNMATCHED"}:
             order.payment_status = "MANUAL_REVIEW"
         db.session.add(PayEvent(payment_order_id=order.id, event_type="MATCH_REVIEW", source="ANDROID_GATEWAY", note=reason))
 
@@ -346,7 +353,13 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
             return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
         raise
 
-    return {"classification": classification, "matched": classification == "PAYMENT_MATCHED", "payment_order_id": order.id if order else None, "reason": reason, "method": method}
+    return {
+        "classification": classification,
+        "matched": classification == "PAYMENT_MATCHED",
+        "payment_order_id": order.id if order else None,
+        "reason": reason,
+        "method": method,
+    }
 
 
 def manual_approve(order, actor_id, reason="Manual approval"):

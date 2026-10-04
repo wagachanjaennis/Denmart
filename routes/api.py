@@ -89,18 +89,33 @@ def _gateway_parse_customer(message):
     if not m:
         return ""
     value = m.group(1).strip(" .,-")
-    value = re.sub(r"\s+(?:\+?254|0)\d{9}\b.*$", "", value, flags=re.I)
-    return value[:240]
+    # Airtel-to-M-PESA receipts commonly expose a provider prefix before the
+    # actual payer name, e.g. "AIRTEL MONEY - JOSIAH MUKUNG 739952128".
+    value = re.sub(r"^AIRTEL\s+MONEY\s*[-:–—]?\s*", "", value, flags=re.I)
+    value = re.sub(r"\s+(?:(?:\+?254|0)?[17]\d{8})\b.*$", "", value, flags=re.I)
+    return value.strip(" .,-")[:240]
 
 
 def _gateway_parse_phone(message):
-    text=str(message or "")
-    for pattern in [r"(?:\+?254|0)7\d{8}", r"(?:\+?254|0)1\d{8}"]:
-        m=re.search(pattern,text)
-        if m:
-            raw=re.sub(r"\D","",m.group(0))
-            if raw.startswith("0") and len(raw)==10: return "254"+raw[1:]
-            if raw.startswith("254") and len(raw)==12: return raw
+    text = str(message or "")
+    # Accept all Kenyan formats used by real gateway SMSes, including the
+    # bare nine-digit form (e.g. 739952128).
+    patterns = [
+        r"\b(?:\+?254)(?:7|1)\d{8}\b",
+        r"\b0(?:7|1)\d{8}\b",
+        r"\b(?:7|1)\d{8}\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        raw = re.sub(r"\D", "", m.group(0))
+        if raw.startswith("254") and len(raw) == 12 and raw[3] in "17":
+            return raw
+        if raw.startswith("0") and len(raw) == 10 and raw[1] in "17":
+            return "254" + raw[1:]
+        if len(raw) == 9 and raw[0] in "17":
+            return "254" + raw
     return ""
 
 
@@ -182,7 +197,7 @@ def android_gateway_ping():
 @bp.post("/payment-gateway/telemetry")
 @bp.post("/mpesa-listener/event")
 def android_gateway_sms():
-    """Passive Android SMS ingestion. It stores telemetry only; it never changes application records beyond the telemetry mirror."""
+    """Receive the existing Android gateway feed, persist the live mirror, and hand valid M-PESA candidates to the independent PAY matcher."""
     supplied_key = (
         request.args.get("key")
         or request.headers.get("X-Denmart-Gateway-Key")
