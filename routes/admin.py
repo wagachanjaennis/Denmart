@@ -358,6 +358,14 @@ def _gateway_setting(business_id, key):
 
 def _gateway_secret_for(business_id):
     setting = _gateway_setting(business_id, "payment_gateway_secret")
+    configured = str(current_app.config.get("PAYMENT_GATEWAY_SHARED_SECRET") or "").strip()
+    if configured:
+        if not setting or setting.value != configured:
+            setting = setting or SystemSetting(business_id=business_id, key="payment_gateway_secret")
+            setting.value = configured
+            db.session.add(setting)
+            db.session.commit()
+        return configured
     if not setting or not setting.value:
         setting = setting or SystemSetting(business_id=business_id, key="payment_gateway_secret")
         if not setting.value:
@@ -368,7 +376,11 @@ def _gateway_secret_for(business_id):
 
 
 def _gateway_url_for(business_id):
-    return url_for("api.payment_gateway_sms", _external=True) + "?key=" + _gateway_secret_for(business_id)
+    base = str(current_app.config.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    endpoint = url_for("api.payment_gateway_sms", _external=True)
+    if base:
+        endpoint = base + "/api/payment-gateway/sms"
+    return endpoint + "?key=" + _gateway_secret_for(business_id)
 
 
 @bp.get(f"{ADMIN_BASE}/payment-gateway")
@@ -377,7 +389,7 @@ def payment_gateway():
     business_id = current_user.business_id
     stores = Store.query.filter_by(business_id=business_id).order_by(Store.name).all()
     secret = _gateway_secret_for(business_id)
-    url = url_for("api.payment_gateway_sms", _external=True) + "?key=" + secret
+    url = _gateway_url_for(business_id)
 
     sim1 = _gateway_setting(business_id, "payment_gateway_sim_0_store_id")
     sim2 = _gateway_setting(business_id, "payment_gateway_sim_1_store_id")

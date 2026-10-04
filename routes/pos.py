@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, render_template, request, redirect
 from flask_login import current_user, login_required
 from extensions import csrf, db
 from models import Sale, SaleItem, StoreProduct, InventoryTransaction, Shift, CashDrawerTransaction, Payment, now, Store, User
+from services.payments.normalization import normalize_ke_phone
 from services.audit import audit
 
 bp = Blueprint("pos", __name__)
@@ -128,13 +129,7 @@ def _record_sale(data, allow_offline=False):
     mpesa_customer_name = str(data.get("customer_name") or data.get("payer_name") or "").strip()[:240]
     if payment_method == "MPESA":
         raw_phone = str(data.get("phone_number") or "").strip()
-        digits = "".join(ch for ch in raw_phone if ch.isdigit())
-        if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
-            mpesa_phone = digits
-        elif digits.startswith("0") and len(digits) == 10 and digits[1] in "17":
-            mpesa_phone = "254" + digits[1:]
-        elif digits.startswith("7") and len(digits) == 9:
-            mpesa_phone = "254" + digits
+        mpesa_phone = normalize_ke_phone(raw_phone)
         # Payer phone is optional for POS. When entered it becomes a strong identity
         # signal; the Android M-PESA receipt can still supply the payer details later.
 

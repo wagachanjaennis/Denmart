@@ -24,6 +24,10 @@
         <input id="gatewayUrl" class="admin-input gateway-url-input" readonly value="{{gateway_url}}">
         <button class="admin-action" type="button" onclick="copyGatewayUrl()">Copy link</button>
       </div>
+      <div class="gateway-note" style="margin-top:10px">
+        <strong>Keep this link unchanged on the phone.</strong>
+        <span>The Android gateway authenticates with the key inside this URL. Rotating the link disconnects the installed APK until its configuration is updated.</span>
+      </div>
       <form method="post" action="/control/payment-gateway/rotate" onsubmit="return confirm('Rotate the gateway link? The existing Android app will stop delivering until you paste the new link into it.');" style="margin-top:9px">
         <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
         <button class="admin-action danger-action" type="submit">Rotate gateway link</button>
