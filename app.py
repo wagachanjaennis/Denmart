@@ -26,12 +26,14 @@ def create_app():
     from routes.admin import bp as admin_bp
     from routes.api import bp as api_bp
     from routes.scan import bp as scan_bp
+    from routes.pay import bp as pay_bp
     app.register_blueprint(auth_bp)
     app.register_blueprint(shop_bp)
     app.register_blueprint(pos_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(scan_bp)
+    app.register_blueprint(pay_bp)
 
     # Render services sometimes start with `gunicorn app:app` and skip
     # the explicit init_db.py command. Ensure a fresh database cannot

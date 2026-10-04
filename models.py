@@ -377,7 +377,6 @@ class Payment(db.Model):
     merchant_request_id = db.Column(db.String(160), index=True)
     checkout_request_id = db.Column(db.String(160), unique=True, index=True)
     phone_number = db.Column(db.String(40))
-    normalized_phone = db.Column(db.String(16), index=True)
     initiated_at = db.Column(db.DateTime(timezone=True), default=now)
     completed_at = db.Column(db.DateTime(timezone=True))
     failure_code = db.Column(db.String(80))
@@ -538,11 +537,7 @@ class PaymentGatewayEvent(db.Model):
     amount = db.Column(db.Numeric(14, 2), default=0)
     customer = db.Column(db.String(240))
     customer_phone = db.Column(db.String(40))
-    normalized_phone = db.Column(db.String(16), index=True)
-    status = db.Column(db.String(40), default="UNMATCHED", nullable=False, index=True)
-    classification = db.Column(db.String(40), index=True)
-    matched_by = db.Column(db.String(60))
-    processed_at = db.Column(db.DateTime(timezone=True))
+    status = db.Column(db.String(30), default="UNMATCHED", nullable=False, index=True)
     matched_payment_id = db.Column(db.String(36), db.ForeignKey("payments.id"))
     raw_payload = db.Column(db.JSON)
     created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
@@ -580,6 +575,42 @@ class GatewaySmsMessage(db.Model):
     payment_event = db.relationship("PaymentGatewayEvent")
     __table_args__ = (
         db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_gateway_sms_business_device_event"),
+    )
+
+
+class AutoPaymentReceipt(db.Model):
+    """Independent live M-PESA receipt ledger used only by the /pay automation path.
+
+    The Android gateway remains the transport client. Every accepted gateway event is
+    stored here with the complete raw SMS. Matching never uses scores, time proximity,
+    payer-name similarity, or the legacy payment-intent matcher.
+    """
+    __tablename__ = "auto_payment_receipts"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
+    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), index=True)
+    gateway_device_id = db.Column(db.String(120), nullable=False, index=True)
+    sim_slot = db.Column(db.Integer, nullable=False, default=0, index=True)
+    subscription_id = db.Column(db.BigInteger)
+    event_id = db.Column(db.String(160), nullable=False)
+    transaction_code = db.Column(db.String(40), index=True)
+    amount = db.Column(db.Numeric(14, 2))
+    payer_name = db.Column(db.String(240))
+    phone = db.Column(db.String(40), index=True)
+    normalized_phone = db.Column(db.String(20), index=True)
+    sender = db.Column(db.String(120))
+    raw_message = db.Column(db.Text, nullable=False)
+    received_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, index=True)
+    classification = db.Column(db.String(40), nullable=False, default="LIVE_RECEIVED", index=True)
+    matched_order_id = db.Column(db.String(36), db.ForeignKey("orders.id"), index=True)
+    matched_sale_id = db.Column(db.String(36), db.ForeignKey("sales.id"), index=True)
+    matched_payment_id = db.Column(db.String(36), db.ForeignKey("payments.id"), index=True)
+    matching_method = db.Column(db.String(60))
+    processed_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
+    raw_payload = db.Column(db.JSON)
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_auto_pay_business_device_event"),
     )
 
 
