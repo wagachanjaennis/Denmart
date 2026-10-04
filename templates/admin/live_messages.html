@@ -78,6 +78,9 @@
           <div><b>Phone:</b> ${esc(m.customer_phone || '—')}</div>
           <div><b>M-PESA code:</b> ${esc(m.transaction || '—')}</div>
           ${m.paid ? `<div><b>Matched payment:</b> ${esc(m.matched_payment_id || '—')}</div>` : ''}
+          ${m.classification ? `<div><b>Classification:</b> ${esc(m.classification)}</div>` : ''}
+          ${m.matched_by ? `<div><b>Matched by:</b> ${esc(m.matched_by)}</div>` : ''}
+          ${(m.candidates||[]).length ? `<div><b>Review candidates:</b> ${(m.candidates||[]).map(c=>esc((c.reference||c.payment_id)+' · '+(c.expected_amount||'—'))).join(', ')}</div>` : ''}
         </div>` : '';
         return `<tr class="${m.paid?'live-message-paid':''}"><td><strong>${esc(fmtTime(m.time))}</strong><br><span class="live-message-meta">${esc(m.event_id)}</span></td><td>SIM ${esc(m.sim)}<br><span class="live-message-meta">${esc(m.device)}</span></td><td><strong>${esc(m.sender)}</strong></td><td><span class="admin-badge ${m.mpesa?'live-message-yes':'live-message-no'}">${m.mpesa?'M-PESA CANDIDATE':'NON-PAYMENT'}</span></td><td><span class="admin-badge ${m.status==='MATCHED_AND_SETTLED'?'gateway-ok':m.payment_event_id?'gateway-warn':''}">${esc(m.status)}</span>${m.paid?'<div class="live-paid-label">PAID / AUTO-APPROVED</div>':''}</td><td class="live-message-body">${details}<div class="live-payment-raw">${esc(m.message)}</div></td></tr>`;
       }).join('');

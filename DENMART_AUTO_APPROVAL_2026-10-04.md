@@ -1,31 +1,33 @@
-# Denmart Live-Message Auto Approval — 2026-10-04
+# Denmart M-PESA Auto-Approval — 2026-10-04
 
 ## Authority
-For gateway M-PESA payments, the Android gateway only transports SMS telemetry. The server's raw SMS is authoritative for payment evidence.
+The Android gateway only transports SMS telemetry. The server's raw SMS is authoritative for payment evidence. `Live Messages` remains the complete server receipt/audit stream.
 
-`Live Messages` is the automatic approval path. The `Payments` page is status + manual-review only and does not run a matching pass when opened.
+## Automatic approval rule
+A valid inbound Safaricom/M-PESA receipt is eligible for automatic approval only when exactly one still-open gateway payment has:
 
-## Automatic approval rules
-A live M-PESA receipt can auto-approve an open online order or POS sale when:
+- the same normalized Kenyan payer phone; and
+- the same exact normalized amount as the payment's current outstanding balance.
 
-1. The raw SMS is structurally identified as an incoming Safaricom/M-PESA receipt.
-2. The receipt contains a valid transaction code and amount.
-3. The receipt amount exactly equals the entity's current outstanding balance.
-4. At least one durable payer identity matches: payer phone OR payer name.
-5. If the customer entered an M-PESA transaction code, an exact code match is treated as the strongest signal.
-6. The receipt is reasonably tied to the payment attempt: up to 10 minutes before creation and up to 24 hours after creation.
+Payer name is stored and normalized for display/manual review only. It is never required for an exact phone + amount match and never acts as the primary identifier.
 
-Underpayments, overpayments, and ambiguous identity matches stay open for manual review rather than being silently approved.
+## Duplicate protection
+The M-PESA transaction code is treated as the payment's external consumption key. Before matching, the server checks whether that code has already been recorded or attached to a paid provider transaction for the business. A reused code is classified as `DUPLICATE / ALREADY_PROCESSED` and cannot approve another payment.
 
-## Repeat purchases
-M-PESA transaction codes are unique consumption keys. Once a code has been matched, it cannot settle another payment. A later payment from the same customer with the same name/number/amount but a different transaction code is a new receipt and can match the newest open purchase.
+## Outcomes
+`PAYMENT_MATCHED / AUTO_APPROVED` + `matched_by=PHONE_AND_AMOUNT` settles the single exact candidate immediately.
 
-## Important fixes
-- An open payment's `external_reference` no longer counts as a consumed transaction code; otherwise a customer-entered code could block its own live receipt from matching.
-- A payer being labelled `Airtel Money` inside a valid Safaricom/Till receipt no longer invalidates the receipt. The receiving SMS sender and receipt structure remain authoritative.
-- Masked customer phone numbers can now be retained for suffix comparison where the SMS format exposes them.
-- Payment status polling reports state without triggering a hidden reconciliation side effect.
-- The Live Messages UI marks settled receipts with a green top line and `PAID / AUTO-APPROVED`.
+`PAYMENT_UNMATCHED` means no eligible pending payment has the receipt phone + exact amount.
 
-## Verification
-Python source files pass AST parsing and `compileall` syntax checks in the build container. Runtime integration tests were not executed because the container does not have the project's Flask dependencies installed.
+`PAYMENT_AMBIGUOUS` means more than one exact candidate exists, or the receipt phone corresponds to multiple open payments with different expected balances.
+
+`UNDERPAYMENT` and `OVERPAYMENT` are recorded when the payer phone identifies open payment(s) but the received amount does not equal the outstanding amount. Neither outcome auto-approves.
+
+## Audit data
+Every parsed payment receipt keeps the raw SMS/event data plus normalized phone, classification, matching method, matched payment ID (when any), candidate payments (when any), and processing timestamp. The original gateway receipt message is never removed after a match or failed match.
+
+## Safety
+Approval, creation of the provider payment record, gateway event update, and audit linkage are committed in the same database transaction. The gateway settlement path also rejects any cumulative overpayment before completing the sale/order.
+
+## Backward compatibility
+The database bootstrap adds the new nullable matcher/audit columns to existing databases and backfills normalized gateway-payment phone values without deleting or rewriting the original raw phone/SMS data.

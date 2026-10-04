@@ -165,7 +165,7 @@ def _record_sale(data, allow_offline=False):
         gateway_payment = Payment(
             business_id=current_user.business_id, store_id=current_user.store_id, sale_id=sale.id,
             provider="SAFARICOM", method="MPESA_GATEWAY_INTENT", amount=subtotal, currency="KES",
-            status="PENDING", phone_number=mpesa_phone,
+            status="PENDING", phone_number=mpesa_phone, normalized_phone=mpesa_phone,
             raw_provider_reference=json.dumps({"source": "pos_waiting", "customer_name": mpesa_customer_name}) if mpesa_customer_name else None,
         )
         db.session.add(gateway_payment)

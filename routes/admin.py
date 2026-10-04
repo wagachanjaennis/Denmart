@@ -493,11 +493,16 @@ def payment_gateway_monitor():
                 store_name = e.store.name
         except Exception:
             pass
+        reconciliation = (e.raw_payload or {}).get("_reconciliation", {}) if isinstance(e.raw_payload, dict) else {}
         payload_events.append({
             "id": e.id, "time": received_at, "sim": sim, "store": store_name,
             "amount": money(e.amount), "customer": e.customer or "M-PESA customer",
             "customer_phone": e.customer_phone or "",
             "transaction": e.transaction_id or "—", "status": e.status or "UNMATCHED",
+            "classification": e.classification or reconciliation.get("classification") or e.status or "UNMATCHED",
+            "matched_by": e.matched_by or reconciliation.get("matched_by") or "",
+            "candidates": reconciliation.get("candidate_payments") or [],
+            "matched_payment_id": e.matched_payment_id or "",
         })
 
     return jsonify(
@@ -566,6 +571,10 @@ def live_messages_api():
             "customer": (m.payment_event.customer if m.payment_event else "") or "",
             "customer_phone": (m.payment_event.customer_phone if m.payment_event else "") or "",
             "matched_payment_id": (m.payment_event.matched_payment_id if m.payment_event else "") or "",
+            "classification": (m.payment_event.classification if m.payment_event else "") or "",
+            "matched_by": (m.payment_event.matched_by if m.payment_event else "") or "",
+            "candidates": (((m.payment_event.raw_payload or {}).get("_reconciliation", {}).get("candidate_payments", []))
+                           if m.payment_event and isinstance(m.payment_event.raw_payload, dict) else []),
         } for m in messages],
     ), 200, {"Cache-Control": "no-store, max-age=0"}
 

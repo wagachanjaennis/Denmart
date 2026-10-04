@@ -45,10 +45,10 @@
     <section class="control-panel">
       <div class="panel-title"><div><span class="eyebrow">PAYMENT FEED</span><h2>Incoming M-PESA receipts</h2></div><div><a class="admin-action" href="/control/live-messages">View all received SMS</a></div></div>
       <div class="table-wrap">
-        <table class="admin-table gateway-table"><thead><tr><th>Time</th><th>Source</th><th>Customer</th><th>Phone</th><th>Transaction</th><th>Amount</th><th>Status</th></tr></thead>
+        <table class="admin-table gateway-table"><thead><tr><th>Time</th><th>Source</th><th>Customer</th><th>Phone</th><th>Transaction</th><th>Amount</th><th>Status / Match</th></tr></thead>
         <tbody id="gatewayFeed">
         {% for e in events %}
-        <tr><td>{{e.received_at.strftime('%H:%M:%S') if e.received_at else '—'}}</td><td><strong>{% if e.matched_payment and e.matched_payment.order_id %}ONLINE{% elif e.matched_payment and e.matched_payment.sale_id %}POS{% else %}UNMATCHED{% endif %}</strong><br><small>SIM {{e.sim_slot + 1}}</small></td><td><strong>{{e.customer or 'M-PESA customer'}}</strong></td><td>{{e.customer_phone or '—'}}</td><td><code>{{e.transaction_id}}</code></td><td><strong>KES {{'%.2f'|format(e.amount|float)}}</strong></td><td><span class="admin-badge {% if e.status=='MATCHED' %}gateway-ok{% else %}gateway-warn{% endif %}">{{e.status}}</span></td></tr>
+        <tr><td>{{e.received_at.strftime('%H:%M:%S') if e.received_at else '—'}}</td><td><strong>{% if e.matched_payment and e.matched_payment.order_id %}ONLINE{% elif e.matched_payment and e.matched_payment.sale_id %}POS{% else %}UNMATCHED{% endif %}</strong><br><small>SIM {{e.sim_slot + 1}}</small></td><td><strong>{{e.customer or 'M-PESA customer'}}</strong></td><td>{{e.customer_phone or '—'}}</td><td><code>{{e.transaction_id}}</code></td><td><strong>KES {{'%.2f'|format(e.amount|float)}}</strong></td><td><span class="admin-badge {% if e.status=='MATCHED' %}gateway-ok{% else %}gateway-warn{% endif %}">{{e.classification or e.status}}</span>{% if e.matched_by %}<br><small>{{e.matched_by}}</small>{% endif %}{% if e.raw_payload and e.raw_payload.get('_reconciliation', {}).get('candidate_payments') %}<br><small>Review candidates: {% for c in e.raw_payload.get('_reconciliation', {}).get('candidate_payments') %}{{c.get('reference', c.get('payment_id'))}}{% if not loop.last %}, {% endif %}{% endfor %}</small>{% endif %}</td></tr>
         {% else %}
         <tr><td colspan="7">No M-PESA messages received yet. Make a small test payment to the configured line.</td></tr>
         {% endfor %}
@@ -59,7 +59,7 @@
 
     <section class="gateway-note">
       <strong>How matching works</strong>
-      <span>Online Till and POS payments are matched automatically by mart + payer phone + amount, with payer name used as an additional confidence check when available. Payments can be partial: each confirmed amount is added to the balance until the exact total is reached. Ambiguous, mismatched, personal, or overpaid messages remain UNMATCHED instead of being assigned to the wrong sale.</span>
+      <span>Online Till and POS payments are matched automatically only when one eligible pending payment has the same normalized payer phone and exact outstanding amount. Payer name is supporting information for review only. Zero matches remain PAYMENT_UNMATCHED; multiple exact candidates are PAYMENT_AMBIGUOUS; phone matches with the wrong amount remain UNDERPAYMENT or OVERPAYMENT.</span>
     </section>
   </main>
 </div>
@@ -95,7 +95,11 @@
 
       document.getElementById('storeTotals').innerHTML=(d.stores||[]).map(s=>`<div class="gateway-store"><small>${esc(s.name)}</small><strong>${money(s.total)}</strong><span>${s.count} messages today</span></div>`).join('');
 
-      const rows=(d.events||[]).map(e=>`<tr><td>${esc(fmtTime(e.time))}</td><td><strong>${esc(e.channel||'UNMATCHED')}</strong><br><small>SIM ${esc(e.sim)}</small></td><td><strong>${esc(e.customer)}</strong>${e.order_number?`<br><small>${esc(e.order_number)}</small>`:''}</td><td>${esc(e.phone||'—')}</td><td><code>${esc(e.transaction)}</code></td><td><strong>${money(e.amount)}</strong></td><td><span class="admin-badge ${e.status==='MATCHED'?'gateway-ok':'gateway-warn'}">${esc(e.status)}</span></td></tr>`).join('');
+      const rows=(d.events||[]).map(e=>{
+        const candidates=(e.candidates||[]).map(c=>esc(c.reference||c.payment_id)).join(', ');
+        const match=`<span class="admin-badge ${e.status==='MATCHED'?'gateway-ok':'gateway-warn'}">${esc(e.classification||e.status)}</span>${e.matched_by?`<br><small>${esc(e.matched_by)}</small>`:''}${candidates?`<br><small>Review candidates: ${candidates}</small>`:''}`;
+        return `<tr><td>${esc(fmtTime(e.time))}</td><td><strong>${esc(e.channel||'UNMATCHED')}</strong><br><small>SIM ${esc(e.sim)}</small></td><td><strong>${esc(e.customer)}</strong>${e.order_number?`<br><small>${esc(e.order_number)}</small>`:''}</td><td>${esc(e.phone||'—')}</td><td><code>${esc(e.transaction)}</code></td><td><strong>${money(e.amount)}</strong></td><td>${match}</td></tr>`;
+      }).join('');
       document.getElementById('gatewayFeed').innerHTML=rows||'<tr><td colspan="7">No M-PESA messages received yet.</td></tr>';
     }catch(e){
       document.getElementById('gatewayLast').textContent='Monitor temporarily unavailable';

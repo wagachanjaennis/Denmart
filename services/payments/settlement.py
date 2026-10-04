@@ -148,9 +148,8 @@ def settle_order_payment(order, payment, actor_id=None):
 
 
 def settle_gateway_order_payment(order, payment, actor_id=None):
-    """Apply one received M-PESA payment. Partial payments accumulate; equal or excess
-    cumulative funds complete the order. Excess is retained as an auditable overpayment
-    amount rather than blocking the legitimate sale settlement.
+    """Apply one received M-PESA payment. Gateway auto-approval passes only the exact
+    outstanding amount; any cumulative overpayment is rejected and rolled back.
     """
     amount = Decimal(str(payment.amount or 0))
     if amount <= 0:
@@ -159,6 +158,8 @@ def settle_gateway_order_payment(order, payment, actor_id=None):
     payment.completed_at = now()
     received = order_received_total(order)
     total = Decimal(str(order.total or 0))
+    if received > total:
+        return False
     if received < total:
         order.payment_status = "PARTIALLY_PAID"
         order.status = "PENDING"
@@ -195,9 +196,8 @@ def settle_sale_payment(sale, payment, actor_id=None):
 
 
 def settle_gateway_sale_payment(sale, payment, actor_id=None):
-    """Apply one received counter M-PESA payment. Partial payments stay open; an equal
-    or excess cumulative total completes the sale so a larger-than-required transfer
-    does not strand a valid POS transaction in UNMATCHED/PENDING state.
+    """Apply one received counter M-PESA payment. Gateway auto-approval passes only the
+    exact outstanding amount; any cumulative overpayment is rejected and rolled back.
     """
     amount = Decimal(str(payment.amount or 0))
     if amount <= 0:
@@ -206,6 +206,8 @@ def settle_gateway_sale_payment(sale, payment, actor_id=None):
     payment.completed_at = now()
     received = sale_received_total(sale)
     total = Decimal(str(sale.total or 0))
+    if received > total:
+        return False
     if received < total:
         sale.payment_status = "PARTIALLY_PAID"
         sale.status = "PENDING"
