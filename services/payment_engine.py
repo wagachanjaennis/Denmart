@@ -6,7 +6,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_
 
 from extensions import db
-from config import Config
 from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, now
 
 TWOPLACES = Decimal("0.01")
@@ -52,29 +51,27 @@ def make_public_token():
 def get_pay_settings(business_id, create=True):
     row = PaySettings.query.filter_by(business_id=business_id).first()
     if row:
-        # Hard-coded fallback keeps checkout usable even when the independent
-        # PAY settings row exists but has never been configured.
-        if not (row.paybill_number or row.buy_goods_till):
-            row.buy_goods_till = (getattr(Config, "DENMART_MERCHANT_TILL", "") or "").strip()
-            row.mode = "BUY_GOODS"
-            row.display_name = row.display_name or "Denmart"
-            row.instructions = row.instructions or "Send the exact amount to the Denmart M-PESA Till shown below, then wait for approval."
-            row.updated_at = now()
+        # Keep checkout operational even when the settings row was created by an older release.
+        if not row.buy_goods_till:
+            from config import Config
+            row.buy_goods_till = getattr(Config, "DENMART_MERCHANT_TILL", "0757817361")
+            if not row.mode or row.mode.upper() == "PAYBILL" and not row.paybill_number:
+                row.mode = "BUY_GOODS"
             db.session.add(row)
             db.session.flush()
-        return row if create else row
+        return row
     if not create:
         return None
     from os import getenv
-    fixed_till = (getattr(Config, "DENMART_MERCHANT_TILL", "") or "").strip()
+    from config import Config
     row = PaySettings(
         business_id=business_id,
-        mode=(getenv("PAYMENT_METHOD_MODE", getattr(Config, "DENMART_PAYMENT_METHOD", "BUY_GOODS")) or "BUY_GOODS").upper(),
+        mode="BUY_GOODS",
         paybill_number=(getenv("PAYBILL_NUMBER", "") or "").strip(),
         paybill_account_name=(getenv("PAYBILL_ACCOUNT_NAME", "Denmart") or "Denmart").strip(),
-        buy_goods_till=(getenv("BUY_GOODS_TILL", fixed_till) or fixed_till).strip(),
+        buy_goods_till=(getenv("BUY_GOODS_TILL", "") or "").strip() or getattr(Config, "DENMART_MERCHANT_TILL", "0757817361"),
         display_name=(getenv("PAYMENT_DISPLAY_NAME", "Denmart") or "Denmart").strip(),
-        instructions=(getenv("PAYMENT_INSTRUCTIONS", "Send the exact amount to the Denmart M-PESA Till shown below, then wait for approval.") or "").strip(),
+        instructions=(getenv("PAYMENT_INSTRUCTIONS", "Pay using the Buy Goods Till shown below, then wait on this page for approval.") or "").strip(),
         updated_at=now(),
     )
     db.session.add(row)
@@ -127,8 +124,7 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
     settings = get_pay_settings(business_id)
     methods = enabled_methods(settings)
     if not methods:
-        # Final hard-coded fallback: the customer-facing payment flow must not
-        # depend on an admin settings row existing or being populated.
+        from config import Config
         settings.buy_goods_till = getattr(Config, "DENMART_MERCHANT_TILL", "0757817361")
         settings.mode = "BUY_GOODS"
         settings.display_name = settings.display_name or "Denmart"
@@ -201,70 +197,80 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
     return order
 
 
+def _utc(value):
+    """Return a timezone-aware UTC datetime for old/new PostgreSQL timestamp rows."""
+    if value is None:
+        return None
+    from datetime import timezone
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name, phone, received_at, device_id, sim_slot, sender, message, telemetry_id=None):
     code = str(transaction_code or "").strip().upper()[:40]
     total = normalize_amount(amount)
     name = str(payer_name or "").strip()[:160]
     name_norm = normalize_name(name)
     phone_norm = normalize_phone(phone)
-    received_at = received_at or now()
-    if not code or total is None or not phone_norm or not name_norm:
+    if not code or total is None or not phone_norm:
         return {"classification": "PAYMENT_UNMATCHED", "matched": False, "reason": "INVALID_PARSED_FIELDS"}
 
-    # Transaction code is the immutable de-duplication key.
     existing = PayReceipt.query.filter_by(transaction_code=code).with_for_update().first()
     if existing:
         return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
 
-    # First build the exact phone+amount pool. This prevents amount-only or
-    # name-only approvals and keeps every auto-approval tied to the customer's
-    # actual payment request.
+    # Primary safe lookup: exact normalized phone + exact amount among live pending requests.
     candidates = (PayOrder.query.filter(
         PayOrder.business_id == business_id,
         PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
         PayOrder.customer_phone == phone_norm,
         PayOrder.expected_amount == total,
-        or_(PayOrder.expires_at.is_(None), PayOrder.expires_at > now()),
     ).with_for_update().all())
 
-    name_candidates = [o for o in candidates if o.customer_name_normalized == name_norm]
+    # Expiry is normalized in Python because old DB rows may come back timezone-naive.
+    live_candidates = []
+    current = now()
+    for candidate in candidates:
+        expires = _utc(candidate.expires_at)
+        if expires is None or expires > current:
+            live_candidates.append(candidate)
+    candidates = live_candidates
+
     order = None
-    phone_orders = []
     classification = "PAYMENT_UNMATCHED"
     method = "NO_SAFE_EXACT_MATCH"
     reason = "No safe exact pending match."
 
-    # Highest priority: name + phone + exact amount. If there is one unique
-    # match, approve immediately even when another payment shares the phone+amount.
-    if len(name_candidates) == 1:
-        order = name_candidates[0]
-        classification = "PAYMENT_MATCHED"
-        method = "NAME_PHONE_AND_AMOUNT"
-        reason = "Exact normalized M-PESA name, phone and amount match."
-    elif len(name_candidates) > 1:
-        classification = "PAYMENT_AMBIGUOUS"
-        method = "MULTIPLE_NAME_PHONE_AMOUNT"
-        reason = "More than one pending payment has the same normalized name, phone and amount."
-    elif len(candidates) == 1:
-        # Safe fallback required by the payment contract: a unique exact phone+
-        # amount candidate cannot be blocked by harmless name formatting/provider text.
-        order = candidates[0]
-        classification = "PAYMENT_MATCHED"
-        method = "PHONE_AND_AMOUNT"
-        reason = "Exactly one eligible pending payment matches the normalized phone and exact amount."
-    elif len(candidates) > 1:
+    if len(candidates) > 1:
+        # Never guess when identical phone + amount requests exist.
         classification = "PAYMENT_AMBIGUOUS"
         method = "MULTIPLE_PHONE_AND_AMOUNT"
-        reason = "More than one pending payment has the same phone and amount; manual selection is required."
+        reason = "More than one pending payment has the same phone and amount."
+    elif len(candidates) == 1:
+        order = candidates[0]
+        if name_norm and order.customer_name_normalized == name_norm:
+            method = "NAME_PHONE_AND_AMOUNT"
+            reason = "Exact normalized M-PESA name + phone + amount match."
+        else:
+            # Safe fallback requested by the business: a single exact phone + amount
+            # identifies the payment even when the payer-name spelling/format differs.
+            method = "PHONE_AND_AMOUNT"
+            reason = "One exact pending phone + amount candidate; payer name kept as supporting review data."
+        classification = "PAYMENT_MATCHED"
     else:
-        # Nothing matched the exact amount. A phone-only lookup is used only to
-        # classify an under/over payment; it can never auto-approve.
+        # Amount mismatch path.
         phone_orders = (PayOrder.query.filter(
             PayOrder.business_id == business_id,
             PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
             PayOrder.customer_phone == phone_norm,
-            or_(PayOrder.expires_at.is_(None), PayOrder.expires_at > now()),
         ).with_for_update().all())
+        live_phone_orders = []
+        for candidate in phone_orders:
+            expires = _utc(candidate.expires_at)
+            if expires is None or expires > current:
+                live_phone_orders.append(candidate)
+        phone_orders = live_phone_orders
         if len(phone_orders) == 1:
             order = phone_orders[0]
             expected = normalize_amount(order.expected_amount)
@@ -272,23 +278,21 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
                 classification, method, reason = "UNDERPAYMENT", "PHONE_MATCH_AMOUNT_LOW", "Received amount is below the pending amount."
             elif expected is not None and total > expected:
                 classification, method, reason = "OVERPAYMENT", "PHONE_MATCH_AMOUNT_HIGH", "Received amount is above the pending amount."
-            else:
-                classification, method, reason = "PAYMENT_UNMATCHED", "SAFE_MATCH_FAILED", "Payment details did not pass the safe match path."
         elif len(phone_orders) > 1:
             classification, method, reason = "PAYMENT_AMBIGUOUS", "MULTIPLE_PHONE_CANDIDATES", "More than one pending payment belongs to this phone number."
 
-    candidate_ids = [o.id for o in (candidates or [])]
-    if phone_orders:
-        candidate_ids = [o.id for o in phone_orders]
+    candidate_ids = [o.id for o in candidates]
+    if classification in {"UNDERPAYMENT", "OVERPAYMENT", "PAYMENT_UNMATCHED"} and order:
+        candidate_ids = [order.id]
 
     receipt = PayReceipt(
         business_id=business_id,
         transaction_code=code,
         amount=total,
-        payer_name=name,
-        payer_name_normalized=name_norm,
+        payer_name=name or None,
+        payer_name_normalized=name_norm or None,
         payer_phone=phone_norm,
-        received_at=received_at,
+        received_at=received_at or now(),
         gateway_device_id=str(device_id or "android-gateway")[:120],
         sim_slot=int(sim_slot or 0),
         sender=str(sender or "")[:120],
@@ -296,53 +300,56 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
         gateway_telemetry_id=telemetry_id,
         classification=classification,
         matching_method=method,
-        matched_payment_order_id=order.id if classification in {"PAYMENT_MATCHED", "NAME_MISMATCH", "UNDERPAYMENT", "OVERPAYMENT", "PHONE_MISMATCH", "STOCK_CONFLICT"} and order else None,
+        matched_payment_order_id=order.id if classification in {"PAYMENT_MATCHED", "UNDERPAYMENT", "OVERPAYMENT"} and order else None,
         candidate_payment_order_ids=candidate_ids or None,
         processed_at=now(),
     )
     db.session.add(receipt)
 
     if order and classification == "PAYMENT_MATCHED":
-        # Lock the live order and stock rows, then settle the payment and receipt
-        # together so a successful approval cannot exist without its audit record.
+        # Receipt recording + settlement occur in the same transaction.
         live_order = PayOrder.query.filter_by(id=order.id).with_for_update().first()
-        if live_order and live_order.payment_status in {"PENDING", "MANUAL_REVIEW"}:
-            for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
-                sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
-                available = Decimal(str(sp.stock_quantity or 0)) if sp else Decimal("-1")
-                if not sp or available < Decimal(str(line.quantity)):
-                    live_order.payment_status = "MANUAL_REVIEW"
-                    live_order.review_reason = "STOCK_CONFLICT_AFTER_PAYMENT"
-                    live_order.last_match_note = "Payment matched, but stock changed before settlement; administrator review required."
-                    classification = "STOCK_CONFLICT"
-                    receipt.classification = classification
-                    receipt.matching_method = "EXACT_MATCH_STOCK_CONFLICT"
-                    db.session.add(PayEvent(payment_order_id=live_order.id, event_type="REVIEW_REQUIRED", source="ANDROID_GATEWAY", note=live_order.last_match_note))
-                    db.session.commit()
-                    return {"classification": classification, "matched": False, "payment_order_id": live_order.id, "reason": live_order.last_match_note, "method": method}
-            for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
-                sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
-                sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
-                db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="ONLINE_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=live_order.id))
-            live_order.payment_status = "PAID"
-            live_order.fulfillment_status = "PACKAGING"
-            live_order.mpesa_transaction_code = code
-            live_order.paid_amount = total
-            live_order.paid_name = name
-            live_order.paid_phone = phone_norm
-            live_order.paid_at = received_at
-            live_order.paid_source = "ANDROID_GATEWAY_AUTO"
-            live_order.matched_by = method
-            live_order.review_reason = None
-            live_order.last_match_note = reason
-            receipt.matched_payment_order_id = live_order.id
-            db.session.add(PayEvent(payment_order_id=live_order.id, event_type="AUTO_APPROVED", source="ANDROID_GATEWAY", note=reason))
-    elif order:
+        if not live_order or live_order.payment_status not in {"PENDING", "MANUAL_REVIEW"}:
+            db.session.rollback()
+            return {"classification": "DUPLICATE_OR_ALREADY_PROCESSED", "matched": False, "payment_order_id": order.id}
+        for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
+            sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
+            available = Decimal(str(sp.stock_quantity or 0)) if sp else Decimal("-1")
+            if not sp or available < Decimal(str(line.quantity)):
+                live_order.payment_status = "MANUAL_REVIEW"
+                live_order.review_reason = "STOCK_CONFLICT_AFTER_PAYMENT"
+                live_order.last_match_note = "Payment matched, but stock changed before settlement; administrator review required."
+                receipt.classification = "STOCK_CONFLICT"
+                receipt.matching_method = method + "_STOCK_CONFLICT"
+                db.session.add(PayEvent(payment_order_id=live_order.id, event_type="REVIEW_REQUIRED", source="ANDROID_GATEWAY", note=live_order.last_match_note))
+                db.session.commit()
+                return {"classification": "STOCK_CONFLICT", "matched": False, "payment_order_id": live_order.id, "reason": live_order.last_match_note}
+        for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
+            sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
+            sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
+            db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="ONLINE_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=live_order.id))
+        live_order.payment_status = "PAID"
+        live_order.fulfillment_status = "PACKAGING"
+        live_order.mpesa_transaction_code = code
+        live_order.paid_amount = total
+        live_order.paid_name = name or None
+        live_order.paid_phone = phone_norm
+        live_order.paid_at = received_at or now()
+        live_order.paid_source = "ANDROID_GATEWAY_AUTO"
+        live_order.matched_by = method
+        live_order.review_reason = None
+        live_order.last_match_note = reason
+        receipt.matched_payment_order_id = live_order.id
+        db.session.add(PayEvent(payment_order_id=live_order.id, event_type="AUTO_APPROVED", source="ANDROID_GATEWAY", note=reason))
+    elif order and classification in {"UNDERPAYMENT", "OVERPAYMENT"}:
+        order.payment_status = "MANUAL_REVIEW"
         order.review_reason = reason
         order.last_match_note = reason
-        if order.payment_status == "PENDING" and classification in {"UNDERPAYMENT", "OVERPAYMENT", "PAYMENT_AMBIGUOUS", "PAYMENT_UNMATCHED"}:
-            order.payment_status = "MANUAL_REVIEW"
         db.session.add(PayEvent(payment_order_id=order.id, event_type="MATCH_REVIEW", source="ANDROID_GATEWAY", note=reason))
+    elif classification == "PAYMENT_AMBIGUOUS":
+        for candidate in candidates[:1]:
+            candidate.last_match_note = reason
+            db.session.add(PayEvent(payment_order_id=candidate.id, event_type="AMBIGUOUS_RECEIPT", source="ANDROID_GATEWAY", note=reason))
 
     try:
         db.session.commit()
@@ -353,13 +360,8 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
             return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
         raise
 
-    return {
-        "classification": classification,
-        "matched": classification == "PAYMENT_MATCHED",
-        "payment_order_id": order.id if order else None,
-        "reason": reason,
-        "method": method,
-    }
+    return {"classification": classification, "matched": classification == "PAYMENT_MATCHED", "payment_order_id": order.id if order else None, "reason": reason, "method": method}
+
 
 
 def manual_approve(order, actor_id, reason="Manual approval"):

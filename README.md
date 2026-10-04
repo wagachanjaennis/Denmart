@@ -1,30 +1,24 @@
-# Denmart M-PESA live matching fix
+Denmart gateway + PAY hotfix
 
-Replace these files in the existing GitHub repo:
+Replace these five files in the EXISTING GitHub project:
 
-- `routes/api.py`
-- `services/payment_engine.py`
-- `routes/pay.py`
-- `templates/pay/approval.html`
+routes/api.py
+routes/pay.py
+routes/shop.py
+services/payment_engine.py
+config.py
 
-Root cause fixed: real incoming M-PESA receipts from the Android gateway can contain a bare 9-digit Kenyan number, such as `739952128`, and Airtel receipts can prefix the payer as `AIRTEL MONEY - NAME`. The previous parser rejected the bare phone and included the provider prefix in the payer name, so the PAY matcher was skipped or could not match.
+What this fixes:
+- Keeps the existing Android gateway endpoint aliases.
+- Accepts the established Android gateway authentication keys stored in the current config/database paths.
+- Parses Kenyan 9-digit SMS phone numbers such as 739952128 into 254739952128.
+- Parses receipts such as "AIRTEL MONEY - JOSIAH MUKUNG 739952128" into the payer name and phone separately.
+- Sends parsed gateway receipts into the independent PAY matcher whenever transaction code + amount + phone are available; payer name is supporting data.
+- Exact name + phone + amount is the first match. Exactly one phone + exact amount is the safe fallback and can auto-approve even when the payer-name formatting differs.
+- Fixes timezone-naive/timezone-aware comparisons on /pay/approval.
+- Keeps /pay/api/<token> for the approval page polling.
+- Keeps the M-PESA Till fallback 0757817361 from the existing Denmart project.
+- Restores the missing Flask jsonify import in the shop PWA routes.
 
-The new parser converts the example message:
-
-`UJ40P8WT1S Confirmed. You have received Ksh1.00 from AIRTEL MONEY - JOSIAH MUKUNG 739952128 ...`
-
-to:
-
-- transaction code: `UJ40P8WT1S`
-- amount: `1.00`
-- payer name: `JOSIAH MUKUNG`
-- phone: `254739952128`
-
-Matching priority:
-
-1. normalized name + phone + exact amount, if that uniquely identifies one eligible payment
-2. otherwise one unique normalized phone + exact amount candidate is auto-approved
-3. multiple candidates stay `PAYMENT_AMBIGUOUS`
-4. zero exact candidates are checked only for under/overpayment by phone; never auto-approved
-
-The approval page now visibly shows the customer's name, phone, and amount that the server is waiting to compare with the live gateway receipt. Once a receipt is linked, it shows the gateway name, phone, amount, classification, and match method.
+Important gateway deployment note:
+The log supplied by the owner showed the existing APK reaching /api/mpesa-listener/event and receiving HTTP 401. That means transport is working but the APK's old key is not currently accepted by the deployed server. After this code is deployed, open /control/android-gateway, copy the currently generated APK connection URL, paste the COMPLETE URL (including ?key=...) into the existing APK, save/test it, then watch /control/live-messages.

@@ -24,19 +24,32 @@ def safe_product_payload(r, include_stock=False):
 
 
 def _gateway_business_for_secret(secret):
+    """Resolve an Android gateway key without breaking legacy configured keys."""
     secret = str(secret or "").strip()
     if not secret:
         return None
-    configured = str(current_app.config.get("ANDROID_GATEWAY_SHARED_SECRET") or current_app.config.get("PAYMENT_GATEWAY_SHARED_SECRET") or "").strip()
-    if configured and secret == configured:
-        businesses = Business.query.order_by(Business.created_at).limit(2).all()
-        if len(businesses) == 1:
-            return businesses[0]
-    setting = SystemSetting.query.filter_by(key="android_gateway_secret", value=secret).first()
-    if not setting:
-        return None
-    return db.session.get(Business, setting.business_id)
 
+    configured_values = [
+        current_app.config.get("ANDROID_GATEWAY_SHARED_SECRET"),
+        current_app.config.get("PAYMENT_GATEWAY_SHARED_SECRET"),
+    ]
+    for configured in configured_values:
+        configured = str(configured or "").strip()
+        if configured and secret == configured:
+            businesses = Business.query.order_by(Business.created_at).limit(2).all()
+            if len(businesses) == 1:
+                return businesses[0]
+
+    # New gateway secret.
+    setting = SystemSetting.query.filter_by(key="android_gateway_secret", value=secret).first()
+    if setting:
+        return db.session.get(Business, setting.business_id)
+
+    # Legacy gateway secret kept for compatibility with an existing APK/configuration.
+    setting = SystemSetting.query.filter_by(key="payment_gateway_secret", value=secret).first()
+    if setting:
+        return db.session.get(Business, setting.business_id)
+    return None
 
 def _gateway_is_mpesa_message(sender, message):
     raw_sender = re.sub(r"\s+", "", str(sender or "").upper())
@@ -84,38 +97,32 @@ def _gateway_parse_transaction(message):
 
 
 def _gateway_parse_customer(message):
+    """Extract the payer name from common merchant-receipt SMS formats."""
     text = re.sub(r"\s+", " ", str(message or "")).strip()
     m = re.search(r"\b(?:received|credited)\b.*?\b(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|account|at\s+\d|on\s+\d|new balance|account balance|balance)\b|$)", text, re.I)
     if not m:
         return ""
     value = m.group(1).strip(" .,-")
-    # Airtel-to-M-PESA receipts commonly expose a provider prefix before the
-    # actual payer name, e.g. "AIRTEL MONEY - JOSIAH MUKUNG 739952128".
-    value = re.sub(r"^AIRTEL\s+MONEY\s*[-:–—]?\s*", "", value, flags=re.I)
-    value = re.sub(r"\s+(?:(?:\+?254|0)?[17]\d{8})\b.*$", "", value, flags=re.I)
-    return value.strip(" .,-")[:240]
+    # Strip common customer-provider labels that are not part of the person's name.
+    value = re.sub(r"^(?:AIRTEL\s+MONEY|AIRTEL|MPESA|M-PESA|SAFARICOM)\s*[-:–—]?\s*", "", value, flags=re.I)
+    # Remove the customer's phone regardless of whether the SMS uses 07..., 01...,
+    # +254..., 254..., or the nine-digit Kenyan form.
+    value = re.sub(r"(?:\+?254[-\s]?|0)?[17]\d{8}\b.*$", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip(" .,-")[:240]
 
 
 def _gateway_parse_phone(message):
+    """Normalize Kenyan mobile numbers from 0XXXXXXXXX, 254XXXXXXXXX, +254... or 9 digits."""
     text = str(message or "")
-    # Accept all Kenyan formats used by real gateway SMSes, including the
-    # bare nine-digit form (e.g. 739952128).
     patterns = [
-        r"\b(?:\+?254)(?:7|1)\d{8}\b",
-        r"\b0(?:7|1)\d{8}\b",
-        r"\b(?:7|1)\d{8}\b",
+        r"(?<!\d)\+?254[\s-]?([17]\d{8})(?!\d)",
+        r"(?<!\d)0([17]\d{8})(?!\d)",
+        r"(?<!\d)([17]\d{8})(?!\d)",
     ]
     for pattern in patterns:
         m = re.search(pattern, text)
-        if not m:
-            continue
-        raw = re.sub(r"\D", "", m.group(0))
-        if raw.startswith("254") and len(raw) == 12 and raw[3] in "17":
-            return raw
-        if raw.startswith("0") and len(raw) == 10 and raw[1] in "17":
-            return "254" + raw[1:]
-        if len(raw) == 9 and raw[0] in "17":
-            return "254" + raw
+        if m:
+            return "254" + re.sub(r"\D", "", m.group(1))
     return ""
 
 
@@ -197,7 +204,7 @@ def android_gateway_ping():
 @bp.post("/payment-gateway/telemetry")
 @bp.post("/mpesa-listener/event")
 def android_gateway_sms():
-    """Receive the existing Android gateway feed, persist the live mirror, and hand valid M-PESA candidates to the independent PAY matcher."""
+    """Passive Android SMS ingestion. It stores telemetry only; it never changes application records beyond the telemetry mirror."""
     supplied_key = (
         request.args.get("key")
         or request.headers.get("X-Denmart-Gateway-Key")
@@ -286,7 +293,7 @@ def android_gateway_sms():
     db.session.commit()
 
     payment_result = None
-    if mpesa and parsed.get("transaction_code") and parsed.get("amount") and parsed.get("normalized_phone") and parsed.get("payer_name"):
+    if mpesa and parsed.get("transaction_code") and parsed.get("amount") and parsed.get("normalized_phone"):
         try:
             from services.payment_engine import process_gateway_receipt
             payment_result = process_gateway_receipt(

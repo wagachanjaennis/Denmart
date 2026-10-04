@@ -43,10 +43,6 @@ class Config:
     # existing Android APK after moving/rebuilding the database. Prefer the
     # database-generated secret when this is not set.
     ANDROID_GATEWAY_SHARED_SECRET = os.getenv("ANDROID_GATEWAY_SHARED_SECRET", "").strip() or os.getenv("PAYMENT_GATEWAY_SHARED_SECRET", "").strip()
-
-    # Temporary fixed customer-payment destination. This is a fallback only when
-    # PAY settings have not been configured in the database/environment.
-    # Replace with the merchant's verified live destination before production use.
     DENMART_MERCHANT_TILL = "0757817361"
     DENMART_PAYMENT_METHOD = "BUY_GOODS"
 

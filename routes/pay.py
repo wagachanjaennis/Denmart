@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import timezone
 import json
 from functools import wraps
 
@@ -42,7 +43,12 @@ def _default_store_from_items(items):
 
 
 def _expire(order):
-    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and order.expires_at and order.expires_at <= now():
+    expires_at = order.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    elif expires_at:
+        expires_at = expires_at.astimezone(timezone.utc)
+    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and expires_at and expires_at <= now():
         order.payment_status = "EXPIRED"
         order.review_reason = "Payment request expired."
         db.session.add(PayEvent(payment_order_id=order.id, event_type="EXPIRED", source="SYSTEM", note="Payment window expired without approval."))
@@ -122,33 +128,16 @@ def approval(token):
 def approval_api(token):
     order = PayOrder.query.filter_by(public_token=token).first_or_404()
     _expire(order)
-    latest_receipt = (PayReceipt.query.filter_by(matched_payment_order_id=order.id)
-                      .order_by(PayReceipt.created_at.desc()).first())
     return jsonify(
         ok=True,
         reference=order.reference,
-        customer_name=order.customer_name,
-        customer_phone=order.customer_phone,
-        expected_amount=str(order.expected_amount),
-        payment_method=order.payment_method,
         payment_status=order.payment_status,
         fulfillment_status=order.fulfillment_status,
+        expected_amount=str(order.expected_amount),
         paid_amount=str(order.paid_amount) if order.paid_amount is not None else None,
-        paid_name=order.paid_name,
-        paid_phone=order.paid_phone,
         paid_at=order.paid_at.isoformat() if order.paid_at else None,
         transaction_code=order.mpesa_transaction_code,
-        matched_by=order.matched_by,
         reason=order.review_reason,
-        gateway_receipt=({
-            "transaction_code": latest_receipt.transaction_code,
-            "name": latest_receipt.payer_name,
-            "phone": latest_receipt.payer_phone,
-            "amount": str(latest_receipt.amount),
-            "classification": latest_receipt.classification,
-            "matching_method": latest_receipt.matching_method,
-            "received_at": latest_receipt.received_at.isoformat() if latest_receipt.received_at else None,
-        } if latest_receipt else None),
         updated_at=(order.paid_at or order.created_at).isoformat() if (order.paid_at or order.created_at) else None,
     )
 
