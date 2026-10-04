@@ -22,14 +22,3 @@ Each received event is saved in `gateway_sms_messages` with device/SIM metadata,
 ## Live view
 
 Open `/control/live-messages`. The page polls the passive telemetry feed and displays the most recent messages. It has no controls that alter store records.
-
-## Admin connection page
-
-After signing into the master admin, open:
-
-- `https://<your-domain>/control/android-gateway`
-- Legacy alias: `https://<your-domain>/control/payment-monitoring`
-
-The page generates the complete APK connection URL, including the shared gateway key, and provides a copy button. Paste that complete URL into the existing Android gateway app. The app posts live SMS telemetry to `/api/payment-gateway/sms` and the messages are mirrored at `/control/live-messages`.
-
-The generated connection URL is a secret-bearing URL. Treat it like a password and do not commit or publish it.
