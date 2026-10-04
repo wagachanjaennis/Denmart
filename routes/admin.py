@@ -160,6 +160,52 @@ def dashboard():
     gross_profit_today=Decimal(str(sales_today))-Decimal(str(cogs_today))
     return render_template("admin/dashboard.html",sales_total=Decimal(str(sales_total)),today_sales=Decimal(str(sales_today)),expenses_today=Decimal(str(expenses_today)),gross_profit_today=gross_profit_today,net_result_today=gross_profit_today-Decimal(str(expenses_today)),low_stock=low_stock,products_online=products_online,unresolved_errors=unresolved_errors,customers_count=customers_count,staff_count=staff_count,supplier_count=supplier_count,purchase_open=purchase_open,reserved_units=reserved_units,inventory_cost_value=inventory_cost_value,recent=recent)
 
+@bp.get(f"{ADMIN_BASE}/android-gateway")
+@bp.get(f"{ADMIN_BASE}/payment-monitoring")
+@admin_required()
+def android_gateway_settings():
+    """Admin-only connection page for the existing Android SMS gateway.
+
+    This page configures no payment decisions; it only exposes the server URL
+    and shared secret-bearing endpoint that the existing Android app needs to
+    send its live SMS telemetry to Denmart.
+    """
+    business_id = current_user.business_id
+    setting = SystemSetting.query.filter_by(
+        business_id=business_id, key="android_gateway_secret"
+    ).first()
+    configured = str(
+        current_app.config.get("ANDROID_GATEWAY_SHARED_SECRET")
+        or current_app.config.get("PAYMENT_GATEWAY_SHARED_SECRET")
+        or ""
+    ).strip()
+    secret = str((setting.value if setting and setting.value else configured) or "").strip()
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        setting = setting or SystemSetting(business_id=business_id, key="android_gateway_secret")
+        setting.value = secret
+        db.session.add(setting)
+        db.session.commit()
+
+    public_base = str(current_app.config.get("PUBLIC_BASE_URL") or "").rstrip("/")
+    if public_base:
+        sms_endpoint = f"{public_base}{url_for('api.android_gateway_sms')}"
+        ping_endpoint = f"{public_base}{url_for('api.android_gateway_ping')}"
+    else:
+        sms_endpoint = url_for("api.android_gateway_sms", _external=True)
+        ping_endpoint = url_for("api.android_gateway_ping", _external=True)
+    separator = "&" if "?" in sms_endpoint else "?"
+    setup_link = f"{sms_endpoint}{separator}key={secret}"
+    ping_separator = "&" if "?" in ping_endpoint else "?"
+    ping_link = f"{ping_endpoint}{ping_separator}key={secret}"
+    return render_template(
+        "admin/android_gateway.html",
+        setup_link=setup_link,
+        ping_link=ping_link,
+        secret=secret,
+    )
+
+
 @bp.get(f"{ADMIN_BASE}/live-messages")
 @admin_required()
 def live_messages():
