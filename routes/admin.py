@@ -565,6 +565,7 @@ def live_messages_api():
             "amount": str(m.payment_event.amount if m.payment_event and m.payment_event.amount is not None else ""),
             "customer": (m.payment_event.customer if m.payment_event else "") or "",
             "customer_phone": (m.payment_event.customer_phone if m.payment_event else "") or "",
+            "matched_payment_id": (m.payment_event.matched_payment_id if m.payment_event else "") or "",
         } for m in messages],
     ), 200, {"Cache-Control": "no-store, max-age=0"}
 

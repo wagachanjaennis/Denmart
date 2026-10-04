@@ -71,7 +71,16 @@
       document.getElementById('feedState').textContent='LIVE';
       document.getElementById('feedStateText').textContent='Last check '+new Date().toLocaleTimeString('en-KE',{hour12:false});
       document.getElementById('liveStatus').innerHTML='<span class="gateway-dot gateway-dot-active"></span><strong>LISTENING</strong>';
-      const rows=(d.messages||[]).map(m=>`<tr class="${m.paid?'live-message-paid':''}"><td><strong>${esc(fmtTime(m.time))}</strong><br><span class="live-message-meta">${esc(m.event_id)}</span></td><td>SIM ${esc(m.sim)}<br><span class="live-message-meta">${esc(m.device)}</span></td><td><strong>${esc(m.sender)}</strong></td><td><span class="admin-badge ${m.mpesa?'live-message-yes':'live-message-no'}">${m.mpesa?'M-PESA CANDIDATE':'NON-PAYMENT'}</span></td><td><span class="admin-badge ${m.status==='MATCHED_AND_SETTLED'?'gateway-ok':m.payment_event_id?'gateway-warn':''}">${esc(m.status)}</span>${m.paid?'<div class="live-paid-label">PAID / AUTO-APPROVED</div>':''}</td><td class="live-message-body">${esc(m.message)}</td></tr>`).join('');
+      const rows=(d.messages||[]).map(m=>{
+        const details = m.mpesa ? `<div class="live-payment-details">
+          <div><b>Paid:</b> Ksh ${esc(m.amount || '—')}</div>
+          <div><b>Payer:</b> ${esc(m.customer || '—')}</div>
+          <div><b>Phone:</b> ${esc(m.customer_phone || '—')}</div>
+          <div><b>M-PESA code:</b> ${esc(m.transaction || '—')}</div>
+          ${m.paid ? `<div><b>Matched payment:</b> ${esc(m.matched_payment_id || '—')}</div>` : ''}
+        </div>` : '';
+        return `<tr class="${m.paid?'live-message-paid':''}"><td><strong>${esc(fmtTime(m.time))}</strong><br><span class="live-message-meta">${esc(m.event_id)}</span></td><td>SIM ${esc(m.sim)}<br><span class="live-message-meta">${esc(m.device)}</span></td><td><strong>${esc(m.sender)}</strong></td><td><span class="admin-badge ${m.mpesa?'live-message-yes':'live-message-no'}">${m.mpesa?'M-PESA CANDIDATE':'NON-PAYMENT'}</span></td><td><span class="admin-badge ${m.status==='MATCHED_AND_SETTLED'?'gateway-ok':m.payment_event_id?'gateway-warn':''}">${esc(m.status)}</span>${m.paid?'<div class="live-paid-label">PAID / AUTO-APPROVED</div>':''}</td><td class="live-message-body">${details}<div class="live-payment-raw">${esc(m.message)}</div></td></tr>`;
+      }).join('');
       document.getElementById('liveMessageFeed').innerHTML=rows||'<tr><td colspan="6" class="empty-payment-state">No SMS telemetry has reached the server yet.</td></tr>';
     }catch(e){
       document.getElementById('feedState').textContent='OFFLINE';

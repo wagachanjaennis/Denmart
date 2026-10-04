@@ -339,6 +339,12 @@ def _gateway_parse_customer(message):
         re.IGNORECASE,
     )
     value = match.group(1).strip(" .,-") if match else ""
+    # Provider labels such as "AIRTEL MONEY -" describe the transport/channel,
+    # not the payer's name. Remove them before the customer identity is stored.
+    value = re.sub(
+        r"^(?:airtel\s+money|airtel|m[-\s]?pesa|safaricom)\s*(?:[-:|]+\s*)+",
+        "", value, flags=re.IGNORECASE,
+    ).strip(" .,-")
     # Some merchant receipts expose the payer as a bare 9-digit MSISDN
     # (e.g. 721232425) rather than 07... or 2547.... Do not let that phone
     # number become part of the customer's name.
@@ -357,7 +363,7 @@ def _gateway_parse_phone(message):
         return masked.group(0)
     masked_short = re.search(r"(?<!\w)(?:7|1)[0-9xX*]{4,7}[0-9]{3,4}(?!\w)", text)
     if masked_short:
-        return masked_short.group(0)
+        return normalize_ke_phone(masked_short.group(0)) or masked_short.group(0)
     # Merchant receipts may expose an unprefixed 9-digit Kenyan MSISDN.
     bare = re.search(r"(?<!\w)(?:7|1)\d{8}(?!\w)", text)
     if bare:
@@ -545,66 +551,78 @@ def _gateway_time_match(event, intent, entity):
 
 
 def _gateway_candidate_score(event, intent):
-    """Score an open order/sale against an authoritative live M-PESA receipt.
+    """Match a real M-PESA receipt to the payment that is actually waiting.
 
-    Automatic approval is deliberately simple:
-      * the live receipt amount must equal the outstanding amount exactly;
-      * and at least one durable payer identity (phone or name) must agree;
-      * an exact customer-entered transaction code is the strongest signal.
+    IMPORTANT IDENTITY RULE
+    -----------------------
+    The Denmart payment/intent ID is an internal record ID.  The M-PESA receipt
+    transaction code (for example ``UJ40P8UVFI``) is a separate gateway receipt
+    ID.  They are NEVER compared with each other.
 
-    Underpayments, overpayments, and identity ambiguity remain open for manual review.
-    The Android gateway never decides this result; only the server's raw SMS does.
+    The receipt is matched against the waiting payment using the information that
+    exists on both sides of the transaction:
+      1. exact outstanding amount;
+      2. payer name (case/spacing/provider-prefix insensitive), OR payer phone;
+      3. receipt time within the normal payment window.
+
+    Once accepted, the M-PESA transaction code is stored on the resulting PAID
+    payment and can never be consumed a second time.  A later M-PESA code is a
+    new payment attempt, not a continuation of the old code.
     """
     if not _gateway_intent_open(intent):
         return None
+
     entity = _gateway_intent_entity(intent)
     if not entity or entity.business_id != event.business_id:
         return None
     if event.store_id and entity.store_id != event.store_id:
         return None
 
+    # 1. Money must be exactly what this waiting payment still requires.
     amount = Decimal(str(event.amount or 0))
     if amount <= 0:
         return None
     outstanding = order_outstanding(entity) if isinstance(entity, Order) else sale_outstanding(entity)
-    # Exact settlement is the automatic path. Less/more stays available for manual handling.
     if outstanding <= 0 or amount != outstanding:
         return None
 
+    # 2. Receipt must belong to the payment window.
     time_ok, delta_seconds = _gateway_time_match(event, intent, entity)
     if not time_ok:
         return None
 
+    # 3. Compare the ACTUAL payer details in the M-PESA receipt with the details
+    # captured when the waiting payment was created.  Do not compare internal IDs
+    # or a customer-entered/system reference with the M-PESA receipt code.
+    incoming_name = _normalise_person_name(event.customer)
+    expected_name = _normalise_person_name(_gateway_expected_name(intent, entity))
+    name_matches = bool(incoming_name and expected_name and incoming_name == expected_name)
+
     incoming_phone = normalize_ke_phone(event.customer_phone)
     expected_phone = _gateway_expected_phone(intent, entity)
-    phone_matches = bool(incoming_phone and expected_phone and _phone_match(incoming_phone, expected_phone))
+    phone_matches = bool(
+        incoming_phone and expected_phone and
+        _phone_match(incoming_phone, expected_phone)
+    )
 
-    expected_name = _gateway_expected_name(intent, entity)
-    name_similarity = _name_similarity(event.customer, expected_name) if event.customer and expected_name else 0.0
-    name_matches = bool(name_similarity >= 0.75)
-
-    supplied_reference = str(getattr(intent, "external_reference", None) or "").strip().upper()
-    incoming_reference = str(event.transaction_id or "").strip().upper()
-    reference_matches = bool(supplied_reference and incoming_reference and supplied_reference == incoming_reference)
-
-    # Exact transaction code + exact amount is sufficient because the code is unique.
-    # Otherwise require either the customer's phone or their name to agree.
-    if not reference_matches and not (phone_matches or name_matches):
+    # Either durable customer identity is sufficient when the amount is exact.
+    # If both are present, matching both is the strongest possible confirmation.
+    if not (name_matches or phone_matches):
         return None
 
     score = 1000
-    if reference_matches:
-        score += 1800
-    if phone_matches:
-        score += 300
     if name_matches:
-        score += 200
-    if phone_matches and name_matches:
-        score += 150
-    # Prefer the newest relevant open payment when a customer makes repeat purchases.
+        score += 500
+    if phone_matches:
+        score += 700
+    if name_matches and phone_matches:
+        score += 500
+
+    # Prefer the current/recent waiting payment when the same customer has more
+    # than one open payment for the same amount. This keeps the comparison tied to
+    # the live checkout/POS attempt rather than an older abandoned intent.
     score += max(0, 200 - int(delta_seconds // 300))
     return score
-
 
 def _gateway_candidates_for_event(event, *, intent_id=None):
     methods = {
