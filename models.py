@@ -479,6 +479,7 @@ class PayOrder(db.Model):
     public_token = db.Column(db.String(100), nullable=False, unique=True, index=True)
     reference = db.Column(db.String(80), nullable=False, unique=True, index=True)
     channel = db.Column(db.String(20), nullable=False, default="ONLINE", index=True)
+    pos_cashier_id = db.Column(db.String(36), db.ForeignKey("users.id"), index=True)
     customer_name = db.Column(db.String(160), nullable=False)
     customer_name_normalized = db.Column(db.String(160), nullable=False, index=True)
     customer_phone = db.Column(db.String(20), nullable=False, index=True)

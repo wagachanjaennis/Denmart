@@ -1,13 +1,13 @@
 <aside class="{{ admin_sidebar_class|default("admin-nav") }} admin-nav-unified">
   <a class="control-brand" href="/control"><span class="brand-mark">DM</span><div><strong>{{business_name}}</strong><small>Admin control centre</small></div></a>
   <nav aria-label="Admin navigation">
-    {% set ops = request.path.startswith('/control/live-messages') or request.path.startswith('/control/pay') or request.path.startswith('/control/android-gateway') or request.path.startswith('/control/payment-monitoring') %}
+    {% set ops = request.path.startswith('/control/live-messages') or request.path.startswith('/control/pay') %}
     {% set catalog = request.path.startswith('/control/products') or request.path == '/scan' or request.path.startswith('/control/categories') or request.path.startswith('/control/inventory') or request.path.startswith('/control/purchases') or request.path.startswith('/control/suppliers') or request.path.startswith('/control/pricing') %}
     {% set people = request.path.startswith('/control/customers') or request.path.startswith('/control/stores') or request.path.startswith('/control/users') or request.path.startswith('/control/shifts') %}
     {% set finance = request.path.startswith('/control/expenses') or request.path.startswith('/control/reports') or request.path.startswith('/control/daily-report') %}
     {% set system = request.path.startswith('/control/settings') or request.path.startswith('/control/audit') or request.path.startswith('/control/system-errors') or request.path.startswith('/control/security') or request.path.startswith('/control/backups') %}
     <details class="admin-nav-group" {% if ops %}open{% endif %}><summary>Operations</summary><div class="admin-nav-children">
-      <a class="{% if request.path.startswith('/control/live-messages') %}active{% endif %}" href="/control/live-messages">Live messages</a><a class="{% if request.path.startswith('/control/android-gateway') or request.path.startswith('/control/payment-monitoring') %}active{% endif %}" href="/control/android-gateway">Android Gateway</a><a class="{% if request.path.startswith('/control/pay') %}active{% endif %}" href="/control/pay">Pay</a>
+      <a class="{% if request.path.startswith('/control/live-messages') %}active{% endif %}" href="/control/live-messages">Live messages</a><a class="{% if request.path.startswith('/control/pay') %}active{% endif %}" href="/control/pay">Pay</a>
       
     </div></details>
     <details class="admin-nav-group" {% if catalog %}open{% endif %}><summary>Catalogue and stock</summary><div class="admin-nav-children">

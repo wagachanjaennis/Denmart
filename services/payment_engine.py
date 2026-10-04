@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_
 
 from extensions import db
-from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, now
+from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, Sale, SaleItem, User, now
 
 TWOPLACES = Decimal("0.01")
 
@@ -109,7 +109,7 @@ def enabled_methods(settings):
     return out
 
 
-def create_payment_order(*, business_id, store_id, customer_name, phone, amount, items=None, channel="ONLINE", payment_method=None):
+def create_payment_order(*, business_id, store_id, customer_name, phone, amount, items=None, channel="ONLINE", payment_method=None, pos_cashier_id=None):
     name = str(customer_name or "").strip()[:160]
     name_norm = normalize_name(name)
     phone_norm = normalize_phone(phone)
@@ -169,6 +169,7 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
         public_token=make_public_token(),
         reference=reference,
         channel=(channel or "ONLINE").upper(),
+        pos_cashier_id=(str(pos_cashier_id).strip() if pos_cashier_id else None),
         customer_name=name,
         customer_name_normalized=name_norm,
         customer_phone=phone_norm,
@@ -205,6 +206,64 @@ def _utc(value):
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+
+def _get_or_create_pos_sale(order):
+    """Create the actual POS sale exactly once after its payment is approved."""
+    if (order.channel or "").upper() != "POS":
+        return None
+    receipt_number = f"POS-{order.reference}"[:60]
+    existing = Sale.query.filter_by(receipt_number=receipt_number).with_for_update().first()
+    if existing:
+        return existing
+    cashier_id = order.pos_cashier_id
+    if not cashier_id:
+        fallback = (User.query.filter(
+            User.business_id == order.business_id,
+            User.store_id == order.store_id,
+            User.is_active.is_(True),
+        ).order_by(User.created_at.asc()).first())
+        if not fallback:
+            raise ValueError("No active POS cashier is available to complete the sale.")
+        cashier_id = fallback.id
+    items = PayOrderItem.query.filter_by(payment_order_id=order.id).order_by(PayOrderItem.product_name_snapshot).all()
+    if not items:
+        raise ValueError("POS payment has no sale items.")
+    total = normalize_amount(order.expected_amount) or Decimal("0.00")
+    sale = Sale(
+        business_id=order.business_id,
+        store_id=order.store_id,
+        cashier_id=cashier_id,
+        receipt_number=receipt_number,
+        subtotal=total,
+        discount=Decimal("0.00"),
+        tax=Decimal("0.00"),
+        total=total,
+        status="COMPLETED",
+        completed_at=now(),
+    )
+    db.session.add(sale)
+    db.session.flush()
+    for line in items:
+        db.session.add(SaleItem(
+            sale_id=sale.id,
+            product_id=line.product_id,
+            product_name_snapshot=line.product_name_snapshot,
+            barcode_snapshot=None,
+            unit_price=line.unit_price,
+            quantity=line.quantity,
+            discount=Decimal("0.00"),
+            tax=Decimal("0.00"),
+            line_total=line.line_total,
+        ))
+    return sale
+
+
+def get_pos_sale_for_order(order):
+    if (order.channel or "").upper() != "POS":
+        return None
+    return Sale.query.filter_by(receipt_number=f"POS-{order.reference}"[:60]).first()
 
 
 def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name, phone, received_at, device_id, sim_slot, sender, message, telemetry_id=None):
@@ -327,7 +386,8 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
         for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
             sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
             sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
-            db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="ONLINE_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=live_order.id))
+            db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="ONLINE_PAYMENT" if (live_order.channel or "").upper() != "POS" else "POS_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=live_order.id))
+        pos_sale = _get_or_create_pos_sale(live_order)
         live_order.payment_status = "PAID"
         live_order.fulfillment_status = "PACKAGING"
         live_order.mpesa_transaction_code = code
@@ -340,6 +400,8 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
         live_order.review_reason = None
         live_order.last_match_note = reason
         receipt.matched_payment_order_id = live_order.id
+        if pos_sale:
+            live_order.last_match_note = reason + " POS sale completed automatically."
         db.session.add(PayEvent(payment_order_id=live_order.id, event_type="AUTO_APPROVED", source="ANDROID_GATEWAY", note=reason))
     elif order and classification in {"UNDERPAYMENT", "OVERPAYMENT"}:
         order.payment_status = "MANUAL_REVIEW"
@@ -378,6 +440,7 @@ def manual_approve(order, actor_id, reason="Manual approval"):
         sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
         sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
         db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="MANUAL_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=order.id, created_by=actor_id))
+    pos_sale = _get_or_create_pos_sale(order)
     receipt = (PayReceipt.query.filter_by(matched_payment_order_id=order.id)
                .order_by(PayReceipt.created_at.desc()).first())
     if receipt and receipt.transaction_code:

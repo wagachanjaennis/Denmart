@@ -15,6 +15,7 @@ from services.payment_engine import (
     manual_approve,
     set_fulfillment,
     normalize_phone,
+    get_pos_sale_for_order,
 )
 
 bp = Blueprint("pay", __name__)
@@ -262,6 +263,7 @@ def pos_create_payment():
             items=clean,
             channel="POS",
             payment_method=str(data.get("payment_method") or "").upper() or None,
+            pos_cashier_id=current_user.id,
         )
         return jsonify(ok=True, payment_id=order.id, reference=order.reference, amount=str(order.expected_amount), approval_url=url_for("pay.approval", token=order.public_token, _external=True))
     except ValueError as exc:
@@ -270,3 +272,25 @@ def pos_create_payment():
     except Exception:
         db.session.rollback()
         return jsonify(error="payment_request_failed"), 500
+
+@bp.get("/api/pos/pay/<payment_id>")
+@login_required
+def pos_payment_status(payment_id):
+    from flask import session
+    if session.get("portal") != "pos" or not current_user.is_active or not current_user.business_id or not current_user.store_id or not current_user.has_permission("sales.create"):
+        return jsonify(error="forbidden"), 403
+    order = PayOrder.query.filter_by(id=payment_id, business_id=current_user.business_id, store_id=current_user.store_id, channel="POS").first_or_404()
+    sale = get_pos_sale_for_order(order)
+    return jsonify(
+        ok=True,
+        payment_id=order.id,
+        reference=order.reference,
+        payment_status=order.payment_status,
+        fulfillment_status=order.fulfillment_status,
+        expected_amount=str(order.expected_amount),
+        paid_amount=str(order.paid_amount) if order.paid_amount is not None else None,
+        transaction_code=order.mpesa_transaction_code,
+        receipt_number=sale.receipt_number if sale else None,
+        reason=order.review_reason,
+    )
+

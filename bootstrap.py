@@ -37,8 +37,26 @@ def _ensure_gateway_secret():
     db.session.commit()
 
 
+
+
+def _ensure_payment_columns():
+    """Add non-destructive columns needed by the independent POS payment flow."""
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.engine)
+    if "pay_orders" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("pay_orders")}
+    if "pos_cashier_id" in columns:
+        return
+    if db.engine.url.get_backend_name() == "postgresql":
+        db.session.execute(text('ALTER TABLE pay_orders ADD COLUMN IF NOT EXISTS pos_cashier_id VARCHAR(36) REFERENCES users(id)'))
+    else:
+        db.session.execute(text('ALTER TABLE pay_orders ADD COLUMN pos_cashier_id VARCHAR(36)'))
+    db.session.commit()
+
 def bootstrap_database():
     db.create_all()
+    _ensure_payment_columns()
     _ensure_gateway_secret()
     try:
         seed_defaults()
