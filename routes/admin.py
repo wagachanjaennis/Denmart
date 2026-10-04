@@ -560,6 +560,11 @@ def live_messages_api():
             "mpesa": bool(m.is_mpesa_candidate),
             "status": m.delivery_status,
             "payment_event_id": m.payment_event_id,
+            "paid": bool(m.payment_event and m.payment_event.status == "MATCHED"),
+            "transaction": (m.payment_event.transaction_id if m.payment_event else "") or "",
+            "amount": str(m.payment_event.amount if m.payment_event and m.payment_event.amount is not None else ""),
+            "customer": (m.payment_event.customer if m.payment_event else "") or "",
+            "customer_phone": (m.payment_event.customer_phone if m.payment_event else "") or "",
         } for m in messages],
     ), 200, {"Cache-Control": "no-store, max-age=0"}
 
@@ -696,26 +701,9 @@ def payments():
     source_filter = (request.args.get("source") or "").strip().upper()
     allowed_status = {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID", "PAID", "FAILED", "CLOSED_MANUAL"}
 
-    # Re-run the same matcher against recent unmatched receipts so this screen is not
-    # merely a log. A receipt that arrived just before an order/payment intent exists
-    # gets another chance immediately when the administrator opens Payments.
-    try:
-        from routes.api import _match_gateway_event
-        recent_unmatched = (PaymentGatewayEvent.query
-                             .filter_by(business_id=business_id, status="UNMATCHED")
-                             .order_by(PaymentGatewayEvent.received_at.desc()).limit(1000).all())
-        changed = False
-        for event in recent_unmatched:
-            matched, actual = _match_gateway_event(event)
-            if matched and actual:
-                event.status = "MATCHED"
-                event.matched_payment_id = actual.id
-                event.store_id = actual.store_id
-                changed = True
-        if changed:
-            db.session.commit()
-    except Exception:
-        db.session.rollback()
+    # Payment Centre is a status/manual-review surface only. Automatic approval is
+    # triggered by the live SMS gateway endpoint, so simply opening this screen can
+    # never change payment state.
 
     base = Payment.query.filter(Payment.business_id == business_id)
     filtered = base
@@ -793,30 +781,10 @@ def payments():
         }
 
     def best_event(payment, expected):
-        # The admin comparison screen must use the exact same authoritative matcher as
-        # the telemetry endpoint; it must never show a looser "valid" result than the
-        # server would actually auto-approve.
-        from routes.api import _gateway_candidate_score
+        # The Payment Centre reflects what Live Messages has already approved. It does
+        # not perform a second, looser matching pass and cannot approve anything itself.
         direct = next((e for e in events if e.matched_payment_id == payment.id and e.status == "MATCHED"), None)
-        if direct:
-            return direct, _gateway_candidate_score(direct, payment) or 1000
-
-        best = None
-        for event in events:
-            if event.status != "UNMATCHED":
-                continue
-            try:
-                score = _gateway_candidate_score(event, payment)
-            except Exception:
-                score = None
-            if score is None:
-                continue
-            if best is None or score > best[1]:
-                best = (event, score)
-            elif score == best[1]:
-                # Equal evidence is intentionally ambiguous.
-                best = (None, score)
-        return best if best else (None, 0)
+        return (direct, 1) if direct else (None, 0)
 
 
     reconciliation_rows = []

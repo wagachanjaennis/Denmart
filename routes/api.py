@@ -276,8 +276,9 @@ def _gateway_is_payment_message(sender, message, payload=None):
     raw_sender = re.sub(r"\s+", "", str(sender or "").upper())
     text = str(message or "")
     upper = text.upper()
-    if "AIRTEL" in raw_sender or "AIRTEL MONEY" in upper:
-        return False
+    # The payer's mobile-money provider may appear inside a valid merchant receipt
+    # (for example, an Airtel customer paying a Safaricom Till). The receiving SMS
+    # sender and receipt structure determine whether this is an M-PESA payment.
     if not (raw_sender in {"MPESA", "M-PESA", "SAFARICOM"} or "MPESA" in raw_sender or "SAFARICOM" in raw_sender):
         return False
     if re.search(r"MINI[- ]?STATEMENT|STATEMENT|AIRTIME|DATA BUNDLE|\bBUNDLE\b|WITHDRAW|SENT TO|PAID TO", upper) and "RECEIVED" not in upper:
@@ -328,8 +329,11 @@ def _gateway_parse_transaction(message):
 
 def _gateway_parse_customer(message):
     text = re.sub(r"\s+", " ", str(message or "")).strip()
+    # Merchant receipts can put the payer name immediately after FROM/BY and then
+    # continue with a phone number, date/time, account text, or the updated balance.
+    # Stop at those structural markers so the name remains usable for matching.
     match = re.search(
-        r"\b(?:received|credited)\s+(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|at\s+\d)|\s+(?:\+?254|0)(?:7|1)\d{8}\b|\s*$)",
+        r"\b(?:received|credited)\s+(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|account|at\s+\d|on\s+\d|new balance|account balance|balance is|available balance|receipt|transaction|\+?254|0(?:7|1)\d{8}\b)|\s*$)",
         text,
         re.IGNORECASE,
     )
@@ -340,12 +344,16 @@ def _gateway_parse_customer(message):
 
 def _gateway_parse_phone(message):
     text = str(message or "")
-    match = re.search(r"(?:\+?254|0)(?:7|1)\d{8}\b", text)
-    if match:
-        return normalize_ke_phone(match.group(0))
-    # Some merchant notices mask most digits. A masked number is recorded for audit,
-    # but it is not strong enough for automatic approval because a replay/spoof could
-    # guess the visible suffix.
+    # Full MSISDN or a common masked merchant form such as 2547XXXX126 / 07XX***126.
+    full = re.search(r"\b(?:\+?254|0)(?:7|1)\d{8}\b", text)
+    if full:
+        return normalize_ke_phone(full.group(0))
+    masked = re.search(r"(?<!\w)(?:\+?254|0)(?:7|1)[0-9xX*]{5,8}[0-9]{3,4}(?!\w)", text)
+    if masked:
+        return masked.group(0)
+    masked_short = re.search(r"(?<!\w)(?:7|1)[0-9xX*]{4,7}[0-9]{3,4}(?!\w)", text)
+    if masked_short:
+        return masked_short.group(0)
     return None
 
 
@@ -448,23 +456,24 @@ def _gateway_intent_entity(intent):
     return None
 
 
-def _gateway_reference_already_used(business_id, reference, *, event_id=None):
-    """Return True when an M-PESA code has already been consumed for this business.
+def _gateway_reference_already_used(business_id, reference, *, event_id=None, payment_id=None):
+    """Return True only when an M-PESA code was actually consumed.
 
-    This check is intentionally global across waiting/paid Payment rows and matched
-    gateway events. A customer cannot make a second approval by re-typing a code that
-    was already settled against another payment.
+    ``Payment.external_reference`` may contain a customer-entered M-PESA code while
+    the payment is still OPEN. That is an expected matching key, not evidence that the
+    code was already used. A reference becomes consumed only after it is attached to a
+    settled provider transaction (or a MATCHED gateway event).
     """
     reference = str(reference or "").strip().upper()
     if not reference or not business_id:
         return False
     q = Payment.query.filter(
         Payment.business_id == business_id,
-        db.or_(
-            db.func.upper(Payment.provider_transaction_id) == reference,
-            db.func.upper(Payment.external_reference) == reference,
-        )
+        Payment.provider_transaction_id.isnot(None),
+        db.func.upper(Payment.provider_transaction_id) == reference,
     )
+    if payment_id:
+        q = q.filter(Payment.id != payment_id)
     if q.first():
         return True
     q2 = PaymentGatewayEvent.query.filter(
@@ -505,28 +514,38 @@ def _gateway_expected_phone(intent, entity):
 
 
 def _gateway_time_match(event, intent, entity):
-    """Keep reconciliation tied to the payment attempt, not an old receipt."""
+    """Keep matching tied to the order attempt without demanding an exact payment time.
+
+    Live SMS can arrive a little before an intent is created, and an online customer may
+    take time to complete checkout. We therefore allow a small pre-order window and a
+    generous post-order window, while still preventing an old receipt from silently
+    paying a brand-new order.
+    """
     event_time = event.received_at or now()
     intent_time = getattr(intent, "created_at", None) or getattr(entity, "created_at", None)
     if not intent_time:
         return False, None
     try:
-        delta_seconds = abs((event_time - intent_time).total_seconds())
+        delta_seconds = (event_time - intent_time).total_seconds()
     except Exception:
         return False, None
-    # POS is an immediate counter payment; online can sit in a waiting state longer.
-    limit = 45 * 60 if isinstance(entity, Sale) else 2 * 60 * 60
-    return delta_seconds <= limit, delta_seconds
+    # A receipt up to 10 minutes before checkout is tolerated; after checkout the order
+    # can remain open for up to 24 hours while the gateway keeps receiving live SMS.
+    if delta_seconds < -(10 * 60) or delta_seconds > (24 * 60 * 60):
+        return False, abs(delta_seconds)
+    return True, abs(delta_seconds)
 
 
 def _gateway_candidate_score(event, intent):
-    """Return a score only when the receipt agrees with the waiting payment.
+    """Score an open order/sale against an authoritative live M-PESA receipt.
 
-    Automatic approval now requires the exact amount, a tight time relationship and
-    durable payer identity. Online payments require both name and phone when both are
-    available; POS requires the captured phone and compares the name when the POS flow
-    supplied one. Transaction-code entry is never required and is never trusted over
-    the raw receipt.
+    Automatic approval is deliberately simple:
+      * the live receipt amount must equal the outstanding amount exactly;
+      * and at least one durable payer identity (phone or name) must agree;
+      * an exact customer-entered transaction code is the strongest signal.
+
+    Underpayments, overpayments, and identity ambiguity remain open for manual review.
+    The Android gateway never decides this result; only the server's raw SMS does.
     """
     if not _gateway_intent_open(intent):
         return None
@@ -540,6 +559,7 @@ def _gateway_candidate_score(event, intent):
     if amount <= 0:
         return None
     outstanding = order_outstanding(entity) if isinstance(entity, Order) else sale_outstanding(entity)
+    # Exact settlement is the automatic path. Less/more stays available for manual handling.
     if outstanding <= 0 or amount != outstanding:
         return None
 
@@ -550,29 +570,31 @@ def _gateway_candidate_score(event, intent):
     incoming_phone = normalize_ke_phone(event.customer_phone)
     expected_phone = _gateway_expected_phone(intent, entity)
     phone_matches = bool(incoming_phone and expected_phone and _phone_match(incoming_phone, expected_phone))
-    if not phone_matches:
-        return None
 
     expected_name = _gateway_expected_name(intent, entity)
     name_similarity = _name_similarity(event.customer, expected_name) if event.customer and expected_name else 0.0
+    name_matches = bool(name_similarity >= 0.75)
 
-    if isinstance(entity, Order):
-        # Online: name is the main identity, phone is a second hard identity check.
-        if not expected_name or name_similarity < 0.85:
-            return None
-        score = 1000
-        score += 200 if name_similarity >= 0.95 else 100
-    else:
-        # POS: legacy sales may not have a customer name; phone+amount+time remains the
-        # durable identity. When a name was captured, it must agree as well.
-        if expected_name and name_similarity < 0.85:
-            return None
-        score = 900
-        if expected_name:
-            score += 100 if name_similarity >= 0.95 else 50
+    supplied_reference = str(getattr(intent, "external_reference", None) or "").strip().upper()
+    incoming_reference = str(event.transaction_id or "").strip().upper()
+    reference_matches = bool(supplied_reference and incoming_reference and supplied_reference == incoming_reference)
 
-    # More recent receipts win when duplicate-value waiting rows exist.
-    score += max(0, 120 - int(delta_seconds // 15))
+    # Exact transaction code + exact amount is sufficient because the code is unique.
+    # Otherwise require either the customer's phone or their name to agree.
+    if not reference_matches and not (phone_matches or name_matches):
+        return None
+
+    score = 1000
+    if reference_matches:
+        score += 1800
+    if phone_matches:
+        score += 300
+    if name_matches:
+        score += 200
+    if phone_matches and name_matches:
+        score += 150
+    # Prefer the newest relevant open payment when a customer makes repeat purchases.
+    score += max(0, 200 - int(delta_seconds // 300))
     return score
 
 
@@ -627,7 +649,9 @@ def _settle_gateway_intent(intent, event):
     amount = Decimal(str(event.amount or 0))
     if amount <= 0 or not reference:
         return False, None
-    if _has_duplicate_reference(intent, reference) or _gateway_reference_already_used(intent.business_id, reference, event_id=getattr(event, "id", None)):
+    if _has_duplicate_reference(intent, reference) or _gateway_reference_already_used(
+        intent.business_id, reference, event_id=getattr(event, "id", None), payment_id=intent.id
+    ):
         return False, None
     if intent.order_id:
         order = db.session.get(Order, intent.order_id)
@@ -1067,21 +1091,8 @@ def payment_status(payment_id):
     if not payment:
         return jsonify(error="payment_not_found"), 404
 
-    # Self-heal payments whose M-PESA SMS arrived before the payment intent was
-    # created, or while the old matcher could not identify the payer. Polling the
-    # known payment now re-runs the same server-side reconciliation against recent
-    # UNMATCHED gateway events; no second SMS is required.
-    gateway_methods = {
-        "MPESA_TILL_INTENT", "MPESA_TILL", "MPESA_TILL_MANUAL",
-        "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY",
-    }
-    if payment.method in gateway_methods and payment.status in {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"}:
-        try:
-            reconcile_gateway_intent(payment)
-            db.session.expire(payment)
-            payment = db.session.get(Payment, payment_id)
-        except Exception:
-            db.session.rollback()
+    # Live SMS ingestion is the authoritative approval trigger. This endpoint only
+    # reports the current ledger status; it does not run matching as a side effect.
 
     data = {"ok": True, "payment_id": payment.id, "status": payment.status, "amount": str(payment.amount),
             "receipt": payment.provider_transaction_id, "message": payment.failure_message}
