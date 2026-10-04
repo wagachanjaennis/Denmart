@@ -294,39 +294,6 @@ class Customer(db.Model):
     updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
 
 
-class Order(db.Model):
-    __tablename__ = "orders"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), nullable=False, index=True)
-    order_number = db.Column(db.String(50), unique=True, nullable=False, index=True)
-    customer_id = db.Column(db.String(36), db.ForeignKey("customers.id"), index=True)
-    status = db.Column(db.String(40), default="PENDING", nullable=False)
-    payment_status = db.Column(db.String(40), default="UNPAID", nullable=False)
-    fulfillment_status = db.Column(db.String(40), default="PENDING", nullable=False)
-    subtotal = db.Column(db.Numeric(14, 2), default=0)
-    discount = db.Column(db.Numeric(14, 2), default=0)
-    delivery_fee = db.Column(db.Numeric(14, 2), default=0)
-    tax = db.Column(db.Numeric(14, 2), default=0)
-    total = db.Column(db.Numeric(14, 2), default=0)
-    delivery_address = db.Column(db.Text)
-    delivery_notes = db.Column(db.Text)
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
-    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
-
-
-class OrderItem(db.Model):
-    __tablename__ = "order_items"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    order_id = db.Column(db.String(36), db.ForeignKey("orders.id"), nullable=False, index=True)
-    product_id = db.Column(db.String(36), db.ForeignKey("products.id"), nullable=False)
-    product_name_snapshot = db.Column(db.String(240), nullable=False)
-    sku_snapshot = db.Column(db.String(80))
-    unit_price = db.Column(db.Numeric(14, 2), nullable=False)
-    quantity = db.Column(db.Numeric(14, 3), nullable=False)
-    discount = db.Column(db.Numeric(14, 2), default=0)
-    tax = db.Column(db.Numeric(14, 2), default=0)
-    line_total = db.Column(db.Numeric(14, 2), nullable=False)
 
 
 class Sale(db.Model):
@@ -341,7 +308,6 @@ class Sale(db.Model):
     tax = db.Column(db.Numeric(14, 2), default=0)
     total = db.Column(db.Numeric(14, 2), nullable=False)
     status = db.Column(db.String(40), default="COMPLETED", nullable=False)
-    payment_status = db.Column(db.String(40), default="UNPAID", nullable=False)
     created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
     completed_at = db.Column(db.DateTime(timezone=True))
 
@@ -360,82 +326,12 @@ class SaleItem(db.Model):
     line_total = db.Column(db.Numeric(14, 2), nullable=False)
 
 
-class Payment(db.Model):
-    __tablename__ = "payments"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), nullable=False, index=True)
-    sale_id = db.Column(db.String(36), db.ForeignKey("sales.id"), index=True)
-    order_id = db.Column(db.String(36), db.ForeignKey("orders.id"), index=True)
-    provider = db.Column(db.String(50), nullable=False)
-    method = db.Column(db.String(30), nullable=False)
-    amount = db.Column(db.Numeric(14, 2), nullable=False)
-    currency = db.Column(db.String(8), default="KES")
-    status = db.Column(db.String(30), default="PENDING", nullable=False)
-    external_reference = db.Column(db.String(160), index=True)
-    provider_transaction_id = db.Column(db.String(160), unique=True, index=True)
-    merchant_request_id = db.Column(db.String(160), index=True)
-    checkout_request_id = db.Column(db.String(160), unique=True, index=True)
-    phone_number = db.Column(db.String(40))
-    initiated_at = db.Column(db.DateTime(timezone=True), default=now)
-    completed_at = db.Column(db.DateTime(timezone=True))
-    failure_code = db.Column(db.String(80))
-    failure_message = db.Column(db.String(500))
-    raw_provider_reference = db.Column(db.Text)
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
-    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
 
 
-class PaymentDestination(db.Model):
-    """Business-owned M-PESA destinations used by checkout, POS and gateway routing."""
-    __tablename__ = "payment_destinations"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), index=True)
-    label = db.Column(db.String(120), nullable=False)
-    channel = db.Column(db.String(20), nullable=False, default="TILL")
-    number = db.Column(db.String(40), nullable=False)
-    account_number = db.Column(db.String(80))
-    instructions = db.Column(db.String(500))
-    is_active = db.Column(db.Boolean, default=True, nullable=False)
-    is_default = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
-    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
-    __table_args__ = (
-        db.Index("ix_payment_destination_business_store_active", "business_id", "store_id", "is_active"),
-    )
 
 
-class PaymentIntegration(db.Model):
-    __tablename__ = "payment_integrations"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    provider = db.Column(db.String(50), nullable=False)
-    environment = db.Column(db.String(30), default="sandbox")
-    consumer_key_encrypted = db.Column(db.Text)
-    consumer_secret_encrypted = db.Column(db.Text)
-    shortcode_encrypted = db.Column(db.Text)
-    passkey_encrypted = db.Column(db.Text)
-    other_credentials_encrypted = db.Column(db.Text)
-    callback_url = db.Column(db.Text)
-    is_active = db.Column(db.Boolean, default=False, nullable=False)
-    last_tested_at = db.Column(db.DateTime(timezone=True))
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
-    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
 
 
-class Delivery(db.Model):
-    __tablename__ = "deliveries"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    order_id = db.Column(db.String(36), db.ForeignKey("orders.id"), nullable=False, unique=True)
-    driver_id = db.Column(db.String(36), db.ForeignKey("users.id"))
-    status = db.Column(db.String(40), default="PENDING", nullable=False)
-    pickup_at = db.Column(db.DateTime(timezone=True))
-    dispatched_at = db.Column(db.DateTime(timezone=True))
-    delivered_at = db.Column(db.DateTime(timezone=True))
-    recipient_name = db.Column(db.String(160))
-    recipient_phone = db.Column(db.String(40))
-    notes = db.Column(db.Text)
 
 
 class Shift(db.Model):
@@ -444,25 +340,8 @@ class Shift(db.Model):
     store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), nullable=False, index=True)
     cashier_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
     opened_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
-    opening_cash = db.Column(db.Numeric(14, 2), default=0)
     closed_at = db.Column(db.DateTime(timezone=True))
-    closing_cash = db.Column(db.Numeric(14, 2))
-    expected_cash = db.Column(db.Numeric(14, 2))
-    difference = db.Column(db.Numeric(14, 2))
     status = db.Column(db.String(20), default="OPEN", nullable=False)
-
-
-class CashDrawerTransaction(db.Model):
-    __tablename__ = "cash_drawer_transactions"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    shift_id = db.Column(db.String(36), db.ForeignKey("shifts.id"), nullable=False, index=True)
-    transaction_type = db.Column(db.String(40), nullable=False)
-    amount = db.Column(db.Numeric(14, 2), nullable=False)
-    reference_type = db.Column(db.String(50))
-    reference_id = db.Column(db.String(36))
-    notes = db.Column(db.Text)
-    created_by = db.Column(db.String(36), db.ForeignKey("users.id"))
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
 
 
 class AuditLog(db.Model):
@@ -521,39 +400,16 @@ class Expense(db.Model):
     created_by = db.Column(db.String(36), db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
 
-class PaymentGatewayEvent(db.Model):
-    __tablename__ = "payment_gateway_events"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), index=True)
-    gateway_device_id = db.Column(db.String(120), nullable=False, index=True)
-    sim_slot = db.Column(db.Integer, nullable=False, default=0, index=True)
-    subscription_id = db.Column(db.BigInteger)
-    source = db.Column(db.String(40), default="android_sms", nullable=False)
-    sender = db.Column(db.String(120))
-    message = db.Column(db.Text, nullable=False)
-    received_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, index=True)
-    transaction_id = db.Column(db.String(160), index=True)
-    amount = db.Column(db.Numeric(14, 2), default=0)
-    customer = db.Column(db.String(240))
-    customer_phone = db.Column(db.String(40))
-    status = db.Column(db.String(30), default="UNMATCHED", nullable=False, index=True)
-    matched_payment_id = db.Column(db.String(36), db.ForeignKey("payments.id"))
-    raw_payload = db.Column(db.JSON)
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
-    store = db.relationship("Store")
-    matched_payment = db.relationship("Payment")
-    __table_args__ = (
-        db.UniqueConstraint("business_id", "gateway_device_id", "transaction_id", name="uq_gateway_business_device_tx"),
-    )
+
+
+
 
 
 class GatewaySmsMessage(db.Model):
-    """Raw inbound SMS telemetry from the Denmart Android gateway.
+    """Durable passive telemetry mirror for the existing Android SMS gateway.
 
-    This table is intentionally broader than PaymentGatewayEvent: every received
-    Inbox SMS can be observed here, while only server-validated Safaricom/M-PESA
-    receipts become payment events.
+    This model is a passive mirror of the Android gateway feed. It stores telemetry only.
+    Extra legacy database columns, if present, are intentionally left untouched for compatibility.
     """
     __tablename__ = "gateway_sms_messages"
     id = db.Column(db.String(36), primary_key=True, default=uid)
@@ -567,51 +423,10 @@ class GatewaySmsMessage(db.Model):
     message = db.Column(db.Text, nullable=False)
     received_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, index=True)
     is_mpesa_candidate = db.Column(db.Boolean, default=False, nullable=False, index=True)
-    payment_event_id = db.Column(db.String(36), db.ForeignKey("payment_gateway_events.id"), index=True)
     delivery_status = db.Column(db.String(30), default="RECEIVED", nullable=False, index=True)
     last_seen_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now)
     raw_payload = db.Column(db.JSON)
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
-    payment_event = db.relationship("PaymentGatewayEvent")
-    __table_args__ = (
-        db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_gateway_sms_business_device_event"),
-    )
-
-
-class AutoPaymentReceipt(db.Model):
-    """Independent live M-PESA receipt ledger used only by the /pay automation path.
-
-    The Android gateway remains the transport client. Every accepted gateway event is
-    stored here with the complete raw SMS. Matching never uses scores, time proximity,
-    payer-name similarity, or the legacy payment-intent matcher.
-    """
-    __tablename__ = "auto_payment_receipts"
-    id = db.Column(db.String(36), primary_key=True, default=uid)
-    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
-    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), index=True)
-    gateway_device_id = db.Column(db.String(120), nullable=False, index=True)
-    sim_slot = db.Column(db.Integer, nullable=False, default=0, index=True)
-    subscription_id = db.Column(db.BigInteger)
-    event_id = db.Column(db.String(160), nullable=False)
-    transaction_code = db.Column(db.String(40), index=True)
-    amount = db.Column(db.Numeric(14, 2))
-    payer_name = db.Column(db.String(240))
-    phone = db.Column(db.String(40), index=True)
-    normalized_phone = db.Column(db.String(20), index=True)
-    sender = db.Column(db.String(120))
-    raw_message = db.Column(db.Text, nullable=False)
-    received_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, index=True)
-    classification = db.Column(db.String(40), nullable=False, default="LIVE_RECEIVED", index=True)
-    matched_order_id = db.Column(db.String(36), db.ForeignKey("orders.id"), index=True)
-    matched_sale_id = db.Column(db.String(36), db.ForeignKey("sales.id"), index=True)
-    matched_payment_id = db.Column(db.String(36), db.ForeignKey("payments.id"), index=True)
-    matching_method = db.Column(db.String(60))
-    processed_at = db.Column(db.DateTime(timezone=True))
-    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
-    raw_payload = db.Column(db.JSON)
-    __table_args__ = (
-        db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_auto_pay_business_device_event"),
-    )
+    __table_args__ = (db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_gateway_sms_business_device_event"),)
 
 
 class LoyaltyAccount(db.Model):
@@ -641,3 +456,93 @@ class LoyaltyTransaction(db.Model):
         db.UniqueConstraint("reference_type", "reference_id", "transaction_type", name="uq_loyalty_reference"),
     )
 
+
+
+class PaySettings(db.Model):
+    __tablename__ = "pay_settings"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, unique=True, index=True)
+    mode = db.Column(db.String(20), nullable=False, default="PAYBILL")
+    paybill_number = db.Column(db.String(40))
+    paybill_account_name = db.Column(db.String(160))
+    buy_goods_till = db.Column(db.String(40))
+    display_name = db.Column(db.String(160), default="Denmart")
+    instructions = db.Column(db.String(500), default="Pay using the payment option shown, then wait for approval.")
+    updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)
+
+
+class PayOrder(db.Model):
+    __tablename__ = "pay_orders"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
+    store_id = db.Column(db.String(36), db.ForeignKey("stores.id"), nullable=False, index=True)
+    public_token = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    reference = db.Column(db.String(80), nullable=False, unique=True, index=True)
+    channel = db.Column(db.String(20), nullable=False, default="ONLINE", index=True)
+    customer_name = db.Column(db.String(160), nullable=False)
+    customer_name_normalized = db.Column(db.String(160), nullable=False, index=True)
+    customer_phone = db.Column(db.String(20), nullable=False, index=True)
+    expected_amount = db.Column(db.Numeric(14, 2), nullable=False, index=True)
+    payment_method = db.Column(db.String(20), nullable=False)
+    payment_instructions = db.Column(db.JSON)
+    payment_status = db.Column(db.String(30), nullable=False, default="PENDING", index=True)
+    fulfillment_status = db.Column(db.String(30), nullable=False, default="AWAITING_PAYMENT", index=True)
+    review_reason = db.Column(db.String(500))
+    last_match_note = db.Column(db.String(1000))
+    mpesa_transaction_code = db.Column(db.String(40), unique=True, index=True)
+    paid_amount = db.Column(db.Numeric(14, 2))
+    paid_name = db.Column(db.String(160))
+    paid_phone = db.Column(db.String(20))
+    paid_at = db.Column(db.DateTime(timezone=True))
+    paid_source = db.Column(db.String(40))
+    matched_by = db.Column(db.String(80))
+    manual_approved_by = db.Column(db.String(36), db.ForeignKey("users.id"))
+    manual_approved_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
+    expires_at = db.Column(db.DateTime(timezone=True), index=True)
+
+
+class PayOrderItem(db.Model):
+    __tablename__ = "pay_order_items"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    payment_order_id = db.Column(db.String(36), db.ForeignKey("pay_orders.id"), nullable=False, index=True)
+    store_product_id = db.Column(db.String(36), db.ForeignKey("store_products.id"), nullable=False)
+    product_id = db.Column(db.String(36), db.ForeignKey("products.id"), nullable=False)
+    product_name_snapshot = db.Column(db.String(240), nullable=False)
+    quantity = db.Column(db.Numeric(14, 3), nullable=False)
+    unit_price = db.Column(db.Numeric(14, 2), nullable=False)
+    line_total = db.Column(db.Numeric(14, 2), nullable=False)
+
+
+class PayReceipt(db.Model):
+    __tablename__ = "pay_receipts"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
+    transaction_code = db.Column(db.String(40), unique=True, index=True)
+    amount = db.Column(db.Numeric(14, 2), nullable=False)
+    payer_name = db.Column(db.String(160), nullable=False)
+    payer_name_normalized = db.Column(db.String(160), nullable=False, index=True)
+    payer_phone = db.Column(db.String(20), nullable=False, index=True)
+    received_at = db.Column(db.DateTime(timezone=True), nullable=False, index=True)
+    gateway_device_id = db.Column(db.String(120))
+    sim_slot = db.Column(db.Integer, default=0)
+    sender = db.Column(db.String(120))
+    raw_message = db.Column(db.Text, nullable=False)
+    gateway_telemetry_id = db.Column(db.String(36), db.ForeignKey("gateway_sms_messages.id"), index=True)
+    classification = db.Column(db.String(40), nullable=False, index=True)
+    matching_method = db.Column(db.String(100))
+    matched_payment_order_id = db.Column(db.String(36), db.ForeignKey("pay_orders.id"), index=True)
+    candidate_payment_order_ids = db.Column(db.JSON)
+    processed_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
+
+
+class PayEvent(db.Model):
+    __tablename__ = "pay_events"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    payment_order_id = db.Column(db.String(36), db.ForeignKey("pay_orders.id"), nullable=False, index=True)
+    event_type = db.Column(db.String(60), nullable=False)
+    source = db.Column(db.String(40), nullable=False)
+    actor_user_id = db.Column(db.String(36), db.ForeignKey("users.id"))
+    note = db.Column(db.String(1000))
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)

@@ -1,31 +1,49 @@
 """Production-safe first-boot database bootstrap."""
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from extensions import db
 from seed import seed_defaults
-from models import Business, Store
+from models import Business, Store, SystemSetting
+import secrets
+
+
+def _ensure_gateway_secret():
+    """Ensure the existing Android app can keep using its server secret."""
+    configured = str(__import__("os").getenv("ANDROID_GATEWAY_SHARED_SECRET") or __import__("os").getenv("PAYMENT_GATEWAY_SHARED_SECRET") or "").strip()
+    businesses = Business.query.order_by(Business.created_at).limit(2).all()
+    if len(businesses) != 1:
+        return
+    business=businesses[0]
+    row=SystemSetting.query.filter_by(business_id=business.id,key="android_gateway_secret").first()
+    legacy=SystemSetting.query.filter_by(business_id=business.id,key="payment_gateway_secret").first()
+    if configured:
+        if not row:
+            row=SystemSetting(business_id=business.id,key="android_gateway_secret",value=configured);db.session.add(row)
+        elif row.value != configured:
+            row.value=configured
+        if legacy and legacy.id != row.id:
+            db.session.delete(legacy)
+    elif not row or not row.value:
+        if legacy and legacy.value:
+            row=row or SystemSetting(business_id=business.id,key="android_gateway_secret",value=legacy.value)
+            row.value=legacy.value
+            db.session.add(row)
+            if legacy.id != row.id:
+                db.session.delete(legacy)
+        else:
+            row=row or SystemSetting(business_id=business.id,key="android_gateway_secret")
+        row.value=secrets.token_urlsafe(32)
+        db.session.add(row)
+    db.session.commit()
 
 
 def bootstrap_database():
     db.create_all()
-    # The independent /pay receipt ledger intentionally permits the same M-PESA
-    # transaction code to appear again as a stored duplicate receipt. A prior
-    # iteration briefly made transaction_code unique at the receipt-row level,
-    # which could prevent the duplicate SMS itself from being audited. Remove that
-    # obsolete constraint once, without touching any other table.
-    try:
-        if db.engine.url.get_backend_name() == "postgresql":
-            db.session.execute(text(
-                "ALTER TABLE auto_payment_receipts DROP CONSTRAINT IF EXISTS uq_auto_pay_business_transaction"
-            ))
-            db.session.commit()
-    except Exception:
-        db.session.rollback()
+    _ensure_gateway_secret()
     try:
         seed_defaults()
     except IntegrityError:
         db.session.rollback()
-        # Another worker may have raced the first boot. The next request can retry safely.
 
 
 def database_summary():

@@ -24,12 +24,14 @@ services:
         sync: false
       - key: BACKUP_ENABLED
         value: "1"
-      - key: DARAJA_ENV
-        value: sandbox
       - key: CURRENCY
         value: KES
       - key: TIMEZONE
         value: Africa/Nairobi
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: PAYMENT_GATEWAY_SHARED_SECRET
+        sync: false
 
 databases:
   - name: real-mart-db

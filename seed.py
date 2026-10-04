@@ -6,7 +6,7 @@ from decimal import Decimal
 from extensions import db
 from models import (
     Business, Store, Role, Permission, User, Category, Product, ProductAlias,
-    PricingRule, StoreProduct, SystemSetting, PaymentDestination,
+    PricingRule, StoreProduct, SystemSetting,
 )
 from catalog_data import CATALOG, PRICE_BANDS
 from services.product_images import real_product_image_url
@@ -14,12 +14,11 @@ from werkzeug.security import generate_password_hash
 
 ROLES = {
     "OWNER": ["*"],
-    "ADMIN": ["products.view", "products.edit", "products.delete", "sales.view", "inventory.view", "reports.view", "payments.view", "backup.create", "users.manage"],
-    "MANAGER": ["products.view", "products.edit", "sales.view", "sales.create", "sales.void", "inventory.view", "inventory.adjust", "reports.view", "payments.view"],
+    "ADMIN": ["products.view", "products.edit", "products.delete", "sales.view", "inventory.view", "reports.view",  "backup.create", "users.manage"],
+    "MANAGER": ["products.view", "products.edit", "sales.view", "sales.create", "sales.void", "inventory.view", "inventory.adjust", "reports.view"],
     "CASHIER": ["products.view", "sales.create"],
     "STOCK_CONTROLLER": ["products.view", "inventory.view", "inventory.adjust"],
-    "DELIVERY": [],
-    "ACCOUNTANT": ["sales.view", "payments.view", "reports.view"],
+    "ACCOUNTANT": ["sales.view",  "reports.view"],
 }
 
 
@@ -212,20 +211,9 @@ def seed_defaults():
             if not ProductAlias.query.filter_by(product_id=product.id, alias=name).first():
                 db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
 
-    # Backward-compatible payment destination: existing single Till settings are
-    # promoted to the new business/store-scoped destination table once.
-    legacy_till = SystemSetting.query.filter_by(business_id=business.id, key="mpesa_till_number").first()
-    till_value = str(legacy_till.value or "").strip() if legacy_till else ""
-    if till_value and not PaymentDestination.query.filter_by(business_id=business.id).first():
-        db.session.add(PaymentDestination(
-            business_id=business.id, store_id=store.id, label="Main M-PESA Till",
-            channel="TILL", number=till_value, is_active=True, is_default=True,
-            instructions="Use this Till after checking the amount shown above.",
-        ))
-
     defaults = {
         "footer_text": "All rights reserved · Denmart Merchants",
-        "shop_tagline": "Everyday groceries and household essentials, ready for delivery or pickup.",
+        "shop_tagline": "Everyday groceries and household essentials.",
     }
     for key, value in defaults.items():
         setting = SystemSetting.query.filter_by(business_id=business.id, key=key).first()

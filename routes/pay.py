@@ -1,166 +1,266 @@
-from __future__ import annotations
-
+from decimal import Decimal
+import json
 from functools import wraps
 
-from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, flash, redirect, render_template, request, url_for, jsonify
 from flask_login import current_user, login_required
 
-from extensions import db
-from models import AutoPaymentReceipt, Customer, Order, OrderItem, Payment, PaymentDestination, Sale, SaleItem, Store, SystemSetting
-
+from extensions import db, csrf
+from models import Business, Store, StoreProduct, PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, User, now
+from services.payment_engine import (
+    create_payment_order,
+    enabled_methods,
+    get_pay_settings,
+    manual_approve,
+    set_fulfillment,
+    normalize_phone,
+)
 
 bp = Blueprint("pay", __name__)
 
 
-def pay_admin_required(fn):
+def _admin_required(fn):
     @wraps(fn)
     @login_required
     def wrapped(*args, **kwargs):
-        if (session.get("portal") != "admin" or not current_user.is_authenticated or
-                not current_user.has_permission("payments.view")):
-            return redirect(f"/control?next={request.path}")
+        from flask import session
+        if session.get("portal") != "admin" or not current_user.is_authenticated or not current_user.role or current_user.role.name != "OWNER":
+            return "Forbidden", 403
         return fn(*args, **kwargs)
     return wrapped
 
 
-def _business_store():
-    business_id = current_user.business_id
-    stores = Store.query.filter_by(business_id=business_id, is_active=True).order_by(Store.created_at).all()
-    return business_id, stores[0] if len(stores) == 1 else None
+def _default_store_from_items(items):
+    ids = []
+    for raw in items or []:
+        ids.append(str(raw.get("id") or raw.get("store_product_id") or "").strip())
+    ids = [x for x in ids if x]
+    if not ids:
+        return None
+    sp = StoreProduct.query.filter(StoreProduct.id.in_(ids)).first()
+    return sp.store if sp else None
 
 
-def _destination(store):
-    business_id = current_user.business_id if current_user.is_authenticated else (store.business_id if store else None)
-    if not business_id:
-        return {"channel": "TILL", "number": "", "label": "Denmart M-PESA"}
-    destination = None
-    if store:
-        destination = (PaymentDestination.query.filter_by(
-            business_id=business_id, store_id=store.id, is_active=True, is_default=True
-        ).first() or PaymentDestination.query.filter_by(
-            business_id=business_id, store_id=store.id, is_active=True
-        ).order_by(PaymentDestination.created_at.desc()).first())
-    destination = destination or PaymentDestination.query.filter_by(
-        business_id=business_id, store_id=None, is_active=True, is_default=True
-    ).first() or PaymentDestination.query.filter_by(
-        business_id=business_id, store_id=None, is_active=True
-    ).order_by(PaymentDestination.created_at.desc()).first()
-    if destination:
-        return {"channel": destination.channel or "TILL", "number": destination.number or "", "label": destination.label or "Denmart M-PESA"}
-    q = SystemSetting.query.filter_by(business_id=business_id, key="payment_gateway_merchant_number").first()
-    number = (q.value or "").strip() if q else ""
-    if not number:
-        from flask import current_app
-        number = str(current_app.config.get("DENMART_MERCHANT_TILL") or "").strip()
-    return {"channel": "TILL", "number": number, "label": "Denmart M-PESA Till"}
-
-
-def _order_row(order):
-    customer = db.session.get(Customer, order.customer_id) if order.customer_id else None
-    items = [{"name": i.product_name_snapshot, "quantity": str(i.quantity), "total": str(i.line_total)} for i in OrderItem.query.filter_by(order_id=order.id).all()]
-    return {
-        "type": "ONLINE", "id": order.id, "reference": order.order_number,
-        "name": customer.name if customer else "", "phone": customer.phone if customer else "",
-        "total": str(order.total or 0), "payment_status": order.payment_status,
-        "status": order.status, "created_at": order.created_at.isoformat() if order.created_at else None, "items": items,
-    }
-
-
-def _sale_row(sale):
-    payment = (Payment.query.filter(
-        Payment.sale_id == sale.id,
-        Payment.method.in_({"MPESA", "MPESA_TILL", "MPESA_GATEWAY_INTENT", "MPESA_GATEWAY"}),
-    ).order_by(Payment.created_at.desc()).first())
-    raw_name = ""
-    if payment and payment.raw_provider_reference:
-        import json
-        try:
-            raw = json.loads(payment.raw_provider_reference) if isinstance(payment.raw_provider_reference, str) else payment.raw_provider_reference
-            raw_name = str(raw.get("customer_name") or "").strip() if isinstance(raw, dict) else ""
-        except Exception:
-            raw_name = ""
-    items = [{"name": i.product_name_snapshot, "quantity": str(i.quantity), "total": str(i.line_total)} for i in SaleItem.query.filter_by(sale_id=sale.id).all()]
-    return {
-        "type": "POS", "id": sale.id, "reference": sale.receipt_number,
-        "name": raw_name, "phone": payment.phone_number if payment else "",
-        "total": str(sale.total or 0), "payment_status": sale.payment_status,
-        "status": sale.status, "created_at": sale.created_at.isoformat() if sale.created_at else None, "items": items,
-    }
+def _expire(order):
+    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and order.expires_at and order.expires_at <= now():
+        order.payment_status = "EXPIRED"
+        order.review_reason = "Payment request expired."
+        db.session.add(PayEvent(payment_order_id=order.id, event_type="EXPIRED", source="SYSTEM", note="Payment window expired without approval."))
+        db.session.commit()
+        return True
+    return False
 
 
 @bp.get("/pay")
-@pay_admin_required
-def dashboard():
-    return render_template("pay/dashboard.html", destination=_destination(None))
+def pay_home():
+    return redirect(url_for("shop.cart"))
 
 
-@bp.get("/pay/api/pending")
-@pay_admin_required
-def pending_api():
-    business_id, single_store = _business_store()
-    orders_q = Order.query.filter(Order.business_id == business_id, Order.payment_status.in_({"UNPAID", "PENDING_APPROVAL"}), ~Order.status.in_({"CANCELLED", "DELETED", "EXPIRED"}))
-    sales_q = Sale.query.filter(Sale.business_id == business_id, Sale.payment_status.in_({"UNPAID", "PENDING_APPROVAL"}), ~Sale.status.in_({"CANCELLED", "VOID", "DELETED", "EXPIRED"}))
-    if single_store:
-        orders_q = orders_q.filter(Order.store_id == single_store.id)
-        sales_q = sales_q.filter(Sale.store_id == single_store.id)
-    orders = orders_q.order_by(Order.created_at.desc()).limit(100).all()
-    sales = sales_q.order_by(Sale.created_at.desc()).limit(100).all()
-    return jsonify(ok=True, orders=[_order_row(o) for o in orders], sales=[_sale_row(s) for s in sales])
+@bp.post("/pay/start")
+def start_payment():
+    raw_cart = request.form.get("cart_json", "")
+    try:
+        items = json.loads(raw_cart) if raw_cart else []
+    except json.JSONDecodeError:
+        items = []
+    if not isinstance(items, list) or not items:
+        flash("Your basket is empty. Add items before paying.", "error")
+        return redirect("/cart")
+
+    store = _default_store_from_items(items)
+    if not store or not store.is_active:
+        flash("The selected store is not available. Please refresh your basket.", "error")
+        return redirect("/cart")
+
+    customer_name = request.form.get("customer_name", "").strip()
+    phone = request.form.get("customer_phone", "").strip()
+    method = request.form.get("payment_method", "").strip().upper()
+
+    try:
+        # The server recalculates the total from current catalogue prices; client prices are never trusted.
+        total = Decimal("0")
+        clean_items = []
+        for raw in items:
+            sp_id = str(raw.get("id") or "").strip()
+            qty = Decimal(str(raw.get("qty") or 0))
+            if not sp_id or qty <= 0:
+                raise ValueError("Your basket contains an invalid item.")
+            sp = StoreProduct.query.filter_by(id=sp_id, store_id=store.id).first()
+            if not sp:
+                raise ValueError("One of the basket items is no longer available.")
+            total += (Decimal(str(sp.selling_price)) * qty).quantize(Decimal("0.01"))
+            clean_items.append({"store_product_id": sp_id, "quantity": str(qty)})
+        order = create_payment_order(
+            business_id=store.business_id,
+            store_id=store.id,
+            customer_name=customer_name,
+            phone=phone,
+            amount=total,
+            items=clean_items,
+            channel="ONLINE",
+            payment_method=method or None,
+        )
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect("/cart")
+    except Exception:
+        db.session.rollback()
+        flash("We could not start the payment. Please refresh the basket and try again.", "error")
+        return redirect("/cart")
+    return redirect(url_for("pay.approval", token=order.public_token))
 
 
-@bp.get("/pay/api/live")
-@pay_admin_required
-def live_api():
-    business_id, _ = _business_store()
-    rows = AutoPaymentReceipt.query.filter_by(business_id=business_id).order_by(AutoPaymentReceipt.received_at.desc()).limit(50).all()
-    return jsonify(ok=True, events=[{
-        "id": r.id, "event_id": r.event_id, "transaction_code": r.transaction_code,
-        "amount": str(r.amount or 0), "payer_name": r.payer_name or "", "phone": r.phone or "",
-        "normalized_phone": r.normalized_phone or "", "sender": r.sender or "",
-        "raw_message": r.raw_message, "received_at": r.received_at.isoformat() if r.received_at else None,
-        "classification": r.classification, "matching_method": r.matching_method or "",
-        "matched_order_id": r.matched_order_id, "matched_sale_id": r.matched_sale_id,
-        "matched_payment_id": r.matched_payment_id,
-    } for r in rows])
+@bp.get("/pay/approval/<token>")
+def approval(token):
+    order = PayOrder.query.filter_by(public_token=token).first_or_404()
+    _expire(order)
+    items = PayOrderItem.query.filter_by(payment_order_id=order.id).order_by(PayOrderItem.product_name_snapshot).all()
+    return render_template("pay/approval.html", order=order, items=items)
 
 
-@bp.get("/pay/api/automated")
-@pay_admin_required
-def automated_api():
-    business_id, _ = _business_store()
-    rows = AutoPaymentReceipt.query.filter(
-        AutoPaymentReceipt.business_id == business_id,
-        AutoPaymentReceipt.classification.in_({"AUTO_APPROVED", "PAYMENT_UNMATCHED", "PAYMENT_AMBIGUOUS", "UNDERPAYMENT", "OVERPAYMENT", "DUPLICATE_ALREADY_PROCESSED"}),
-    ).order_by(AutoPaymentReceipt.received_at.desc()).limit(100).all()
-    return jsonify(ok=True, events=[{
-        "transaction_code": r.transaction_code, "amount": str(r.amount or 0), "payer_name": r.payer_name or "",
-        "phone": r.normalized_phone or r.phone or "", "received_at": r.received_at.isoformat() if r.received_at else None,
-        "classification": r.classification, "matching_method": r.matching_method or "",
-        "matched_order_id": r.matched_order_id, "matched_sale_id": r.matched_sale_id,
-    } for r in rows])
+@bp.get("/pay/api/<token>")
+def approval_api(token):
+    order = PayOrder.query.filter_by(public_token=token).first_or_404()
+    _expire(order)
+    return jsonify(
+        ok=True,
+        reference=order.reference,
+        payment_status=order.payment_status,
+        fulfillment_status=order.fulfillment_status,
+        expected_amount=str(order.expected_amount),
+        paid_amount=str(order.paid_amount) if order.paid_amount is not None else None,
+        paid_at=order.paid_at.isoformat() if order.paid_at else None,
+        transaction_code=order.mpesa_transaction_code,
+        reason=order.review_reason,
+        updated_at=(order.paid_at or order.created_at).isoformat() if (order.paid_at or order.created_at) else None,
+    )
 
 
-@bp.get("/pay/checkout")
-def checkout():
-    from routes.shop import active_stores, selected_store
-    store = selected_store()
-    stores = active_stores()
-    return render_template("pay/checkout.html", store=store, stores=stores, destination=_destination(store))
+@bp.get("/control/pay")
+@_admin_required
+def admin_pay():
+    business_id = current_user.business_id
+    statuses = ["PENDING", "MANUAL_REVIEW", "PAID", "EXPIRED"]
+    rows = (PayOrder.query.filter(PayOrder.business_id == business_id, PayOrder.payment_status.in_(statuses))
+            .order_by(PayOrder.created_at.desc()).limit(300).all())
+    for row in rows:
+        _expire(row)
+    # Re-query after expiry changes for the clean current list.
+    rows = (PayOrder.query.filter(PayOrder.business_id == business_id)
+            .order_by(PayOrder.created_at.desc()).limit(300).all())
+    settings = get_pay_settings(business_id)
+    recent_receipts = PayReceipt.query.filter_by(business_id=business_id).order_by(PayReceipt.created_at.desc()).limit(80).all()
+    return render_template("admin/pay.html", rows=rows, settings=settings, methods=enabled_methods(settings), recent_receipts=recent_receipts)
 
 
-@bp.get("/pay/order/<order_number>")
-def payment_page(order_number):
-    order = Order.query.filter_by(order_number=order_number).first_or_404()
-    items = OrderItem.query.filter_by(order_id=order.id).all()
-    store = db.session.get(Store, order.store_id)
-    customer = db.session.get(Customer, order.customer_id) if order.customer_id else None
-    return render_template("pay/order_payment.html", order=order, items=items, store=store, customer=customer, destination=_destination(store))
+@bp.post("/control/pay/settings")
+@_admin_required
+def save_pay_settings():
+    settings = get_pay_settings(current_user.business_id)
+    mode = request.form.get("mode", "PAYBILL").upper()
+    if mode not in {"PAYBILL", "BUY_GOODS", "BOTH"}:
+        flash("Choose PayBill, Buy Goods, or both.", "error")
+        return redirect(url_for("pay.admin_pay"))
+    settings.mode = mode
+    settings.paybill_number = request.form.get("paybill_number", "").strip()[:40] or None
+    settings.paybill_account_name = request.form.get("paybill_account_name", "").strip()[:160] or None
+    settings.buy_goods_till = request.form.get("buy_goods_till", "").strip()[:40] or None
+    settings.display_name = request.form.get("display_name", "Denmart").strip()[:160] or "Denmart"
+    settings.instructions = request.form.get("instructions", "").strip()[:500] or "Pay using the payment option shown, then wait for approval."
+    settings.updated_at = now()
+    db.session.add(settings)
+    db.session.commit()
+    flash("PAY settings saved.", "success")
+    return redirect(url_for("pay.admin_pay"))
 
 
-@bp.get("/pay/api/order/<order_number>")
-def order_status(order_number):
-    order = Order.query.filter_by(order_number=order_number).first_or_404()
-    receipt = AutoPaymentReceipt.query.filter_by(matched_order_id=order.id).order_by(AutoPaymentReceipt.received_at.desc()).first()
-    return jsonify(ok=True, order_number=order.order_number, payment_status=order.payment_status, status=order.status, total=str(order.total or 0),
-                   receipt={"transaction_code": receipt.transaction_code, "amount": str(receipt.amount or 0), "classification": receipt.classification,
-                            "received_at": receipt.received_at.isoformat() if receipt.received_at else None} if receipt else None)
+@bp.post("/control/pay/<order_id>/approve")
+@_admin_required
+def manual_approve_order(order_id):
+    order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).first_or_404()
+    reason = request.form.get("reason", "Manual approval by administrator").strip()[:1000] or "Manual approval by administrator"
+    try:
+        ok, message = manual_approve(order, current_user.id, reason)
+        if ok:
+            flash(f"{order.reference} approved. It is now in packaging.", "success")
+        else:
+            flash(message, "error")
+    except Exception:
+        db.session.rollback()
+        flash("Manual approval could not be completed safely. No payment state was changed.", "error")
+    return redirect(url_for("pay.admin_pay"))
+
+
+@bp.post("/control/pay/<order_id>/fulfillment")
+@_admin_required
+def fulfillment(order_id):
+    order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).first_or_404()
+    status = request.form.get("status", "").upper()
+    try:
+        set_fulfillment(order, status, current_user.id)
+        flash(f"{order.reference} moved to {status}.", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    except Exception:
+        db.session.rollback()
+        flash("Fulfillment update failed safely; no change was saved.", "error")
+    return redirect(url_for("pay.admin_pay"))
+
+
+@bp.get("/control/pay/<order_id>")
+@_admin_required
+def pay_detail(order_id):
+    order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).first_or_404()
+    _expire(order)
+    items = PayOrderItem.query.filter_by(payment_order_id=order.id).all()
+    receipt = PayReceipt.query.filter_by(matched_payment_order_id=order.id).order_by(PayReceipt.created_at.desc()).first()
+    events = PayEvent.query.filter_by(payment_order_id=order.id).order_by(PayEvent.created_at.desc()).limit(100).all()
+    return render_template("admin/pay_detail.html", order=order, items=items, receipt=receipt, events=events)
+
+
+@csrf.exempt
+@bp.post("/api/pos/pay")
+@login_required
+def pos_create_payment():
+    from flask import session
+    if session.get("portal") != "pos" or not current_user.is_active or not current_user.business_id or not current_user.store_id or not current_user.has_permission("sales.create"):
+        return jsonify(error="forbidden"), 403
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("customer_name") or "").strip()
+    phone = str(data.get("customer_phone") or "").strip()
+    items = data.get("items") or []
+    if not isinstance(items, list) or not items:
+        return jsonify(error="cart_empty"), 400
+    try:
+        total = Decimal("0")
+        clean = []
+        for raw in items:
+            sp_id = str(raw.get("store_product_id") or raw.get("id") or "").strip()
+            qty = Decimal(str(raw.get("quantity") or raw.get("qty") or 0))
+            if not sp_id or qty <= 0:
+                raise ValueError("Invalid basket item.")
+            sp = StoreProduct.query.filter_by(id=sp_id, store_id=current_user.store_id).first()
+            if not sp or not sp.available_pos or not sp.is_available:
+                raise ValueError("One of the selected items is no longer available.")
+            available = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(sp.reserved_quantity or 0))
+            if available < qty:
+                raise ValueError(f"Not enough stock for {sp.product.name}.")
+            total += (Decimal(str(sp.selling_price)) * qty).quantize(Decimal("0.01"))
+            clean.append({"store_product_id": sp.id, "quantity": str(qty)})
+        order = create_payment_order(
+            business_id=current_user.business_id,
+            store_id=current_user.store_id,
+            customer_name=name,
+            phone=phone,
+            amount=total,
+            items=clean,
+            channel="POS",
+            payment_method=str(data.get("payment_method") or "").upper() or None,
+        )
+        return jsonify(ok=True, payment_id=order.id, reference=order.reference, amount=str(order.expected_amount), approval_url=url_for("pay.approval", token=order.public_token, _external=True))
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify(error=str(exc)), 400
+    except Exception:
+        db.session.rollback()
+        return jsonify(error="payment_request_failed"), 500

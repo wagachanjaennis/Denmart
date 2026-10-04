@@ -3,11 +3,10 @@ import base64
 import mimetypes
 from pathlib import Path
 
-from decimal import Decimal
 from PIL import Image, ImageDraw, ImageFont
-from flask import Blueprint, render_template, request, session, send_file, jsonify, Response, redirect, url_for, flash, current_app
+from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app
 from extensions import db
-from models import Product, Store, StoreProduct, Category, SystemSetting, ProductAlias, ProductImage, Business, Order, Delivery, Payment, SystemError, PaymentDestination
+from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage
 from services.search import forgiving_rank
 from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 
@@ -17,22 +16,6 @@ bp = Blueprint("shop", __name__)
 def active_stores():
     return Store.query.filter_by(is_active=True).order_by(Store.name).all()
 
-
-def active_payment_destination(business_id, store_id=None):
-    q = PaymentDestination.query.filter_by(business_id=business_id, is_active=True)
-    if store_id:
-        specific = (q.filter_by(store_id=store_id, is_default=True).first() or
-                    q.filter_by(store_id=store_id).order_by(PaymentDestination.created_at.desc()).first())
-        if specific:
-            return specific
-    return (q.filter_by(store_id=None, is_default=True).first() or
-            q.filter_by(store_id=None).order_by(PaymentDestination.created_at.desc()).first())
-
-
-
-
-def fixed_merchant_till():
-    return str(current_app.config.get("DENMART_MERCHANT_TILL") or "").strip()
 
 def selected_store():
     stores = active_stores()
@@ -155,109 +138,14 @@ def product(slug):
 
 @bp.get("/cart")
 def cart():
-    return render_template("shop/cart.html", store=selected_store())
-
-
-@bp.get("/checkout")
-def checkout():
     store = selected_store()
-    till_number = fixed_merchant_till()
-    destination = type("FixedTill", (), {
-        "id":"", "channel":"TILL", "number":till_number, "account_number":"",
-        "label":"Denmart M-PESA Till",
-        "instructions":"Pay the exact order total to the Denmart merchant Till."
-    })() if till_number else None
-    return render_template("shop/checkout.html", store=store, till_number=till_number, payment_destination=destination)
-
-
-@bp.get("/order/<order_number>")
-def order_confirmation(order_number):
-    from models import Order, OrderItem
-    order = Order.query.filter_by(order_number=order_number).first_or_404()
-    items = OrderItem.query.filter_by(order_id=order.id).all()
-    store = Store.query.get(order.store_id)
-    till_number = fixed_merchant_till()
-    destination = type("FixedTill", (), {
-        "id":"", "channel":"TILL", "number":till_number, "account_number":"",
-        "label":"Denmart M-PESA Till", "instructions":"Pay the exact order total to the Denmart merchant Till."
-    })() if till_number else None
-    active_payment = (Payment.query.filter(
-        Payment.order_id == order.id,
-        Payment.method.in_(["MPESA_TILL_INTENT", "MPESA_TILL_MANUAL", "MPESA_GATEWAY_INTENT", "MPESA_TILL", "MPESA_GATEWAY"]),
-        Payment.status.in_(["PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"]),
-    ).order_by(Payment.created_at.desc()).first())
-    from services.payments.settlement import order_received_total, order_outstanding
-    received_total = order_received_total(order)
-    outstanding_total = order_outstanding(order)
-    return render_template("shop/order_confirmation.html", order=order, items=items, store=store, till_number=till_number,
-                           payment_destination=destination, active_payment=active_payment, received_total=received_total, outstanding_total=outstanding_total)
-
-
-@bp.get("/delivery/<order_number>")
-def delivery_request(order_number):
-    order = Order.query.filter_by(order_number=order_number).first_or_404()
-    store = db.session.get(Store, order.store_id)
-    if order.payment_status != "PAID":
-        flash("Please wait until payment is fully approved before continuing to delivery.", "error")
-        return redirect(url_for("shop.order_confirmation", order_number=order.order_number))
-    existing = Delivery.query.filter_by(order_id=order.id).first()
-    base_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_base_fee").first()
-    km_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_per_km").first()
-    enabled_setting = SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_enabled").first()
-    try:
-        base_fee = Decimal(str(base_setting.value if base_setting else "100"))
-        per_km = Decimal(str(km_setting.value if km_setting else "20"))
-    except Exception:
-        base_fee, per_km = Decimal("100"), Decimal("20")
-    enabled = (enabled_setting.value if enabled_setting else "1") == "1"
-    return render_template("shop/delivery.html", order=order, store=store, existing=existing, base_fee=base_fee, per_km=per_km, enabled=enabled)
-
-
-@bp.post("/delivery/<order_number>/request")
-def submit_delivery_request(order_number):
-    order = Order.query.filter_by(order_number=order_number).first_or_404()
-    if order.payment_status != "PAID":
-        flash("Please wait until payment is fully approved before requesting delivery.", "error")
-        return redirect(url_for("shop.order_confirmation", order_number=order.order_number))
-    if Delivery.query.filter_by(order_id=order.id).first():
-        flash("Delivery is already requested for this order.", "success")
-        return redirect(url_for("shop.delivery_request", order_number=order.order_number))
-    address = request.form.get("address", "").strip()
-    phone = request.form.get("phone", "").strip()
-    name = request.form.get("name", "").strip()
-    try:
-        km = Decimal(request.form.get("distance_km", "0") or "0")
-        base_fee = Decimal(str(SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_base_fee").first().value if SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_base_fee").first() else "100"))
-        per_km = Decimal(str(SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_per_km").first().value if SystemSetting.query.filter_by(business_id=order.business_id, key="delivery_bike_per_km").first() else "20"))
-    except Exception:
-        km = Decimal("0"); base_fee, per_km = Decimal("100"), Decimal("20")
-    if not address or not phone or not name or km < 0 or km > 200:
-        flash("Enter the recipient details, delivery address and a valid distance estimate.", "error")
-        return redirect(url_for("shop.delivery_request", order_number=order.order_number))
-    fee = (base_fee + (per_km * km)).quantize(Decimal("1"))
-    order.delivery_address = address
-    order.delivery_fee = fee
-    order.delivery_notes = f"Bike delivery requested · estimated {km} km · delivery fee KES {fee} · recipient {name} {phone}"
-    db.session.add(Delivery(order_id=order.id, status="PENDING", recipient_name=name[:160], recipient_phone=phone[:40], notes=order.delivery_notes))
-    db.session.commit()
-    flash(f"Bike delivery requested. Estimated delivery charge: KES {fee:.0f}.", "success")
-    return redirect(url_for("shop.delivery_request", order_number=order.order_number))
-
-
-@bp.get("/mpesa-till-qr")
-def mpesa_till_qr():
-    import qrcode
-    store = selected_store()
-    if not store:
-        return ("", 404)
-    qr_value = fixed_merchant_till()
-    if not qr_value:
-        return ("", 404)
-    img = qrcode.make(qr_value)
-    buf = BytesIO(); img.save(buf, format="PNG", optimize=True); buf.seek(0)
-    return send_file(buf, mimetype="image/png", max_age=3600)
-
-
+    methods = []
+    settings = None
+    if store:
+        from services.payment_engine import get_pay_settings, enabled_methods
+        settings = get_pay_settings(store.business_id)
+        methods = enabled_methods(settings)
+    return render_template("shop/cart.html", store=store, payment_methods=methods, pay_settings=settings)
 
 
 @bp.get("/favicon.ico")
@@ -384,7 +272,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v21-checkout-fix";
+    js = '''const CACHE_VERSION = "denmart-public-v22-basket-only";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
@@ -396,7 +284,7 @@ self.addEventListener("activate", event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => !k.startsWith(CACHE_VERSION)).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
 function bypass(request, url) {
-  return request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/control") || url.pathname.startsWith("/merchant") || url.pathname.startsWith("/order/") || url.pathname.startsWith("/login") || url.pathname.startsWith("/logout");
+  return request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/control") || url.pathname.startsWith("/merchant") || url.pathname.startsWith("/login") || url.pathname.startsWith("/logout");
 }
 self.addEventListener("fetch", event => {
   const request = event.request;

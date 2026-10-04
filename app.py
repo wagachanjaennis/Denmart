@@ -6,11 +6,16 @@ from config import Config
 from extensions import db, migrate, login_manager, csrf
 from models import User, Business, SystemError, SystemSetting
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_wtf.csrf import CSRFError
 
 
 def create_app():
     app = Flask(__name__)
+    # Render terminates TLS before forwarding requests to Gunicorn. Trust the
+    # forwarded proto/host so externally generated URLs stay HTTPS and point at
+    # the public service rather than the internal HTTP hop.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     app.config.from_object(Config)
     os.makedirs(os.path.join(app.root_path, "instance"), exist_ok=True)
 
@@ -53,7 +58,7 @@ def create_app():
         # visitors to the correct login screen instead of relying on a
         # single Flask-Login endpoint that does not exist.
         target = request.args.get("next", "")
-        if request.path.startswith("/control") or request.path.startswith("/scan") or request.path.startswith("/pay"):
+        if request.path.startswith("/control") or request.path.startswith("/scan"):
             return redirect(f"/control?next={request.path}")
         return redirect(f"/merchant?next={request.path}")
 

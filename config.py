@@ -34,12 +34,15 @@ class Config:
     BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Denmart")
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-    DARAJA_ENV = os.getenv("DARAJA_ENV", "sandbox")
-    DARAJA_CONSUMER_KEY = os.getenv("DARAJA_CONSUMER_KEY", "")
-    DARAJA_CONSUMER_SECRET = os.getenv("DARAJA_CONSUMER_SECRET", "")
-    DARAJA_SHORTCODE = os.getenv("DARAJA_SHORTCODE", "")
-    DARAJA_PASSKEY = os.getenv("DARAJA_PASSKEY", "")
-    DARAJA_CALLBACK_URL = os.getenv("DARAJA_CALLBACK_URL", "")
-    PAYMENT_CREDENTIAL_ENCRYPTION_KEY = os.getenv("PAYMENT_CREDENTIAL_ENCRYPTION_KEY", "")
     # Fixed merchant destination for the current deployment. Keep this server-side; never bake it into the Android APK.
-    DENMART_MERCHANT_TILL = "0757817361"
+    # Optional stable public URL, e.g. https://denmart.onrender.com. When set,
+    # the Android gateway link is generated from this value instead of depending
+    # on reverse-proxy URL inference.
+    PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    # Optional shared gateway secret for deployments that need to reconnect an
+    # existing Android APK after moving/rebuilding the database. Prefer the
+    # database-generated secret when this is not set.
+    ANDROID_GATEWAY_SHARED_SECRET = os.getenv("ANDROID_GATEWAY_SHARED_SECRET", "").strip() or os.getenv("PAYMENT_GATEWAY_SHARED_SECRET", "").strip()
+
+
+# New PAY module defaults. These seed only the independent payment module and do not reuse payment history.

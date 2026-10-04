@@ -1,0 +1,10 @@
+{
+  "event_id": "sample-device-event-001",
+  "gateway_device_id": "android-gateway-1",
+  "sim_slot": 0,
+  "subscription_id": 123456789,
+  "sender": "M-PESA",
+  "raw_message": "UJ40P8V59L Confirmed. Ksh1000.00 received from JEAN PROMISE 254732154678.",
+  "received_at": "2026-10-04T18:00:00+03:00",
+  "source": "android_sms_telemetry"
+}
