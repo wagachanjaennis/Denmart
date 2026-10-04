@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app
 from extensions import db
-from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage
+from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business
 from services.search import forgiving_rank
 from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 

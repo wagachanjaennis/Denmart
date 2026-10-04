@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_
 
 from extensions import db
+from config import Config
 from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, now
 
 TWOPLACES = Decimal("0.01")
@@ -50,17 +51,30 @@ def make_public_token():
 
 def get_pay_settings(business_id, create=True):
     row = PaySettings.query.filter_by(business_id=business_id).first()
-    if row or not create:
-        return row
+    if row:
+        # Hard-coded fallback keeps checkout usable even when the independent
+        # PAY settings row exists but has never been configured.
+        if not (row.paybill_number or row.buy_goods_till):
+            row.buy_goods_till = (getattr(Config, "DENMART_MERCHANT_TILL", "") or "").strip()
+            row.mode = "BUY_GOODS"
+            row.display_name = row.display_name or "Denmart"
+            row.instructions = row.instructions or "Send the exact amount to the Denmart M-PESA Till shown below, then wait for approval."
+            row.updated_at = now()
+            db.session.add(row)
+            db.session.flush()
+        return row if create else row
+    if not create:
+        return None
     from os import getenv
+    fixed_till = (getattr(Config, "DENMART_MERCHANT_TILL", "") or "").strip()
     row = PaySettings(
         business_id=business_id,
-        mode=(getenv("PAYMENT_METHOD_MODE", "PAYBILL") or "PAYBILL").upper(),
+        mode=(getenv("PAYMENT_METHOD_MODE", getattr(Config, "DENMART_PAYMENT_METHOD", "BUY_GOODS")) or "BUY_GOODS").upper(),
         paybill_number=(getenv("PAYBILL_NUMBER", "") or "").strip(),
         paybill_account_name=(getenv("PAYBILL_ACCOUNT_NAME", "Denmart") or "Denmart").strip(),
-        buy_goods_till=(getenv("BUY_GOODS_TILL", "") or "").strip(),
+        buy_goods_till=(getenv("BUY_GOODS_TILL", fixed_till) or fixed_till).strip(),
         display_name=(getenv("PAYMENT_DISPLAY_NAME", "Denmart") or "Denmart").strip(),
-        instructions=(getenv("PAYMENT_INSTRUCTIONS", "Pay using the payment option shown below, then wait on this page for approval.") or "").strip(),
+        instructions=(getenv("PAYMENT_INSTRUCTIONS", "Send the exact amount to the Denmart M-PESA Till shown below, then wait for approval.") or "").strip(),
         updated_at=now(),
     )
     db.session.add(row)
@@ -113,7 +127,17 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
     settings = get_pay_settings(business_id)
     methods = enabled_methods(settings)
     if not methods:
-        raise ValueError("Payment instructions are not configured yet. Please contact the store.")
+        # Final hard-coded fallback: the customer-facing payment flow must not
+        # depend on an admin settings row existing or being populated.
+        settings.buy_goods_till = getattr(Config, "DENMART_MERCHANT_TILL", "0757817361")
+        settings.mode = "BUY_GOODS"
+        settings.display_name = settings.display_name or "Denmart"
+        settings.instructions = settings.instructions or "Send the exact amount to the Denmart M-PESA Till shown below, then wait for approval."
+        db.session.add(settings)
+        db.session.flush()
+        methods = enabled_methods(settings)
+    if not methods:
+        raise ValueError("Payment destination is unavailable.")
     method = (payment_method or methods[0]).upper()
     if method not in methods:
         raise ValueError("Choose one of the available payment methods.")
