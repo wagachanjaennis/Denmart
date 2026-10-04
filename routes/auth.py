@@ -59,8 +59,8 @@ def pos_login():
 @bp.route(ADMIN_PORTAL, methods=["GET", "POST"])
 def hidden_admin_portal():
     if current_user.is_authenticated and session.get("portal") == "admin":
-        from routes.admin import _dashboard
-        return _dashboard()
+        from routes.admin import dashboard
+        return dashboard()
     return _login("admin")
 
 
