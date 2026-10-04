@@ -9,7 +9,7 @@
       <div>
         <span class="eyebrow">PAYMENT RECONCILIATION</span>
         <h1>Payments</h1>
-        <p>Expected customer details are compared directly with the M-PESA receipt before a payment is released.</p>
+        <p>Live Messages releases exact, unambiguous M-PESA payments automatically. This screen shows status and provides manual approval for exceptions.</p>
       </div>
       <div class="control-user">{{current_user.username}}<small>Master administrator</small></div>
     </header>
@@ -149,7 +149,7 @@
       const time=comparison.time_minutes==null?'·':comparison.time_minutes+'m';
       const name=(row.channel==='ONLINE') ? `<span class="${comparison.name>=90?'match-ok':''}">Name ${comparison.name>=90?'✓':'·'}</span>` : '';
       const phone=row.phone ? `<span class="${comparison.phone?'match-ok':''}">Number ${comparison.phone?'✓':'·'}</span>` : '';
-      const action=row.can_manual ? form(row.payment_id,'Administrator verified the incoming M-PESA receipt after automatic comparison did not complete.') : row.result==='VALID' ? '<span class="muted">Released to accounting</span>' : '<span class="muted">Automatic monitoring</span>';
+      const action=row.can_manual ? form(row.payment_id,'Administrator verified the incoming M-PESA receipt after the live-message auto-approval rules did not complete.') : row.result==='VALID' ? '<span class="muted">Released to accounting</span>' : '<span class="muted">Live-message monitoring</span>';
       const receipt=r ? `<strong>${esc(r.name)}</strong><small>${esc(r.phone||'Payer number not visible')}</small><div class="payment-side-meta"><b>${money(r.amount)}</b><span>${esc(fmt(r.time))}</span></div><code class="receipt-code">${esc(r.code)}</code>` : '<span class="muted">Waiting for M-PESA receipt</span><small>The listener has not produced a usable receipt for this payment yet.</small>';
       const result=row.result==='VALID' ? '<span class="admin-badge gateway-ok">VALID</span><small>Auto-confirmed</small>' : row.result==='CHECK' ? '<span class="admin-badge gateway-warn">CHECK</span><small>Receipt found, identity/time needs review</small>' : '<span class="admin-badge gateway-warn">WAITING</span><small>No usable receipt yet</small>';
       return `<tr><td class="payment-side expected-side"><span class="payment-source-tag">${esc(row.channel)}</span><strong>${esc(row.name)}</strong><small>${esc(row.phone||'Phone not captured')} · ${esc(row.reference)}</small><div class="payment-side-meta"><b>${money(row.amount)}</b><span>${esc(fmt(row.expected_time))}</span></div></td><td class="payment-side receipt-side">${receipt}</td><td class="payment-result-cell">${result}${r?`<div class="match-breakdown">${name}${phone}<span class="${amountOk?'match-ok':''}">Amount ${amountOk?'✓':'·'}</span><span class="${comparison.time_minutes!=null&&comparison.time_minutes<=120?'match-ok':''}">Time ${esc(time)}</span></div>`:''}</td><td style="white-space:normal;min-width:180px">${action}</td></tr>`;
