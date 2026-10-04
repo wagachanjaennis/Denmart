@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="control-shell">
+  {% set admin_sidebar_class='control-sidebar' %}
+  {% include 'admin/_nav.html' %}
+  <main class="control-main">
+    <header class="control-header">
+      <div>
+        <span class="eyebrow">ANDROID GATEWAY</span>
+        <h1>Connect the Android app</h1>
+        <p>This is the server connection page for the existing gateway APK. Copy the generated URL into the app; incoming SMS will then appear in Live messages.</p>
+      </div>
+    </header>
+
+    <section class="admin-panel gateway-connection-panel">
+      <div class="gateway-status-row">
+        <div>
+          <span class="eyebrow">APP SETUP LINK</span>
+          <h2>Server-generated connection URL</h2>
+          <p>Use the complete URL below in the Android gateway's server/endpoint field. Do not remove the <code>?key=...</code> part.</p>
+        </div>
+        <a class="admin-action" href="/control/live-messages">Open live messages</a>
+      </div>
+
+      <label class="gateway-copy-label" for="gatewaySetupLink">APK connection URL</label>
+      <div class="gateway-copy-row">
+        <input id="gatewaySetupLink" class="gateway-copy-input" type="text" readonly value="{{ setup_link }}">
+        <button class="primary-btn gateway-copy-button" type="button" data-copy-target="gatewaySetupLink">Copy link</button>
+      </div>
+
+      <div class="gateway-check-grid">
+        <div class="gateway-card">
+          <span class="eyebrow">HEALTH CHECK</span>
+          <strong>Gateway ping URL</strong>
+          <input class="gateway-copy-input" type="text" readonly value="{{ ping_link }}">
+          <button class="text-btn gateway-copy-small" type="button" data-copy-value="{{ ping_link }}">Copy health URL</button>
+        </div>
+        <div class="gateway-card">
+          <span class="eyebrow">LIVE DESTINATION</span>
+          <strong>/api/payment-gateway/sms</strong>
+          <p>The APK sends its live SMS telemetry here. The server stores the mirror and the Live messages screen refreshes automatically.</p>
+        </div>
+      </div>
+
+      <div class="gateway-notes">
+        <strong>Connection steps</strong>
+        <ol>
+          <li>Open the Android gateway APK.</li>
+          <li>Paste the <strong>APK connection URL</strong> above into its server/endpoint field.</li>
+          <li>Save/test the connection in the APK.</li>
+          <li>Return to <a href="/control/live-messages">Live messages</a> and send/receive a test SMS.</li>
+        </ol>
+        <p class="gateway-security-note">The connection URL contains the shared gateway key. Treat it as a secret and do not publish it in GitHub, screenshots, or source code.</p>
+      </div>
+
+      <div id="gatewayCopyStatus" class="gateway-copy-status" aria-live="polite"></div>
+    </section>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function(){
+  const status=document.getElementById('gatewayCopyStatus');
+  async function copyText(value){
+    try{
+      await navigator.clipboard.writeText(value);
+      status.textContent='Copied to clipboard.';
+      return;
+    }catch(e){}
+    const ta=document.createElement('textarea');
+    ta.value=value; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); status.textContent='Copied to clipboard.'; }
+    catch(e){ status.textContent='Copy failed — select the URL manually.'; }
+    ta.remove();
+  }
+  document.querySelectorAll('[data-copy-target]').forEach(btn=>btn.addEventListener('click',function(){
+    const el=document.getElementById(btn.dataset.copyTarget); copyText(el.value);
+  }));
+  document.querySelectorAll('[data-copy-value]').forEach(btn=>btn.addEventListener('click',function(){copyText(btn.dataset.copyValue);}));
+})();
+</script>
+{% endblock %}
