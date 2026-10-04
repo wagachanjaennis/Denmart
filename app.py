@@ -53,7 +53,7 @@ def create_app():
         # visitors to the correct login screen instead of relying on a
         # single Flask-Login endpoint that does not exist.
         target = request.args.get("next", "")
-        if request.path.startswith("/control") or request.path.startswith("/scan"):
+        if request.path.startswith("/control") or request.path.startswith("/scan") or request.path.startswith("/pay"):
             return redirect(f"/control?next={request.path}")
         return redirect(f"/merchant?next={request.path}")
 
