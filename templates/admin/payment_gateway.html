@@ -8,7 +8,7 @@
 
   <main class="control-main gateway-page">
     <header class="control-header">
-      <div><span class="eyebrow">M-PESA PHONE LISTENER</span><h1>Payment monitor</h1><p>Live incoming Safaricom/M-PESA receipts arriving from the dedicated Denmart Android listener. Airtel, sent-to, balance and utility messages are ignored.</p></div>
+      <div><span class="eyebrow">M-PESA PHONE LISTENER</span><h1>M-PESA monitor</h1><p>Live incoming Safaricom/M-PESA receipts from the dedicated Android listener. The separate Live messages screen keeps the complete received-SMS telemetry stream.</p></div>
       <div class="gateway-live"><span class="gateway-dot" id="gatewayPulse"></span><strong id="gatewayLiveText">LIVE</strong><small id="gatewayLast">Waiting for the first message</small></div>
     </header>
 
@@ -43,7 +43,7 @@
     <section class="gateway-store-grid" id="storeTotals"></section>
 
     <section class="control-panel">
-      <div class="panel-title"><div><span class="eyebrow">LIVE FEED</span><h2>Incoming M-PESA messages</h2></div><span class="muted">Updates automatically</span></div>
+      <div class="panel-title"><div><span class="eyebrow">PAYMENT FEED</span><h2>Incoming M-PESA receipts</h2></div><div><a class="admin-action" href="/control/live-messages">View all received SMS</a></div></div>
       <div class="table-wrap">
         <table class="admin-table gateway-table"><thead><tr><th>Time</th><th>Source</th><th>Customer</th><th>Phone</th><th>Transaction</th><th>Amount</th><th>Status</th></tr></thead>
         <tbody id="gatewayFeed">

@@ -24,7 +24,7 @@
 
     <section class="admin-panel">
       <div class="toolbar">
-        <div><strong>Live comparison</strong><div class="muted">One payment, one comparison. The Till is intentionally not shown here.</div></div>
+        <div><strong>Live comparison</strong><div class="muted">One payment, one comparison. The Till is intentionally not shown here.</div><div class="payments-auto-note"><span class="payments-auto-dot"></span><span id="paymentsAutoStatus">Auto-reconciling received M-PESA receipts every 2.5 seconds.</span></div></div>
         <form method="get" class="payment-filter-form">
           <select class="admin-input" name="source">
             <option value="">Online + POS</option>
@@ -126,4 +126,53 @@
   </main>
 </div>
 {% endblock %}
-{% block scripts %}{% endblock %}
+{% block scripts %}
+<script>
+(function(){
+  const csrf = {{ csrf_token()|tojson }};
+  const esc = s => String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const money = v => 'KES ' + Number(v || 0).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const fmt = iso => iso ? new Date(iso).toLocaleString('en-KE',{hour12:false}) : '—';
+  const form = (id, reason) => `<form method="post" action="/control/payments/${esc(id)}/approve-manual"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="reason" value="${esc(reason)}"><button class="admin-action" type="submit">Approve manually</button></form>`;
+
+  function render(d){
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(1) strong').textContent=d.pending_count ?? 0;
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(1) .muted').textContent=money(d.pending_amount);
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(2) strong').textContent=d.online_pending ?? 0;
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(3) strong').textContent=d.pos_pending ?? 0;
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(4) strong').textContent=d.auto_today ?? 0;
+    document.querySelector('.admin-stat-grid .admin-stat:nth-child(5) strong').textContent=money(d.paid_today);
+    const rows=(d.rows||[]).map(row=>{
+      const r=row.receipt;
+      const comparison=row.comparison||{};
+      const amountOk=!!comparison.amount;
+      const time=comparison.time_minutes==null?'·':comparison.time_minutes+'m';
+      const name=(row.channel==='ONLINE') ? `<span class="${comparison.name>=90?'match-ok':''}">Name ${comparison.name>=90?'✓':'·'}</span>` : '';
+      const phone=row.phone ? `<span class="${comparison.phone?'match-ok':''}">Number ${comparison.phone?'✓':'·'}</span>` : '';
+      const action=row.can_manual ? form(row.payment_id,'Administrator verified the incoming M-PESA receipt after automatic comparison did not complete.') : row.result==='VALID' ? '<span class="muted">Released to accounting</span>' : '<span class="muted">Automatic monitoring</span>';
+      const receipt=r ? `<strong>${esc(r.name)}</strong><small>${esc(r.phone||'Payer number not visible')}</small><div class="payment-side-meta"><b>${money(r.amount)}</b><span>${esc(fmt(r.time))}</span></div><code class="receipt-code">${esc(r.code)}</code>` : '<span class="muted">Waiting for M-PESA receipt</span><small>The listener has not produced a usable receipt for this payment yet.</small>';
+      const result=row.result==='VALID' ? '<span class="admin-badge gateway-ok">VALID</span><small>Auto-confirmed</small>' : row.result==='CHECK' ? '<span class="admin-badge gateway-warn">CHECK</span><small>Receipt found, identity/time needs review</small>' : '<span class="admin-badge gateway-warn">WAITING</span><small>No usable receipt yet</small>';
+      return `<tr><td class="payment-side expected-side"><span class="payment-source-tag">${esc(row.channel)}</span><strong>${esc(row.name)}</strong><small>${esc(row.phone||'Phone not captured')} · ${esc(row.reference)}</small><div class="payment-side-meta"><b>${money(row.amount)}</b><span>${esc(fmt(row.expected_time))}</span></div></td><td class="payment-side receipt-side">${receipt}</td><td class="payment-result-cell">${result}${r?`<div class="match-breakdown">${name}${phone}<span class="${amountOk?'match-ok':''}">Amount ${amountOk?'✓':'·'}</span><span class="${comparison.time_minutes!=null&&comparison.time_minutes<=120?'match-ok':''}">Time ${esc(time)}</span></div>`:''}</td><td style="white-space:normal;min-width:180px">${action}</td></tr>`;
+    }).join('');
+    document.querySelector('.payment-compare-table tbody').innerHTML=rows||'<tr><td colspan="4" class="empty-payment-state">No payment records match this filter.</td></tr>';
+    document.getElementById('paymentsAutoStatus').textContent='Server checked '+new Date().toLocaleTimeString('en-KE',{hour12:false})+' · received receipts are reconciled automatically.';
+  }
+
+  async function refresh(){
+    try{
+      const params=new URLSearchParams({partial:'1'});
+      const source=document.querySelector('select[name="source"]')?.value||'';
+      const status=document.querySelector('select[name="status"]')?.value||'';
+      if(source)params.set('source',source); if(status)params.set('status',status);
+      const r=await fetch('/control/payments?'+params.toString(),{credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}});
+      if(!r.ok) throw new Error('monitor');
+      render(await r.json());
+    }catch(e){
+      const el=document.getElementById('paymentsAutoStatus'); if(el)el.textContent='Payment monitor temporarily unavailable; retrying automatically.';
+    }
+  }
+  refresh();
+  setInterval(refresh,2500);
+})();
+</script>
+{% endblock %}

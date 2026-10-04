@@ -7,7 +7,7 @@ from flask_login import current_user, login_required
 from extensions import csrf, db
 from models import (Product, ProductAlias, StoreProduct, Payment, Sale, SaleItem, Order, OrderItem,
                     InventoryTransaction, now, Store, Customer, Business, PaymentIntegration, PaymentDestination,
-                    SystemSetting, PaymentGatewayEvent)
+                    SystemSetting, PaymentGatewayEvent, GatewaySmsMessage)
 from services.search import forgiving_rank
 from services.product_images import public_product_image, has_public_product_image
 from services.payments.daraja import DarajaProvider
@@ -741,68 +741,122 @@ def payment_gateway_ping():
 @bp.post("/payment-gateway/telemetry")
 @bp.post("/mpesa-listener/event")
 def payment_gateway_sms():
+    """Receive raw inbound SMS telemetry, then optionally reconcile it as M-PESA.
+
+    Android is deliberately not the business-rule gatekeeper. Every received Inbox
+    message is stored as telemetry first. The server then decides whether that raw SMS
+    is an eligible Safaricom/M-PESA receipt. This prevents Airtel or unrelated SMS that
+    happen to mention "M-PESA" from entering the payment ledger.
+    """
     supplied_key = (request.args.get("key") or request.headers.get("X-Denmart-Gateway-Key") or request.headers.get("X-RealMart-Gateway-Key") or "").strip()
     business_setting = _gateway_business_for_secret(supplied_key)
     if not business_setting:
         return jsonify(error="gateway_not_authorized"), 401
+
     payload = request.get_json(silent=True) or {}
-    event_id = (request.headers.get("X-Denmart-Event-Id") or request.headers.get("X-RealMart-Event-Id") or payload.get("event_id") or "").strip()
+    event_id = (request.headers.get("X-Denmart-Event-Id") or request.headers.get("X-RealMart-Event-Id") or payload.get("event_id") or "").strip()[:160]
     device_id = (request.headers.get("X-Denmart-Gateway-Id") or request.headers.get("X-RealMart-Gateway-Id") or payload.get("gateway_device_id") or "").strip()[:120]
-    # The complete raw SMS body is the authoritative input. Legacy clients may call it
-    # message/receipt/raw_message; compact parsed summaries are never used for approval.
-    raw_message = str(
-        payload.get("raw_message") or payload.get("sms_body") or payload.get("receipt") or payload.get("message") or ""
-    ).strip()
+    raw_message = str(payload.get("raw_message") or payload.get("sms_body") or payload.get("receipt") or payload.get("message") or "").strip()
     sender = str(payload.get("sender") or payload.get("originating_address") or "").strip()[:120]
     source = str(payload.get("source") or "android_sms_telemetry").strip()[:40]
     if not event_id or not device_id or not raw_message:
         return jsonify(error="event_id_device_id_raw_message_required"), 400
 
-    # Parse all approval facts from the raw receipt itself so the Android client cannot
-    # fabricate amount/name/phone/code fields to force an approval.
-    amount = _gateway_parse_amount(raw_message)
-    transaction_id = _gateway_parse_transaction(raw_message)
-    if not _gateway_is_payment_message(sender, raw_message, payload):
-        return jsonify(ok=True, ignored=True, reason="not_a_payment_notification"), 200
-    if amount is None or amount <= 0 or not transaction_id:
-        return jsonify(ok=True, ignored=True, reason="payment_amount_or_transaction_missing"), 200
-    business_setting = _gateway_business_for_secret(supplied_key)
-    if not business_setting:
-        return jsonify(error="gateway_not_authorized"), 401
     business_id = business_setting.business_id
     try:
         sim_slot = int(payload.get("sim_slot", 0))
     except (TypeError, ValueError):
         sim_slot = 0
     sim_slot = 0 if sim_slot < 0 else min(sim_slot, 1)
-    existing = PaymentGatewayEvent.query.filter_by(business_id=business_id, gateway_device_id=device_id, transaction_id=transaction_id).first()
-    if existing:
-        return jsonify(ok=True, duplicate=True, event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED"), 200
-    if _gateway_reference_already_used(business_id, transaction_id):
-        event = PaymentGatewayEvent(
-            business_id=business_id, store_id=None, gateway_device_id=device_id,
-            sim_slot=0, subscription_id=None, source=source, sender=sender,
-            message=raw_message[:12000], received_at=now(), transaction_id=transaction_id,
-            amount=amount, customer=_gateway_parse_customer(raw_message),
-            customer_phone=_gateway_parse_phone(raw_message), status="DUPLICATE",
-            raw_payload={**payload, "_reconciliation": {"reason": "transaction_code_already_consumed"}},
-        )
-        db.session.add(event); db.session.commit()
-        return jsonify(ok=True, duplicate_reference=True, event_id=event.id, status="DUPLICATE", matched=False, transaction_id=transaction_id), 200
-    customer = _gateway_parse_customer(raw_message)
-    customer_phone = _gateway_parse_phone(raw_message)
-    raw_receipt = raw_message[:12000]
     try:
         received_at = datetime.fromtimestamp(int(payload.get("received_at")) / 1000, tz=timezone.utc) if payload.get("received_at") else now()
     except Exception:
         received_at = now()
+
+    # Idempotent telemetry first. A retry of the exact event never creates duplicate rows.
+    telemetry = GatewaySmsMessage.query.filter_by(
+        business_id=business_id, gateway_device_id=device_id, event_id=event_id
+    ).first()
+    if telemetry:
+        telemetry.last_seen_at = now()
+        db.session.commit()
+        payment_event = db.session.get(PaymentGatewayEvent, telemetry.payment_event_id) if telemetry.payment_event_id else None
+        return jsonify(
+            ok=True, duplicate=True, event_id=event_id, telemetry_id=telemetry.id,
+            payment_event_id=telemetry.payment_event_id, payment_status=(payment_event.status if payment_event else None),
+            is_mpesa_candidate=bool(telemetry.is_mpesa_candidate),
+        ), 200
+
+    # Raw SMS is the authority. Parsed values are derived only on the server.
+    is_mpesa = _gateway_is_payment_message(sender, raw_message, payload)
+    telemetry = GatewaySmsMessage(
+        business_id=business_id,
+        gateway_device_id=device_id,
+        event_id=event_id,
+        sim_slot=sim_slot,
+        subscription_id=int(payload.get("subscription_id")) if str(payload.get("subscription_id") or "").isdigit() else None,
+        source=source or "android_sms_telemetry",
+        sender=sender,
+        message=raw_message[:12000],
+        received_at=received_at,
+        is_mpesa_candidate=is_mpesa,
+        delivery_status="RECEIVED",
+        raw_payload={**payload, "raw_message": raw_message},
+    )
+    db.session.add(telemetry)
+    db.session.flush()
+
+    # Non-M-PESA SMS stays visible as telemetry but can never become a payment event.
+    if not is_mpesa:
+        telemetry.delivery_status = "IGNORED_FOR_PAYMENTS"
+        db.session.commit()
+        return jsonify(ok=True, telemetry=True, ignored=True, reason="stored_telemetry_not_payment", event_id=event_id,
+                       telemetry_id=telemetry.id, is_mpesa_candidate=False), 200
+
+    amount = _gateway_parse_amount(raw_message)
+    transaction_id = _gateway_parse_transaction(raw_message)
+    customer = _gateway_parse_customer(raw_message)
+    customer_phone = _gateway_parse_phone(raw_message)
+    if amount is None or amount <= 0 or not transaction_id:
+        telemetry.delivery_status = "STORED_INCOMPLETE_MPESA"
+        db.session.commit()
+        return jsonify(ok=True, telemetry=True, ignored=True, reason="payment_amount_or_transaction_missing",
+                       event_id=event_id, telemetry_id=telemetry.id, is_mpesa_candidate=True), 200
+
+    existing = PaymentGatewayEvent.query.filter_by(
+        business_id=business_id, gateway_device_id=device_id, transaction_id=transaction_id
+    ).first()
+    if existing:
+        telemetry.payment_event_id = existing.id
+        telemetry.delivery_status = "DUPLICATE_PAYMENT_EVENT"
+        db.session.commit()
+        return jsonify(ok=True, duplicate=True, event_id=event_id, telemetry_id=telemetry.id,
+                       payment_event_id=existing.id, status=existing.status, matched=existing.status == "MATCHED",
+                       transaction_id=transaction_id), 200
+
+    if _gateway_reference_already_used(business_id, transaction_id):
+        event = PaymentGatewayEvent(
+            business_id=business_id, store_id=None, gateway_device_id=device_id,
+            sim_slot=sim_slot, subscription_id=telemetry.subscription_id, source=source,
+            sender=sender, message=raw_message[:12000], received_at=received_at,
+            transaction_id=transaction_id, amount=amount, customer=customer,
+            customer_phone=customer_phone, status="DUPLICATE",
+            raw_payload={**payload, "_reconciliation": {"reason": "transaction_code_already_consumed"}},
+        )
+        db.session.add(event); db.session.flush()
+        telemetry.payment_event_id = event.id
+        telemetry.delivery_status = "PAYMENT_EVENT_CREATED"
+        db.session.commit()
+        return jsonify(ok=True, duplicate_reference=True, event_id=event.id, telemetry_id=telemetry.id,
+                       status="DUPLICATE", matched=False, transaction_id=transaction_id), 200
+
     store = _gateway_store(business_id, sim_slot)
     event = PaymentGatewayEvent(
         business_id=business_id, store_id=store.id if store else None, gateway_device_id=device_id,
-        sim_slot=sim_slot, subscription_id=int(payload.get("subscription_id")) if str(payload.get("subscription_id") or "").isdigit() else None,
-        source=source or "android_sms_telemetry", sender=sender, message=raw_receipt, received_at=received_at,
-        transaction_id=transaction_id, amount=amount or Decimal("0"), customer=customer, customer_phone=customer_phone,
-        status="UNMATCHED", raw_payload={**payload, "raw_message": raw_receipt, "_reconciliation": {
+        sim_slot=sim_slot, subscription_id=telemetry.subscription_id, source=source or "android_sms_telemetry",
+        sender=sender, message=raw_message[:12000], received_at=received_at,
+        transaction_id=transaction_id, amount=amount, customer=customer, customer_phone=customer_phone,
+        status="UNMATCHED", raw_payload={**payload, "raw_message": raw_message, "_reconciliation": {
             "raw_authoritative": True,
             "parsed_transaction": transaction_id,
             "parsed_amount": str(amount or 0),
@@ -810,21 +864,24 @@ def payment_gateway_sms():
             "parsed_customer_phone": customer_phone,
         }},
     )
-    db.session.add(event); db.session.flush()
+    db.session.add(event)
+    db.session.flush()
+    telemetry.payment_event_id = event.id
+    telemetry.delivery_status = "PAYMENT_EVENT_CREATED"
 
-    # Do not trust a client-supplied payment_id to choose the waiting row. The server
-    # must independently identify the waiting POS/online payment from the raw receipt.
     matched, actual = _match_gateway_event(event)
-
     event.status = "MATCHED" if matched else "UNMATCHED"
     event.matched_payment_id = actual.id if actual else None
     if matched and actual:
         event.store_id = actual.store_id
+        telemetry.delivery_status = "MATCHED_AND_SETTLED"
+    else:
+        telemetry.delivery_status = "PAYMENT_UNMATCHED"
     db.session.commit()
-    return jsonify(ok=True, event_id=event.id, matched=matched, transaction_id=transaction_id,
-                   amount=str(amount or 0), customer=customer, customer_phone=customer_phone,
-                   raw_received=True, store_id=event.store_id, status=event.status,
-                   payment_id=actual.id if actual else None), 200
+    return jsonify(ok=True, telemetry=True, event_id=event.id, telemetry_id=telemetry.id,
+                   matched=matched, transaction_id=transaction_id, amount=str(amount or 0),
+                   customer=customer, customer_phone=customer_phone, raw_received=True,
+                   store_id=event.store_id, status=event.status, payment_id=actual.id if actual else None), 200
 
 
 @csrf.exempt

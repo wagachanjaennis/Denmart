@@ -548,6 +548,36 @@ class PaymentGatewayEvent(db.Model):
     )
 
 
+class GatewaySmsMessage(db.Model):
+    """Raw inbound SMS telemetry from the Denmart Android gateway.
+
+    This table is intentionally broader than PaymentGatewayEvent: every received
+    Inbox SMS can be observed here, while only server-validated Safaricom/M-PESA
+    receipts become payment events.
+    """
+    __tablename__ = "gateway_sms_messages"
+    id = db.Column(db.String(36), primary_key=True, default=uid)
+    business_id = db.Column(db.String(36), db.ForeignKey("businesses.id"), nullable=False, index=True)
+    gateway_device_id = db.Column(db.String(120), nullable=False, index=True)
+    event_id = db.Column(db.String(160), nullable=False)
+    sim_slot = db.Column(db.Integer, nullable=False, default=0, index=True)
+    subscription_id = db.Column(db.BigInteger)
+    source = db.Column(db.String(40), default="android_sms_telemetry", nullable=False)
+    sender = db.Column(db.String(120))
+    message = db.Column(db.Text, nullable=False)
+    received_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, index=True)
+    is_mpesa_candidate = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    payment_event_id = db.Column(db.String(36), db.ForeignKey("payment_gateway_events.id"), index=True)
+    delivery_status = db.Column(db.String(30), default="RECEIVED", nullable=False, index=True)
+    last_seen_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now)
+    raw_payload = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False, index=True)
+    payment_event = db.relationship("PaymentGatewayEvent")
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "gateway_device_id", "event_id", name="uq_gateway_sms_business_device_event"),
+    )
+
+
 class LoyaltyAccount(db.Model):
     __tablename__ = "loyalty_accounts"
     id = db.Column(db.String(36), primary_key=True, default=uid)

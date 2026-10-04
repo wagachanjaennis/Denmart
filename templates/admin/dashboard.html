@@ -47,8 +47,8 @@
       <details class="admin-quick-group" open>
         <summary>Payments and orders</summary>
         <div class="admin-launch-row">
-          <a class="admin-launch primary" href="/control/payment-gateway"><strong>M-PESA payment monitor</strong><span>{{gateway_received_count}} today · KES {{'%.2f'|format(gateway_received_total|float)}} received · {{gateway_unmatched_count}} unmatched</span></a>
-          <a class="admin-launch" href="/control/orders"><strong>Online orders</strong><span>{{pending_payment_approvals}} payments awaiting approval · {{pending_orders}} awaiting fulfilment</span></a>
+          <a class="admin-launch primary" href="/control/payments"><strong>Payments</strong><span>{{pending_payment_approvals}} awaiting approval · {{gateway_unmatched_count}} M-PESA receipts unmatched</span></a>
+          <a class="admin-launch" href="/control/live-messages"><strong>Live messages</strong><span>See every received Inbox SMS reaching the server in real time</span></a>
           <a class="admin-launch" href="/control/daily-report"><strong>Daily closing report</strong><span>Cash, M-PESA, card, online, stock cost and profit</span></a>
         </div>
       </details>

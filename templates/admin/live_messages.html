@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="control-shell">
+  {% include 'admin/_nav.html' %}
+  <main class="control-main live-messages-page">
+    <header class="control-header">
+      <div>
+        <span class="eyebrow">GATEWAY TELEMETRY</span>
+        <h1>Live messages</h1>
+        <p>Every SMS received in the Android gateway's Inbox reaches this server first. Payment matching is a separate server-side step.</p>
+      </div>
+      <div class="control-user">{{current_user.username}}<small>Master administrator</small></div>
+    </header>
+
+    <section class="admin-stat-grid">
+      <div class="admin-stat"><small>MESSAGES IN LAST 5 MIN</small><strong id="recentCount">{{recent_count}}</strong><span class="muted">Server has received these recently</span></div>
+      <div class="admin-stat"><small>LAST RECEIVED</small><strong id="lastReceived">{{last_received.strftime('%H:%M:%S') if last_received else '—'}}</strong><span class="muted">Latest Inbox telemetry</span></div>
+      <div class="admin-stat"><small>FEED</small><strong id="feedState">LIVE</strong><span class="muted" id="feedStateText">Auto-refresh every 2.5 seconds</span></div>
+    </section>
+
+    <section class="admin-panel">
+      <div class="toolbar">
+        <div>
+          <strong>Server receipt stream</strong>
+          <div class="muted">This is the audit trail of what the gateway phone says it received. Airtel, personal SMS and other senders can appear here; they cannot become M-PESA payments just because they mention M-PESA.</div>
+        </div>
+        <div class="live-message-status" id="liveStatus"><span class="gateway-dot gateway-dot-active"></span><strong>LISTENING</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table class="admin-table live-message-table">
+          <thead><tr><th>Received</th><th>SIM / device</th><th>Sender</th><th>Classification</th><th>Delivery</th><th>Message</th></tr></thead>
+          <tbody id="liveMessageFeed">
+          {% for m in messages %}
+            <tr>
+              <td><strong>{{m.received_at.strftime('%d %b %H:%M:%S') if m.received_at else '—'}}</strong><br><span class="live-message-meta">{{m.event_id}}</span></td>
+              <td>SIM {{(m.sim_slot or 0) + 1}}<br><span class="live-message-meta">{{m.gateway_device_id}}</span></td>
+              <td><strong>{{m.sender or 'Unknown sender'}}</strong></td>
+              <td><span class="admin-badge {% if m.is_mpesa_candidate %}live-message-yes{% else %}live-message-no{% endif %}">{% if m.is_mpesa_candidate %}M-PESA CANDIDATE{% else %}NON-PAYMENT{% endif %}</span></td>
+              <td><span class="admin-badge {% if m.payment_event_id and m.delivery_status=='MATCHED_AND_SETTLED' %}gateway-ok{% elif m.payment_event_id %}gateway-warn{% endif %}">{{m.delivery_status}}</span></td>
+              <td class="live-message-body">{{m.message}}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="empty-payment-state">No SMS telemetry has reached the server yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="gateway-note">
+      <strong>What this proves</strong>
+      <span>When a new SMS appears here, the phone received it and the server accepted the telemetry. The Payment Centre separately filters the raw message to genuine incoming Safaricom/M-PESA receipts before attempting automatic payment completion.</span>
+    </section>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function(){
+  const esc = s => String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const fmtTime = iso => { if(!iso) return '—'; const d=new Date(iso); return d.toLocaleString('en-KE',{hour12:false}); };
+  async function refresh(){
+    try{
+      const r=await fetch('/control/api/live-messages',{credentials:'same-origin',cache:'no-store'});
+      if(!r.ok) throw new Error('feed');
+      const d=await r.json();
+      document.getElementById('recentCount').textContent=d.recent_count ?? 0;
+      document.getElementById('lastReceived').textContent=d.last_received ? new Date(d.last_received).toLocaleTimeString('en-KE',{hour12:false}) : '—';
+      document.getElementById('feedState').textContent='LIVE';
+      document.getElementById('feedStateText').textContent='Last check '+new Date().toLocaleTimeString('en-KE',{hour12:false});
+      document.getElementById('liveStatus').innerHTML='<span class="gateway-dot gateway-dot-active"></span><strong>LISTENING</strong>';
+      const rows=(d.messages||[]).map(m=>`<tr><td><strong>${esc(fmtTime(m.time))}</strong><br><span class="live-message-meta">${esc(m.event_id)}</span></td><td>SIM ${esc(m.sim)}<br><span class="live-message-meta">${esc(m.device)}</span></td><td><strong>${esc(m.sender)}</strong></td><td><span class="admin-badge ${m.mpesa?'live-message-yes':'live-message-no'}">${m.mpesa?'M-PESA CANDIDATE':'NON-PAYMENT'}</span></td><td><span class="admin-badge ${m.status==='MATCHED_AND_SETTLED'?'gateway-ok':m.payment_event_id?'gateway-warn':''}">${esc(m.status)}</span></td><td class="live-message-body">${esc(m.message)}</td></tr>`).join('');
+      document.getElementById('liveMessageFeed').innerHTML=rows||'<tr><td colspan="6" class="empty-payment-state">No SMS telemetry has reached the server yet.</td></tr>';
+    }catch(e){
+      document.getElementById('feedState').textContent='OFFLINE';
+      document.getElementById('feedStateText').textContent='Cannot reach the server monitor';
+      document.getElementById('liveStatus').innerHTML='<span class="gateway-dot"></span><strong>MONITOR OFFLINE</strong>';
+    }
+  }
+  refresh();
+  setInterval(refresh,2500);
+})();
+</script>
+{% endblock %}

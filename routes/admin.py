@@ -18,7 +18,7 @@ from extensions import db
 from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryTransaction, User,
                     AuditLog, Sale, SaleItem, Order, Store, Business, Category, SystemError,
                     Payment, Expense, Role, PaymentIntegration, SystemSetting, Permission, Customer, ProductAlias, ProductImage, OrderItem,
-                    Supplier, PurchaseOrder, PurchaseOrderItem, PaymentGatewayEvent, PaymentDestination, LoyaltyAccount, LoyaltyTransaction, Shift, CashDrawerTransaction, now)
+                    Supplier, PurchaseOrder, PurchaseOrderItem, PaymentGatewayEvent, GatewaySmsMessage, PaymentDestination, LoyaltyAccount, LoyaltyTransaction, Shift, CashDrawerTransaction, now)
 from services.audit import audit
 from services.crypto import encrypt, decrypt
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
@@ -514,6 +514,56 @@ def payment_gateway_monitor():
     )
 
 
+@bp.get(f"{ADMIN_BASE}/live-messages")
+@admin_required("payments.view")
+def live_messages():
+    business_id = current_user.business_id
+    messages = (GatewaySmsMessage.query
+                .filter_by(business_id=business_id)
+                .order_by(GatewaySmsMessage.received_at.desc())
+                .limit(100).all())
+    last_received = messages[0].received_at if messages else None
+    recent_cutoff = now() - timedelta(minutes=5)
+    recent_count = GatewaySmsMessage.query.filter(
+        GatewaySmsMessage.business_id == business_id,
+        GatewaySmsMessage.received_at >= recent_cutoff,
+    ).count()
+    return render_template("admin/live_messages.html", messages=messages, last_received=last_received, recent_count=recent_count)
+
+
+@bp.get(f"{ADMIN_BASE}/api/live-messages")
+@admin_required("payments.view")
+def live_messages_api():
+    business_id = current_user.business_id
+    messages = (GatewaySmsMessage.query
+                .filter_by(business_id=business_id)
+                .order_by(GatewaySmsMessage.received_at.desc())
+                .limit(100).all())
+    recent_cutoff = now() - timedelta(minutes=5)
+    recent_count = GatewaySmsMessage.query.filter(
+        GatewaySmsMessage.business_id == business_id,
+        GatewaySmsMessage.received_at >= recent_cutoff,
+    ).count()
+    return jsonify(
+        ok=True,
+        server_time=now().isoformat(),
+        recent_count=recent_count,
+        last_received=(messages[0].received_at.isoformat() if messages and messages[0].received_at else None),
+        messages=[{
+            "id": m.id,
+            "event_id": m.event_id,
+            "time": m.received_at.isoformat() if m.received_at else None,
+            "sender": m.sender or "Unknown sender",
+            "sim": int(m.sim_slot or 0) + 1,
+            "device": m.gateway_device_id,
+            "message": m.message,
+            "mpesa": bool(m.is_mpesa_candidate),
+            "status": m.delivery_status,
+            "payment_event_id": m.payment_event_id,
+        } for m in messages],
+    ), 200, {"Cache-Control": "no-store, max-age=0"}
+
+
 @bp.get(f"{ADMIN_BASE}/daily-report")
 @admin_required("reports.view")
 def daily_report():
@@ -653,7 +703,7 @@ def payments():
         from routes.api import _match_gateway_event
         recent_unmatched = (PaymentGatewayEvent.query
                              .filter_by(business_id=business_id, status="UNMATCHED")
-                             .order_by(PaymentGatewayEvent.received_at.desc()).limit(120).all())
+                             .order_by(PaymentGatewayEvent.received_at.desc()).limit(1000).all())
         changed = False
         for event in recent_unmatched:
             matched, actual = _match_gateway_event(event)
@@ -812,6 +862,38 @@ def payments():
         db.func.date(PaymentGatewayEvent.received_at) == db.func.current_date()
     ).count()
     unmatched_count = PaymentGatewayEvent.query.filter_by(business_id=business_id, status="UNMATCHED").count()
+
+    if request.args.get("partial") == "1":
+        def iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else None
+        payload_rows = []
+        for row in reconciliation_rows:
+            payment = row["payment"]
+            expected = row["expected"]
+            receipt = row["receipt"]
+            payload_rows.append({
+                "payment_id": payment.id,
+                "payment_status": payment.status,
+                "channel": expected["channel"],
+                "reference": expected["reference"],
+                "name": expected["name"],
+                "phone": expected["phone"] or "",
+                "amount": str(expected["amount"]),
+                "expected_time": iso(expected["time"]),
+                "result": row["result"],
+                "receipt": ({
+                    "name": receipt["name"], "phone": receipt["phone"],
+                    "amount": str(receipt["amount"]), "time": iso(receipt["time"]),
+                    "code": receipt["code"],
+                } if receipt else None),
+                "comparison": row["comparison"],
+                "can_manual": payment.status in {"PENDING", "PENDING_APPROVAL", "PARTIALLY_PAID"} and bool(row["order"] or row["sale"]),
+            })
+        return jsonify(ok=True, server_time=now().isoformat(),
+                       pending_count=pending_count, pending_amount=str(pending_amount),
+                       online_pending=online_pending, pos_pending=pos_pending,
+                       paid_today=str(paid_today), auto_today=auto_today,
+                       unmatched_count=unmatched_count, rows=payload_rows), 200, {"Cache-Control": "no-store, max-age=0"}
 
     return render_template("admin/payments.html",
                            reconciliation_rows=reconciliation_rows, stores=stores,
