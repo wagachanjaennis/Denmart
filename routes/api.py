@@ -284,7 +284,8 @@ def _gateway_is_payment_message(sender, message, payload=None):
     if re.search(r"MINI[- ]?STATEMENT|STATEMENT|AIRTIME|DATA BUNDLE|\bBUNDLE\b|WITHDRAW|SENT TO|PAID TO", upper) and "RECEIVED" not in upper:
         return False
     received = re.search(r"\bRECEIVED\b", upper)
-    from_phrase = re.search(r"\bRECEIVED\b[^.]{0,220}\b(?:FROM|BY)\b", upper)
+    # Do not stop at the decimal point in amounts such as Ksh2000.00.
+    from_phrase = re.search(r"\bRECEIVED\b[^\r\n]{0,300}\b(?:FROM|BY)\b", upper)
     return bool(received and from_phrase and _gateway_parse_amount(text) is not None and _gateway_parse_transaction(text) is not None)
 
 
@@ -333,12 +334,15 @@ def _gateway_parse_customer(message):
     # continue with a phone number, date/time, account text, or the updated balance.
     # Stop at those structural markers so the name remains usable for matching.
     match = re.search(
-        r"\b(?:received|credited)\s+(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|account|at\s+\d|on\s+\d|new balance|account balance|balance is|available balance|receipt|transaction|\+?254|0(?:7|1)\d{8}\b)|\s*$)",
+        r"\b(?:received|credited)\b.*?\b(?:from|by)\s+(.+?)(?=\s+(?:on behalf|for account|account|at\s+\d|on\s+\d|new balance|account balance|balance is|available balance|receipt|transaction|\+?254|0(?:7|1)\d{8}\b|(?:7|1)\d{8}\b)|\s*$)",
         text,
         re.IGNORECASE,
     )
     value = match.group(1).strip(" .,-") if match else ""
-    value = re.sub(r"\s+(?:\+?254|0)(?:7|1)\d{8}.*$", "", value, flags=re.IGNORECASE).strip()
+    # Some merchant receipts expose the payer as a bare 9-digit MSISDN
+    # (e.g. 721232425) rather than 07... or 2547.... Do not let that phone
+    # number become part of the customer's name.
+    value = re.sub(r"\s+(?:(?:\+?254|0)(?:7|1)\d{8}|(?:7|1)\d{8})\b.*$", "", value, flags=re.IGNORECASE).strip()
     return value[:240]
 
 
@@ -354,6 +358,10 @@ def _gateway_parse_phone(message):
     masked_short = re.search(r"(?<!\w)(?:7|1)[0-9xX*]{4,7}[0-9]{3,4}(?!\w)", text)
     if masked_short:
         return masked_short.group(0)
+    # Merchant receipts may expose an unprefixed 9-digit Kenyan MSISDN.
+    bare = re.search(r"(?<!\w)(?:7|1)\d{8}(?!\w)", text)
+    if bare:
+        return normalize_ke_phone(bare.group(0))
     return None
 
 
@@ -713,6 +721,76 @@ def _match_gateway_event(event, *, intent_id=None):
     return _settle_gateway_intent(best[0], event)
 
 
+def _promote_gateway_telemetry(telemetry):
+    """Turn an older raw SMS telemetry row into a payment event if the current
+    server parser now recognizes it as a valid M-PESA receipt.
+
+    This is deliberately server-side and idempotent. It lets a receipt that was
+    stored as ordinary live telemetry before a parser fix participate in the
+    same matcher as a newly received receipt, while transaction-code reuse is
+    still blocked by the normal duplicate-reference rules.
+    """
+    if not telemetry or telemetry.payment_event_id:
+        return db.session.get(PaymentGatewayEvent, telemetry.payment_event_id) if telemetry and telemetry.payment_event_id else None
+
+    if not _gateway_is_payment_message(telemetry.sender, telemetry.message, telemetry.raw_payload or {}):
+        return None
+
+    amount = _gateway_parse_amount(telemetry.message)
+    transaction_id = _gateway_parse_transaction(telemetry.message)
+    customer = _gateway_parse_customer(telemetry.message)
+    customer_phone = _gateway_parse_phone(telemetry.message)
+    if amount is None or amount <= 0 or not transaction_id:
+        return None
+
+    existing = PaymentGatewayEvent.query.filter_by(
+        business_id=telemetry.business_id,
+        gateway_device_id=telemetry.gateway_device_id,
+        transaction_id=transaction_id,
+    ).first()
+    if existing:
+        telemetry.payment_event_id = existing.id
+        telemetry.is_mpesa_candidate = True
+        telemetry.delivery_status = "DUPLICATE_PAYMENT_EVENT" if existing.status != "MATCHED" else "MATCHED_AND_SETTLED"
+        return existing
+
+    store = _gateway_store(telemetry.business_id, telemetry.sim_slot)
+    event = PaymentGatewayEvent(
+        business_id=telemetry.business_id,
+        store_id=store.id if store else None,
+        gateway_device_id=telemetry.gateway_device_id,
+        sim_slot=telemetry.sim_slot,
+        subscription_id=telemetry.subscription_id,
+        source=telemetry.source or "android_sms_telemetry",
+        sender=telemetry.sender,
+        message=telemetry.message[:12000],
+        received_at=telemetry.received_at,
+        transaction_id=transaction_id,
+        amount=amount,
+        customer=customer,
+        customer_phone=customer_phone,
+        status="UNMATCHED",
+        raw_payload={
+            **(telemetry.raw_payload or {}),
+            "raw_message": telemetry.message,
+            "_reconciliation": {
+                "raw_authoritative": True,
+                "promoted_from_telemetry": True,
+                "parsed_transaction": transaction_id,
+                "parsed_amount": str(amount),
+                "parsed_customer": customer,
+                "parsed_customer_phone": customer_phone,
+            },
+        },
+    )
+    db.session.add(event)
+    db.session.flush()
+    telemetry.payment_event_id = event.id
+    telemetry.is_mpesa_candidate = True
+    telemetry.delivery_status = "PAYMENT_EVENT_CREATED"
+    return event
+
+
 def reconcile_gateway_intent(intent):
     """Re-check recent unmatched gateway events when an intent is created after the SMS arrived."""
     if not _gateway_intent_open(intent):
@@ -734,6 +812,29 @@ def reconcile_gateway_intent(intent):
             event.store_id = actual.store_id
             db.session.commit()
             return True, actual
+
+    # Re-evaluate recent raw Live Messages as well. This catches receipts that
+    # were stored before the current parser/matching rules were deployed.
+    telemetry_q = GatewaySmsMessage.query.filter(
+        GatewaySmsMessage.business_id == intent.business_id,
+        GatewaySmsMessage.received_at >= now() - timedelta(hours=24),
+        GatewaySmsMessage.payment_event_id.is_(None),
+    ).order_by(GatewaySmsMessage.received_at.desc()).limit(100)
+    for telemetry in telemetry_q.all():
+        event = _promote_gateway_telemetry(telemetry)
+        if not event or event.status != "UNMATCHED":
+            continue
+        if not _gateway_candidate_score(event, intent):
+            continue
+        matched, actual = _settle_gateway_intent(intent, event)
+        if matched and actual:
+            event.status = "MATCHED"
+            event.matched_payment_id = actual.id
+            event.store_id = actual.store_id
+            telemetry.delivery_status = "MATCHED_AND_SETTLED"
+            db.session.commit()
+            return True, actual
+
     return False, None
 
 
