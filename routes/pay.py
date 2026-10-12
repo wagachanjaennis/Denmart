@@ -7,7 +7,7 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for,
 from flask_login import current_user, login_required
 
 from extensions import db, csrf
-from models import Business, Store, StoreProduct, PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, User, now
+from models import Business, Store, StoreProduct, PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, User, SystemSetting, now
 from services.payment_engine import (
     create_payment_order,
     enabled_methods,
@@ -49,7 +49,9 @@ def _expire(order):
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     elif expires_at:
         expires_at = expires_at.astimezone(timezone.utc)
-    if order.payment_status in {"PENDING", "MANUAL_REVIEW"} and expires_at and expires_at <= now():
+    # Keep receipts with an exception in MANUAL_REVIEW until an administrator handles
+    # them; otherwise an underpayment/ambiguous receipt could expire out from under review.
+    if order.payment_status == "PENDING" and expires_at and expires_at <= now():
         order.payment_status = "EXPIRED"
         order.review_reason = "Payment request expired."
         db.session.add(PayEvent(payment_order_id=order.id, event_type="EXPIRED", source="SYSTEM", note="Payment window expired without approval."))
@@ -156,8 +158,11 @@ def admin_pay():
     rows = (PayOrder.query.filter(PayOrder.business_id == business_id)
             .order_by(PayOrder.created_at.desc()).limit(300).all())
     settings = get_pay_settings(business_id)
+    saved = {row.key: row.value for row in SystemSetting.query.filter_by(business_id=business_id).all()
+             if row.key in {"bank_account_name", "bank_account_number", "bank_payment_instructions"}}
     recent_receipts = PayReceipt.query.filter_by(business_id=business_id).order_by(PayReceipt.created_at.desc()).limit(80).all()
-    return render_template("admin/pay.html", rows=rows, settings=settings, methods=enabled_methods(settings), recent_receipts=recent_receipts)
+    return render_template("admin/pay.html", rows=rows, settings=settings, methods=enabled_methods(settings),
+                           recent_receipts=recent_receipts, bank_settings=saved)
 
 
 @bp.post("/control/pay/settings")
@@ -176,8 +181,20 @@ def save_pay_settings():
     settings.instructions = request.form.get("instructions", "").strip()[:500] or "Pay using the payment option shown, then wait for approval."
     settings.updated_at = now()
     db.session.add(settings)
+    bank_values = {
+        "bank_account_name": request.form.get("bank_account_name", "").strip()[:160],
+        "bank_account_number": request.form.get("bank_account_number", "").strip()[:80],
+        "bank_payment_instructions": request.form.get("bank_payment_instructions", "").strip()[:1500],
+    }
+    for key, value in bank_values.items():
+        row = SystemSetting.query.filter_by(business_id=current_user.business_id, key=key).first()
+        if row:
+            row.value = value
+            row.updated_at = now()
+        else:
+            db.session.add(SystemSetting(business_id=current_user.business_id, key=key, value=value, updated_at=now()))
     db.session.commit()
-    flash("PAY settings saved.", "success")
+    flash("PAY and bank-transfer settings saved.", "success")
     return redirect(url_for("pay.admin_pay"))
 
 
@@ -233,6 +250,16 @@ def pos_create_payment():
     if session.get("portal") != "pos" or not current_user.is_active or not current_user.business_id or not current_user.store_id or not current_user.has_permission("sales.create"):
         return jsonify(error="forbidden"), 403
     data = request.get_json(silent=True) or {}
+    # Prevent repeated clicks/reloads creating duplicate same-amount POS tickets that
+    # could make an otherwise legitimate incoming receipt ambiguous.
+    active_order = (PayOrder.query.filter_by(business_id=current_user.business_id, store_id=current_user.store_id,
+                                              channel="POS", pos_cashier_id=current_user.id)
+                    .filter(PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]))
+                    .order_by(PayOrder.created_at.desc()).first())
+    if active_order:
+        _expire(active_order)
+        if active_order.payment_status in {"PENDING", "MANUAL_REVIEW"}:
+            return jsonify(error=f"Payment {active_order.reference} is already awaiting a receipt or administrator review. Resolve it before starting another PAY request."), 409
     name = str(data.get("customer_name") or "").strip()
     phone = str(data.get("customer_phone") or "").strip()
     items = data.get("items") or []
@@ -254,6 +281,7 @@ def pos_create_payment():
                 raise ValueError(f"Not enough stock for {sp.product.name}.")
             total += (Decimal(str(sp.selling_price)) * qty).quantize(Decimal("0.01"))
             clean.append({"store_product_id": sp.id, "quantity": str(qty)})
+        method = str(data.get("payment_method") or "MPESA").strip().upper()
         order = create_payment_order(
             business_id=current_user.business_id,
             store_id=current_user.store_id,
@@ -262,10 +290,13 @@ def pos_create_payment():
             amount=total,
             items=clean,
             channel="POS",
-            payment_method=str(data.get("payment_method") or "").upper() or None,
+            payment_method=method,
             pos_cashier_id=current_user.id,
         )
-        return jsonify(ok=True, payment_id=order.id, reference=order.reference, amount=str(order.expected_amount), approval_url=url_for("pay.approval", token=order.public_token, _external=True))
+        return jsonify(ok=True, payment_id=order.id, reference=order.reference,
+                       amount=str(order.expected_amount), payment_method=order.payment_method,
+                       payment_instructions=order.payment_instructions or {},
+                       confirmation_message=f"Waiting for a matching receipt of KES {order.expected_amount}.")
     except ValueError as exc:
         db.session.rollback()
         return jsonify(error=str(exc)), 400
@@ -280,7 +311,40 @@ def pos_payment_status(payment_id):
     if session.get("portal") != "pos" or not current_user.is_active or not current_user.business_id or not current_user.store_id or not current_user.has_permission("sales.create"):
         return jsonify(error="forbidden"), 403
     order = PayOrder.query.filter_by(id=payment_id, business_id=current_user.business_id, store_id=current_user.store_id, channel="POS").first_or_404()
+    _expire(order)
     sale = get_pos_sale_for_order(order)
+    receipts = (PayReceipt.query.filter_by(business_id=order.business_id)
+                .order_by(PayReceipt.created_at.desc()).limit(100).all())
+    receipt = next((r for r in receipts if r.matched_payment_order_id == order.id
+                    or order.id in (r.candidate_payment_order_ids or [])), None)
+    payer_name = order.paid_name or (receipt.payer_name if receipt else None)
+    if receipt and (receipt.payer_name_normalized or "").upper() in {"MPESA PAYER", "BANK PAYER"} and not order.paid_name:
+        payer_name = None
+    receipt_amount = receipt.amount if receipt else None
+    paid_amount = order.paid_amount if order.paid_amount is not None else receipt_amount
+    pay_settings = get_pay_settings(order.business_id, create=False)
+    display_name = pay_settings.display_name if pay_settings else "Denmart"
+    expected = Decimal(str(order.expected_amount or 0))
+    confirmation = ""
+    if order.payment_status == "PAID":
+        display_payer = payer_name or "Customer"
+        confirmation = f"Confirmed: {display_payer} paid KES {Decimal(str(paid_amount or expected)):.2f} to {display_name}. POS sale completed automatically."
+    elif order.payment_status == "MANUAL_REVIEW":
+        if receipt and receipt.classification == "BANK_ACCOUNT_UNVERIFIED":
+            confirmation = (f"A bank credit of KES {Decimal(str(receipt.amount)):.2f} was received, but the destination account could not be confirmed. "
+                            "An administrator must verify the account before this sale can complete.")
+        elif receipt:
+            who = receipt.payer_name or "The payer"
+            if (receipt.payer_name_normalized or "").upper() in {"MPESA PAYER", "BANK PAYER"}:
+                who = "The payer"
+            confirmation = f"{who} sent KES {Decimal(str(receipt.amount)):.2f}; this POS total is KES {expected:.2f}. Administrator review is required before the sale completes."
+        else:
+            confirmation = "This payment needs administrator review. The basket has not been completed."
+    elif order.payment_status == "EXPIRED":
+        confirmation = "This payment request expired without a safe matching receipt. Start a new request or ask the administrator to review."
+    else:
+        route = "bank" if order.payment_method == "BANK_TRANSFER" else "M-PESA"
+        confirmation = f"Waiting for an incoming {route} receipt matching KES {expected:.2f}. Matching happens automatically."
     return jsonify(
         ok=True,
         payment_id=order.id,
@@ -289,8 +353,12 @@ def pos_payment_status(payment_id):
         fulfillment_status=order.fulfillment_status,
         expected_amount=str(order.expected_amount),
         paid_amount=str(order.paid_amount) if order.paid_amount is not None else None,
-        transaction_code=order.mpesa_transaction_code,
+        receipt_amount=str(receipt_amount) if receipt_amount is not None else None,
+        payer_name=payer_name,
+        receipt_sender=receipt.sender if receipt else None,
+        transaction_code=order.mpesa_transaction_code or (receipt.transaction_code if receipt else None),
         receipt_number=sale.receipt_number if sale else None,
+        confirmation_message=confirmation,
         reason=order.review_reason,
     )
 

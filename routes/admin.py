@@ -9,7 +9,7 @@ import re
 from io import BytesIO
 from PIL import Image, ImageOps
 from pathlib import Path
-from functools import wraps
+from functools import wraps, lru_cache
 import requests
 from flask import Blueprint, flash, redirect, render_template, request, url_for, Response, current_app, session, send_file, jsonify, after_this_request
 from flask_login import current_user, login_required
@@ -222,7 +222,7 @@ def live_messages_api():
     rows=[]
     for m in messages:
         parsed=(m.raw_payload or {}).get("parsed") if isinstance(m.raw_payload,dict) else {}
-        rows.append({"time":m.received_at.isoformat() if m.received_at else None,"event_id":m.event_id,"device":m.gateway_device_id,"sim":(m.sim_slot or 0)+1,"sender":m.sender or "Unknown sender","message":m.message,"mpesa":bool(m.is_mpesa_candidate),"transaction_code":(parsed or {}).get("transaction_code") or "","amount":(parsed or {}).get("amount") or "","payer_name":(parsed or {}).get("payer_name") or "","phone":(parsed or {}).get("normalized_phone") or ""})
+        rows.append({"time":m.received_at.isoformat() if m.received_at else None,"event_id":m.event_id,"device":m.gateway_device_id,"sim":(m.sim_slot or 0)+1,"sender":m.sender or "Unknown sender","message":m.message,"mpesa":bool(m.is_mpesa_candidate),"bank":bool((parsed or {}).get("payment_source") == "BANK_TRANSFER"),"bank_target_verified":bool((parsed or {}).get("bank_target_verified")),"transaction_code":(parsed or {}).get("transaction_code") or "","amount":(parsed or {}).get("amount") or "","payer_name":(parsed or {}).get("payer_name") or "","phone":(parsed or {}).get("normalized_phone") or ""})
     return jsonify(ok=True,recent_count=GatewaySmsMessage.query.filter(GatewaySmsMessage.business_id==current_user.business_id,GatewaySmsMessage.received_at>=since).count(),last_received=(messages[0].received_at.isoformat() if messages and messages[0].received_at else None),messages=rows)
 
 @bp.get(f"{ADMIN_BASE}/products")
@@ -251,6 +251,143 @@ def products():
     )
 
 
+@lru_cache(maxsize=1)
+def _product_catalogue_index():
+    """Load the bundled product identity catalogue once per worker."""
+    path = Path(current_app.root_path) / "data" / "catalogue_product_index.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("products", {})
+        return {re.sub(r"\s+", "", str(row.get("barcode") or "")): row
+                for row in rows.values() if row.get("barcode")}
+    except Exception:
+        current_app.logger.exception("Denmart barcode catalogue could not be loaded")
+        return {}
+
+
+@lru_cache(maxsize=256)
+def _external_barcode_lookup(barcode):
+    """Best-effort fallback through public Open Facts product catalogues."""
+    if not barcode.isdigit() or not 8 <= len(barcode) <= 14:
+        return None
+    # Products outside food (electronics, beauty, pet-care, stationery) are not
+    # always indexed by Open Food Facts alone. Each source is read-only; prices and
+    # stock are intentionally never inferred from public catalogues.
+    sources = (
+        ("https://world.openproductsfacts.org", "open-products-facts"),
+        ("https://world.openfoodfacts.org", "open-food-facts"),
+        ("https://world.openbeautyfacts.org", "open-beauty-facts"),
+        ("https://world.openpetfoodfacts.org", "open-petfood-facts"),
+    )
+    for host, source_name in sources:
+        try:
+            response = requests.get(
+                f"{host}/api/v2/product/{barcode}.json",
+                params={"fields": "product_name,product_name_en,brands,quantity,categories,image_front_url,image_url"},
+                headers={"User-Agent": "DenmartProductLookup/1.1 (barcode enrichment)"},
+                timeout=(0.45, 0.9),
+            )
+            if response.status_code != 200:
+                continue
+            result = response.json() or {}
+            item = result.get("product") or {}
+            if result.get("status") != 1:
+                continue
+            name = str(item.get("product_name_en") or item.get("product_name") or "").strip()
+            if len(name) < 2:
+                continue
+            categories = [part.strip() for part in str(item.get("categories") or "").split(",") if part.strip()]
+            photo = str(item.get("image_front_url") or item.get("image_url") or "").strip()
+            if not photo.startswith("https://"):
+                photo = ""
+            return {
+                "barcode": barcode,
+                "name": name[:240],
+                "brand": str(item.get("brands") or "").split(",")[0].strip()[:160],
+                "pack_size": str(item.get("quantity") or "").strip()[:80],
+                "unit": "unit",
+                "category": (categories[0] if categories else "")[:120],
+                "description": "",
+                "sku": "",
+                "image_url": photo,
+                "source": source_name,
+            }
+        except Exception:
+            # A slow/unavailable catalogue must not block manual product creation.
+            continue
+    return None
+
+
+@bp.get(f"{ADMIN_BASE}/api/products/barcode-lookup")
+@login_required
+def product_barcode_lookup():
+    """Return safe catalogue identity fields for a scanned add/edit product form."""
+    if (session.get("portal") != "admin" or not current_user.is_authenticated
+            or not current_user.role or current_user.role.name != "OWNER"
+            or not (current_user.has_permission("products.create") or current_user.has_permission("products.edit"))):
+        return jsonify(ok=False, error="forbidden"), 403
+    barcode = re.sub(r"\s+", "", str(request.args.get("barcode") or "")).strip()[:80]
+    if len(barcode) < 3:
+        return jsonify(ok=True, found=False, barcode=barcode, message="Scan a barcode to look it up.")
+
+    product = Product.query.filter_by(barcode=barcode).first()
+    catalogue_row = _product_catalogue_index().get(barcode)
+    source = "database" if product else ("local-catalogue" if catalogue_row else "")
+
+    if product:
+        category = db.session.get(Category, product.category_id) if product.category_id else None
+        name, brand = product.name, product.brand or ""
+        category_name = category.name if category else ""
+        unit, pack_size = product.unit or "unit", product.pack_size or ""
+        sku, description = product.sku or "", product.description or ""
+        from services.product_images import public_product_image
+        image_url = public_product_image(product)
+        links = (StoreProduct.query.join(Store, Store.id == StoreProduct.store_id)
+                 .filter(StoreProduct.product_id == product.id, Store.business_id == current_user.business_id)
+                 .order_by(StoreProduct.created_at.asc()).all())
+        store_id = str(request.args.get("store_id") or "").strip()
+        linked = next((row for row in links if row.store_id == store_id), None)
+        return jsonify(ok=True, found=True, source=source, existing=True, barcode=barcode,
+            product_id=product.id, name=name, brand=brand, category=category_name,
+            category_id=product.category_id or "", unit=unit, pack_size=pack_size,
+            sku=sku, description=description, image_url=image_url,
+            exists_in_business=bool(links), exists_in_selected_store=bool(linked),
+            edit_url=(url_for("admin.product_edit", product_id=product.id, store_id=linked.store_id) if linked else
+                      url_for("admin.product_edit", product_id=product.id, store_id=links[0].store_id) if links else ""),
+            message=("This product is already in the selected mart. Open its editor to update its price or stock." if linked else
+                     "Product details found. Enter the mart prices and stock to add it there." if not links else
+                     "Product details found; it is already linked to another mart."))
+
+    if catalogue_row:
+        item = dict(catalogue_row)
+        name = str(item.get("name") or "").strip()
+        category_name = str(item.get("category") or "").strip()
+        category = Category.query.filter(Category.business_id == current_user.business_id,
+                                         db.func.lower(Category.name) == category_name.lower()).first() if category_name else None
+        from services.product_images import real_product_image_url
+        return jsonify(ok=True, found=True, existing=False, source=source, barcode=barcode,
+            name=name, brand=str(item.get("brand") or ""), category=category_name,
+            category_id=category.id if category else "", unit=str(item.get("unit") or "unit"),
+            pack_size=str(item.get("pack_size") or ""), sku="", description="",
+            image_url=real_product_image_url(name), message="Matched in Denmart's bundled catalogue. Prices and stock were left for you to enter.")
+
+    external = _external_barcode_lookup(barcode)
+    if external:
+        category_name = str(external.get("category") or "").strip()
+        category = Category.query.filter(Category.business_id == current_user.business_id,
+                                         db.func.lower(Category.name) == category_name.lower()).first() if category_name else None
+        from services.product_images import real_product_image_url
+        return jsonify(ok=True, found=True, existing=False, source=external.get("source"), barcode=barcode,
+            name=external.get("name") or "", brand=external.get("brand") or "", category=category_name,
+            category_id=category.id if category else "", unit=external.get("unit") or "unit",
+            pack_size=external.get("pack_size") or "", sku="", description="",
+            image_url=real_product_image_url(external.get("name") or "") or external.get("image_url") or "",
+            message="Matched an external barcode catalogue. Verify the product identity before saving; price and stock were not filled.")
+
+    return jsonify(ok=True, found=False, existing=False, barcode=barcode,
+        message="No catalogue details are available for this barcode yet. The barcode is captured; enter the product details manually.")
+
+
 @bp.post(f"{ADMIN_BASE}/products/resolve-images")
 @admin_required("products.edit")
 def resolve_product_images():
@@ -273,26 +410,21 @@ def create_product():
     unit = request.form.get("unit", "unit").strip() or "unit"
     pack_size = request.form.get("pack_size", "").strip() or unit
     sku = request.form.get("sku", "").strip() or None
-    barcode = request.form.get("barcode", "").strip() or None
+    barcode = re.sub(r"\s+", "", request.form.get("barcode", "")).strip() or None
     description = request.form.get("description", "").strip() or None
     image_url = request.form.get("image_url", "").strip() or None
-    try:
-        uploaded_image = _uploaded_product_image(request.files.get("product_image"), name or "Product")
-        if uploaded_image:
-            image_url = uploaded_image
-    except ValueError as exc:
-        flash(str(exc), "error")
-        return redirect(url_for("admin.products"))
     store_id = request.form.get("store_id", "").strip() or None
+    stock_raw = request.form.get("stock_quantity", "").strip()
+    cost_raw = request.form.get("cost_price", "").strip()
     try:
-        price = Decimal(request.form.get("selling_price", "0"))
-        cost = Decimal(request.form.get("cost_price", "0"))
-        stock = Decimal(request.form.get("stock_quantity", "0"))
+        price = Decimal(request.form.get("selling_price", "0") or "0")
+        cost = Decimal(cost_raw or "0")
+        stock = Decimal(stock_raw or "0")
     except InvalidOperation:
         flash("Enter valid cost, price and stock values.", "error")
         return redirect(url_for("admin.products"))
     if not name:
-        flash("Product name is required.", "error")
+        flash("Product name is required. Scan the barcode again or enter a name.", "error")
         return redirect(url_for("admin.products"))
     if price <= 0 or cost < 0 or stock < 0:
         flash("Use a positive selling price and non-negative cost/stock.", "error")
@@ -301,10 +433,93 @@ def create_product():
         flash("Select a valid category.", "error"); return redirect(url_for("admin.products"))
     if store_id and not Store.query.filter_by(id=store_id, business_id=current_user.business_id).first():
         flash("Select a valid mart.", "error"); return redirect(url_for("admin.products"))
+
+    stores = [db.session.get(Store, store_id)] if store_id else Store.query.filter_by(business_id=current_user.business_id, is_active=True).all()
+    if not stores:
+        flash("Create an active mart before adding stock.", "error"); return redirect(url_for("admin.products"))
+
+    existing_by_barcode = Product.query.filter_by(barcode=barcode).first() if barcode else None
+    duplicate_sku = Product.query.filter_by(sku=sku).first() if sku else None
+    if duplicate_sku and (not existing_by_barcode or duplicate_sku.id != existing_by_barcode.id):
+        flash("That SKU is already in use.", "error"); return redirect(url_for("admin.products"))
+
+    # A catalogue barcode may already identify a master product. Reuse it instead of
+    # rejecting the scan or creating a duplicate. Existing mart stock is never replaced
+    # from this add form; a positive entered quantity is treated as a receipt/addition.
+    if existing_by_barcode:
+        product = existing_by_barcode
+        changed_store_ids = []
+        added_store_ids = []
+        updated_store_ids = []
+        if image_url and not product.image_url:
+            try:
+                _set_product_image(product, image_url, source_type="BARCODE_CATALOGUE")
+            except ValueError:
+                # A failed optional image must not block adding/updating catalogue stock.
+                current_app.logger.warning("Could not cache optional product image for barcode %s", barcode)
+        for store in stores:
+            sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
+            if not sp:
+                sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost,
+                    selling_price=price, minimum_price=price, maximum_price=price * Decimal("1.30"),
+                    stock_quantity=stock, reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
+                    is_available=True, available_online=True, available_pos=True)
+                db.session.add(sp); db.session.flush()
+                if stock > 0:
+                    db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
+                        transaction_type="OPENING_STOCK", quantity=stock, unit_cost=cost,
+                        reference_type="PRODUCT_OPENING", reference_id=product.id,
+                        notes="Opening balance when existing catalogue product was linked to a mart",
+                        created_by=current_user.id))
+                added_store_ids.append(store.id)
+                changed_store_ids.append(store.id)
+                continue
+
+            # When a mart was explicitly selected, the scanned product can be set up
+            # in-place. Prices are updated; stock quantity is additive, never an overwrite.
+            if store_id:
+                old_price = Decimal(str(sp.selling_price or 0))
+                old_cost = Decimal(str(sp.cost_price or 0))
+                if price != old_price:
+                    sp.selling_price = price
+                    sp.minimum_price = price
+                    sp.maximum_price = price * Decimal("1.30")
+                    db.session.add(PriceHistory(store_product_id=sp.id, old_price=old_price,
+                        new_price=price, reason="Price set from barcode product form",
+                        source="PRODUCT_SCAN_SETUP", changed_by=current_user.id))
+                if cost_raw and cost != old_cost:
+                    sp.cost_price = cost
+                if stock > 0:
+                    sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) + stock
+                    db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
+                        transaction_type="ADJUSTMENT_IN", quantity=stock, unit_cost=sp.cost_price,
+                        reference_type="PRODUCT_SCAN_RECEIPT", reference_id=sp.id,
+                        notes="Additional stock received through barcode product form",
+                        created_by=current_user.id))
+                updated_store_ids.append(store.id)
+                changed_store_ids.append(store.id)
+
+        if not changed_store_ids:
+            # All selected marts already carry this product. Keep the existing stock as-is
+            # and send the administrator to its editor, where the current values are visible.
+            target_store = stores[0]
+            flash(f"{product.name} is already in the selected mart(s). Its existing stock was preserved; open the editor to change its setup.", "success")
+            db.session.commit()
+            return redirect(url_for("admin.product_edit", product_id=product.id, store_id=target_store.id))
+
+        db.session.commit()
+        audit("PRODUCT_BARCODE_SETUP", "Product", product.id, new_values={
+            "barcode": barcode, "stores_added": added_store_ids, "stores_updated": updated_store_ids,
+            "quantity_added": str(stock), "selling_price": str(price)})
+        if added_store_ids and not updated_store_ids:
+            flash(f"{product.name} was matched to the existing catalogue and added to {len(added_store_ids)} mart(s). Prices and opening stock were saved.", "success")
+        else:
+            flash(f"{product.name} was matched to the existing catalogue. Selected mart pricing/stock setup was saved without replacing existing quantities.", "success")
+        target_store_id = store_id if store_id else (added_store_ids[0] if added_store_ids else changed_store_ids[0])
+        return redirect(url_for("admin.product_edit", product_id=product.id, store_id=target_store_id))
+
     if sku and Product.query.filter_by(sku=sku).first():
         flash("That SKU is already in use.", "error"); return redirect(url_for("admin.products"))
-    if barcode and Product.query.filter_by(barcode=barcode).first():
-        flash("That barcode is already in use.", "error"); return redirect(url_for("admin.products"))
     from seed import slugify
     base_slug = slugify(name) or "product"
     slug = base_slug; n = 2
@@ -312,23 +527,26 @@ def create_product():
         slug = f"{base_slug}-{n}"; n += 1
     product = Product(name=name, slug=slug, brand=brand, category_id=category_id, unit=unit, pack_size=pack_size,
                       sku=sku, barcode=barcode, description=description, image_url=image_url, status="ACTIVE",
-                      search_keywords=" ".join(x for x in [name.lower(), brand.lower() if brand else ""] if x))
+                      search_keywords=" ".join(x for x in [name.lower(), brand.lower() if brand else "", description.lower() if description else ""] if x))
     db.session.add(product); db.session.flush()
     if image_url:
         try:
             _set_product_image(product, image_url)
         except ValueError as exc:
             db.session.rollback(); flash(str(exc), "error"); return redirect(url_for("admin.products"))
-    stores = [db.session.get(Store, store_id)] if store_id else Store.query.filter_by(business_id=current_user.business_id, is_active=True).all()
-    if not stores:
-        db.session.rollback(); flash("Create an active mart before adding stock.", "error"); return redirect(url_for("admin.products"))
     for store in stores:
-        db.session.add(StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost, selling_price=price,
-                                     minimum_price=price, maximum_price=price * Decimal("1.30"), stock_quantity=stock,
-                                     reorder_level=5, is_available=True, available_online=True, available_pos=True))
+        sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost, selling_price=price,
+                          minimum_price=price, maximum_price=price * Decimal("1.30"), stock_quantity=stock,
+                          reorder_level=5, is_available=True, available_online=True, available_pos=True)
+        db.session.add(sp)
+        if stock > 0:
+            db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
+                transaction_type="OPENING_STOCK", quantity=stock, unit_cost=cost,
+                reference_type="PRODUCT_OPENING", reference_id=product.id,
+                notes="Opening stock when product was created", created_by=current_user.id))
     db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
     db.session.commit()
-    audit("PRODUCT_CREATED", "Product", product.id, new_values={"name": name, "sku": sku, "barcode": barcode, "stores": len(stores)})
+    audit("PRODUCT_CREATED", "Product", product.id, new_values={"name": name, "sku": sku, "barcode": barcode, "stores": len(stores), "opening_stock": str(stock)})
     flash(f"{name} added to {len(stores)} mart(s).", "success")
     return redirect(url_for("admin.product_edit", product_id=product.id, store_id=stores[0].id))
 
@@ -389,11 +607,20 @@ def import_products():
             db.session.add(product); db.session.flush(); db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH")); created += 1
         for store in stores:
             sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
+            was_new_link = sp is None
             if not sp:
-                sp = StoreProduct(store_id=store.id, product_id=product.id); db.session.add(sp)
+                sp = StoreProduct(store_id=store.id, product_id=product.id, stock_quantity=0, reserved_quantity=0); db.session.add(sp); db.session.flush()
+            old_stock = Decimal(str(sp.stock_quantity or 0))
+            stock_delta = stock - old_stock
             sp.cost_price = cost; sp.selling_price = price; sp.minimum_price = price; sp.maximum_price = price * Decimal("1.30")
             sp.stock_quantity = stock; sp.is_available = row.get("enabled", "1").lower() not in {"0", "no", "false"}
             sp.available_online = row.get("online", "1").lower() not in {"0", "no", "false"}; sp.available_pos = row.get("pos", "1").lower() not in {"0", "no", "false"}
+            if stock_delta:
+                db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
+                    transaction_type=("OPENING_STOCK" if was_new_link else "ADJUSTMENT_IN" if stock_delta > 0 else "ADJUSTMENT_OUT"),
+                    quantity=stock_delta, unit_cost=cost, reference_type="CATALOGUE_IMPORT",
+                    reference_id=sp.id, notes=("Opening stock from catalogue import" if was_new_link else "Stock quantity reconciled by catalogue import"),
+                    created_by=current_user.id))
     db.session.commit()
     audit("PRODUCT_CSV_IMPORTED", "Business", current_user.business_id, new_values={"created": created, "updated": updated, "errors": len(errors)})
     msg = f"Catalogue import complete: {created} added, {updated} updated."
@@ -477,15 +704,29 @@ def save_product(product_id):
     sp_store_id = request.form.get("store_id", "").strip()
     sp = StoreProduct.query.filter_by(product_id=product.id, store_id=sp_store_id).first()
     if sp and sp.store.business_id == current_user.business_id:
+        old_stock = Decimal(str(sp.stock_quantity or 0))
         try:
             sp.cost_price = Decimal(request.form.get("cost_price", str(sp.cost_price)))
             sp.selling_price = Decimal(request.form.get("selling_price", str(sp.selling_price)))
             sp.minimum_price = Decimal(request.form.get("minimum_price", str(sp.minimum_price or sp.selling_price)))
             maxv = request.form.get("maximum_price", "").strip(); sp.maximum_price = Decimal(maxv) if maxv else None
-            sp.stock_quantity = Decimal(request.form.get("stock_quantity", str(sp.stock_quantity)))
+            new_stock = Decimal(request.form.get("stock_quantity", str(sp.stock_quantity)))
             sp.reorder_level = Decimal(request.form.get("reorder_level", str(sp.reorder_level or 0)))
         except InvalidOperation:
             db.session.rollback(); flash("Check the numeric mart values.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if new_stock < 0 or new_stock < Decimal(str(sp.reserved_quantity or 0)):
+            db.session.rollback(); flash(f"Stock cannot fall below reserved quantity ({sp.reserved_quantity}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        sp.stock_quantity = new_stock
+        stock_delta = new_stock - old_stock
+        if stock_delta:
+            db.session.add(InventoryTransaction(
+                store_id=sp.store_id, product_id=product.id,
+                transaction_type="ADJUSTMENT_IN" if stock_delta > 0 else "ADJUSTMENT_OUT",
+                quantity=stock_delta, unit_cost=sp.cost_price,
+                reference_type="PRODUCT_EDIT", reference_id=sp.id,
+                notes=("Stock increased in product editor" if stock_delta > 0 else "Stock reduced in product editor"),
+                created_by=current_user.id,
+            ))
         sp.is_available = request.form.get("enabled") == "1" and product.status == "ACTIVE"
         sp.available_online = request.form.get("online") == "1" and sp.is_available
         sp.available_pos = request.form.get("pos") == "1" and sp.is_available

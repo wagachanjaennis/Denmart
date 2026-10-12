@@ -61,9 +61,54 @@ def _gateway_is_mpesa_message(sender, message):
     return bool(re.search(r"\bRECEIVED\b", upper))
 
 
+def _gateway_is_bank_credit_message(sender, message):
+    """Recognize incoming-credit alerts from common Kenyan bank SMS senders."""
+    raw_sender = re.sub(r"[^A-Z0-9&]+", " ", str(sender or "").upper()).strip()
+    upper = re.sub(r"\s+", " ", str(message or "").upper())
+    known_bank = any(token in raw_sender for token in (
+        "EQUITY", "KCB", "COOP", "CO OPERATIVE", "CO-OP", "ABSA", "NCBA",
+        "STANBIC", "STANDARD CHARTERED", "DTB", "DIAMOND TRUST", "FAMILY BANK",
+        "I&M", "IM BANK", "SIDIAN", "KINGDOM BANK", "ACCESS BANK", "UBA",
+        "CITIBANK", "GULF AFRICAN", "M BANK", "BANK ALERT", "BANKSMS",
+    ))
+    # Never treat a debit, withdrawal, card purchase, reversal, or outgoing transfer
+    # as money received by Denmart.
+    if re.search(r"\b(?:DEBITED|DEBIT|WITHDRAWN|WITHDRAWAL|CASH OUT|SENT TO|PAID TO|PURCHASE|REVERS(?:ED|AL)|FAILED|DECLINED|CHARGED)\b", upper):
+        return False
+    inbound_credit = re.search(
+        r"\b(?:CREDITED|CREDIT ALERT|RECEIVED|DEPOSIT(?:ED)?|TRANSFER RECEIVED|FUNDS RECEIVED|ACCOUNT CREDIT)\b",
+        upper,
+    )
+    return bool(known_bank and inbound_credit)
+
+
+def _gateway_bank_target_matches(business_id, message):
+    """Require the bank alert to identify Denmart's configured receiving account.
+
+    General bank credit alerts must never auto-complete an unrelated POS ticket just
+    because the amount happens to be the same. Configure the real account number in
+    PAY settings; match either the full number or its last four digits next to an
+    account identifier in the SMS.
+    """
+    setting = SystemSetting.query.filter_by(business_id=business_id, key="bank_account_number").first()
+    configured = re.sub(r"\D", "", str(setting.value if setting else ""))
+    if len(configured) < 6:
+        return False
+    text = str(message or "")
+    account_pattern = r"(?<!\d)" + r"[\s,./-]*".join(re.escape(char) for char in configured) + r"(?!\d)"
+    if re.search(account_pattern, text):
+        return True
+    tail = configured[-4:]
+    has_account_context = bool(re.search(r"\b(?:ACCOUNT|A/C|ACCT|ACCOUNTS|TO A/C|TO ACCOUNT|CREDIT ACCOUNT)\b", text, re.I))
+    tail_in_message = bool(re.search(rf"(?<!\d){re.escape(tail)}(?!\d)", text))
+    return has_account_context and tail_in_message
+
+
 def _gateway_parse_amount(message):
     text = str(message or "")
     patterns = [
+        r"\b(?:received|credited|deposited|deposit)\s+(?:an?\s+)?(?:amount\s+of\s+)?(?:ksh|kshs|kes)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\b",
+        r"\b(?:ksh|kshs|kes)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s+(?:has\s+been\s+)?(?:credited|received|deposited)\b",
         r"\b(?:received|credited)\s+(?:a\s+)?(?:ksh|kshs|kes)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\b",
         r"\b(?:ksh|kshs|kes)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s+(?:was\s+)?(?:received|credited)\b",
         r"\b(?:received|credited)\s+([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:ksh|kshs|kes)\b",
@@ -89,6 +134,7 @@ def _gateway_parse_transaction(message):
         r"\bCONFIRMED[.\s:-]+([A-Z0-9]{8,20})\b",
         r"\bTRANSACTION(?:\s+CODE)?[:\s]+([A-Z0-9]{8,20})\b",
         r"\b(?:RECEIPT|CONFIRMATION)[:\s-]+([A-Z0-9]{8,20})\b",
+        r"\b(?:BANK\s+REF(?:ERENCE)?|REFERENCE(?:\s+(?:NO|NUMBER))?|REF(?:\s+(?:NO|NUMBER))?|TRANSACTION\s+(?:ID|NO|NUMBER)|TRX\s*(?:ID|NO)?|UTR|RRN)\s*[:#\- ]+([A-Z0-9]{6,24})\b",
     ]:
         m=re.search(pattern,text)
         if m:
@@ -276,13 +322,22 @@ def android_gateway_sms():
         db.session.commit()
         return jsonify(ok=True,duplicate=True,event_id=event_id,telemetry_id=existing.id),200
 
-    mpesa=_gateway_is_mpesa_message(sender,raw_message)
+    mpesa = _gateway_is_mpesa_message(sender, raw_message)
+    bank_credit = _gateway_is_bank_credit_message(sender, raw_message)
+    bank_target_verified = _gateway_bank_target_matches(business.id, raw_message) if bank_credit else False
     parsed={
         "transaction_code": _gateway_parse_transaction(raw_message),
         "amount": str(_gateway_parse_amount(raw_message) or ""),
         "payer_name": _gateway_parse_customer(raw_message),
         "normalized_phone": _gateway_parse_phone(raw_message),
+        "payment_source": "BANK_TRANSFER" if bank_credit else "MPESA" if mpesa else "OTHER",
+        "bank_target_verified": bank_target_verified,
     }
+    # Some bank SMS templates have no short transaction code. Give such a credit
+    # a stable, idempotent receipt key tied to the gateway event rather than dropping it.
+    if bank_credit and not parsed["transaction_code"]:
+        fingerprint = "|".join([business.id, device_id, event_id, sender, raw_message])
+        parsed["transaction_code"] = "BNK" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:20].upper()
     telemetry=GatewaySmsMessage(
         business_id=business.id,
         gateway_device_id=device_id,
@@ -302,7 +357,7 @@ def android_gateway_sms():
     db.session.commit()
 
     payment_result = None
-    if mpesa and parsed.get("transaction_code") and parsed.get("amount") and parsed.get("normalized_phone"):
+    if (mpesa or bank_credit) and parsed.get("transaction_code") and parsed.get("amount"):
         try:
             from services.payment_engine import process_gateway_receipt
             payment_result = process_gateway_receipt(
@@ -317,6 +372,8 @@ def android_gateway_sms():
                 sender=sender,
                 message=raw_message,
                 telemetry_id=telemetry.id,
+                is_bank_receipt=bank_credit,
+                bank_target_verified=bank_target_verified,
             )
             telemetry.raw_payload = {**(telemetry.raw_payload or {}), "payment": payment_result}
             telemetry.last_seen_at = now()
@@ -324,7 +381,9 @@ def android_gateway_sms():
         except Exception:
             current_app.logger.exception("Gateway payment comparison failed; telemetry was preserved.")
             payment_result = {"classification": "PAYMENT_PROCESSING_ERROR", "matched": False}
-    return jsonify(ok=True,telemetry=True,event_id=event_id,telemetry_id=telemetry.id,mpesa_candidate=mpesa,parsed=parsed,payment=payment_result),200
+    return jsonify(ok=True,telemetry=True,event_id=event_id,telemetry_id=telemetry.id,
+                   mpesa_candidate=mpesa,bank_credit_candidate=bank_credit,
+                   bank_target_verified=bank_target_verified, parsed=parsed, payment=payment_result),200
 
 
 @bp.get("/pos/catalogue/cache")

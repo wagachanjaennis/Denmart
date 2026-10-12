@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import or_
 
 from extensions import db
-from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, Sale, SaleItem, User, now
+from models import PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, StoreProduct, InventoryTransaction, Sale, SaleItem, User, SystemSetting, now
 
 TWOPLACES = Decimal("0.01")
 
@@ -96,6 +96,19 @@ def payment_instruction_snapshot(settings, method):
             "till_number": settings.buy_goods_till or "",
             "instructions": settings.instructions or "Pay using the Buy Goods Till shown.",
         }
+    if method == "BANK_TRANSFER":
+        saved = SystemSetting.query.filter_by(business_id=settings.business_id, key="bank_payment_instructions").first()
+        account_name_row = SystemSetting.query.filter_by(business_id=settings.business_id, key="bank_account_name").first()
+        account_number_row = SystemSetting.query.filter_by(business_id=settings.business_id, key="bank_account_number").first()
+        details = str(saved.value or "").strip() if saved else ""
+        account_name = str(account_name_row.value or "").strip() if account_name_row else ""
+        account_number = str(account_number_row.value or "").strip() if account_number_row else ""
+        if len("".join(ch for ch in account_number if ch.isdigit())) < 6:
+            raise ValueError("Configure the bank receiving account number in Admin → PAY before using bank-transfer matching.")
+        if not details:
+            details = "Transfer to " + (account_name + " · " if account_name else "") + account_number
+        return {"method": "BANK_TRANSFER", "label": settings.display_name or "Denmart",
+                "account_name": account_name, "account_number": account_number, "instructions": details}
     return {}
 
 
@@ -110,16 +123,25 @@ def enabled_methods(settings):
 
 
 def create_payment_order(*, business_id, store_id, customer_name, phone, amount, items=None, channel="ONLINE", payment_method=None, pos_cashier_id=None):
+    channel_name = (channel or "ONLINE").upper()
+    is_pos = channel_name == "POS"
     name = str(customer_name or "").strip()[:160]
     name_norm = normalize_name(name)
     phone_norm = normalize_phone(phone)
     total = normalize_amount(amount)
-    if not name_norm or len(name_norm) < 2:
+    # POS payments are reconciled against the scanned basket total and the trusted
+    # receipt delivered by the paired Android gateway. The cashier does not need to
+    # guess or type a customer's registered name or phone number.
+    if not is_pos and (not name_norm or len(name_norm) < 2):
         raise ValueError("Enter the customer's full M-PESA registered name.")
-    if not phone_norm:
+    if not is_pos and not phone_norm:
         raise ValueError("Enter a valid Kenyan phone number.")
     if total is None or total <= 0:
         raise ValueError("Payment amount must be greater than zero.")
+    if is_pos:
+        name = name or ""
+        name_norm = name_norm or ""
+        phone_norm = phone_norm or ""
 
     settings = get_pay_settings(business_id)
     methods = enabled_methods(settings)
@@ -134,9 +156,18 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
         methods = enabled_methods(settings)
     if not methods:
         raise ValueError("Payment destination is unavailable.")
-    method = (payment_method or methods[0]).upper()
-    if method not in methods:
-        raise ValueError("Choose one of the available payment methods.")
+    requested_method = str(payment_method or "").strip().upper()
+    if is_pos and requested_method in {"BANK", "BANK_TRANSFER", "BANK TRANSFER"}:
+        method = "BANK_TRANSFER"
+        instructions = payment_instruction_snapshot(settings, method)
+    elif is_pos and requested_method in {"", "MPESA", "M-PESA", "MPESA_GATEWAY", "M-PESA_GATEWAY"}:
+        method = methods[0]
+        instructions = payment_instruction_snapshot(settings, method)
+    else:
+        method = requested_method or methods[0]
+        if method not in methods:
+            raise ValueError("Choose one of the available payment methods.")
+        instructions = payment_instruction_snapshot(settings, method)
 
     prepared = []
     if items:
@@ -150,8 +181,8 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
             if qty <= 0 or not sp_id:
                 raise ValueError("Invalid basket item.")
             sp = StoreProduct.query.filter_by(id=sp_id, store_id=store_id).with_for_update().first()
-            if not sp or not sp.is_available or not sp.available_online:
-                raise ValueError("One of the selected items is no longer available.")
+            if not sp or not sp.is_available or (not sp.available_pos if is_pos else not sp.available_online):
+                raise ValueError("One of the selected items is no longer available for this sales channel.")
             available = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(sp.reserved_quantity or 0))
             if available < qty:
                 raise ValueError(f"Not enough stock for {sp.product.name}.")
@@ -161,14 +192,14 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
             prepared.append((sp, qty, unit_price, line))
         if calculated.quantize(TWOPLACES) != total:
             total = calculated.quantize(TWOPLACES)
-    snapshot = payment_instruction_snapshot(settings, method)
+    snapshot = instructions
     reference = make_reference()
     order = PayOrder(
         business_id=business_id,
         store_id=store_id,
         public_token=make_public_token(),
         reference=reference,
-        channel=(channel or "ONLINE").upper(),
+        channel=channel_name,
         pos_cashier_id=(str(pos_cashier_id).strip() if pos_cashier_id else None),
         customer_name=name,
         customer_name_normalized=name_norm,
@@ -266,91 +297,161 @@ def get_pos_sale_for_order(order):
     return Sale.query.filter_by(receipt_number=f"POS-{order.reference}"[:60]).first()
 
 
-def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name, phone, received_at, device_id, sim_slot, sender, message, telemetry_id=None):
+def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name, phone, received_at, device_id, sim_slot, sender, message, telemetry_id=None, is_bank_receipt=False, bank_target_verified=False):
+    """Reconcile trusted incoming SMS receipts without requiring POS customer details.
+
+    ONLINE stays strict: the receipt phone and exact amount identify an online request.
+    POS can be amount-matched because it has no customer data entry, but only when the
+    basket amount and payment route identify one unique live POS request. Collisions
+    or amount differences are retained for administrator review, never guessed.
+    """
     code = str(transaction_code or "").strip().upper()[:40]
     total = normalize_amount(amount)
     name = str(payer_name or "").strip()[:160]
     name_norm = normalize_name(name)
     phone_norm = normalize_phone(phone)
-    if not code or total is None or not phone_norm:
+    bank_receipt = bool(is_bank_receipt)
+    if not code or total is None:
         return {"classification": "PAYMENT_UNMATCHED", "matched": False, "reason": "INVALID_PARSED_FIELDS"}
 
     existing = PayReceipt.query.filter_by(transaction_code=code).with_for_update().first()
     if existing:
         return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
 
-    # Primary safe lookup: exact normalized phone + exact amount among live pending requests.
-    candidates = (PayOrder.query.filter(
+    current = now()
+    all_open = (PayOrder.query.filter(
         PayOrder.business_id == business_id,
         PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
-        PayOrder.customer_phone == phone_norm,
-        PayOrder.expected_amount == total,
     ).with_for_update().all())
-
-    # Expiry is normalized in Python because old DB rows may come back timezone-naive.
-    live_candidates = []
-    current = now()
-    for candidate in candidates:
+    live_orders = []
+    for candidate in all_open:
         expires = _utc(candidate.expires_at)
         if expires is None or expires > current:
-            live_candidates.append(candidate)
-    candidates = live_candidates
+            live_orders.append(candidate)
 
     order = None
     classification = "PAYMENT_UNMATCHED"
     method = "NO_SAFE_EXACT_MATCH"
     reason = "No safe exact pending match."
+    candidate_ids = []
+    pos_source_orders = [o for o in live_orders if (o.channel or "").upper() == "POS"
+                         and ((str(o.payment_method or "").upper() == "BANK_TRANSFER") == bank_receipt)]
+    online_orders = [o for o in live_orders if (o.channel or "").upper() != "POS"
+                     and str(o.payment_method or "").upper() != "BANK_TRANSFER"]
 
-    if len(candidates) > 1:
-        # Never guess when identical phone + amount requests exist.
-        classification = "PAYMENT_AMBIGUOUS"
-        method = "MULTIPLE_PHONE_AND_AMOUNT"
-        reason = "More than one pending payment has the same phone and amount."
-    elif len(candidates) == 1:
-        order = candidates[0]
-        if name_norm and order.customer_name_normalized == name_norm:
-            method = "NAME_PHONE_AND_AMOUNT"
-            reason = "Exact normalized M-PESA name + phone + amount match."
+    # Even if an SMS resembles a bank credit and the amount fits a ticket, it must
+    # never auto-approve unless the alert identifies Denmart's configured account.
+    # Store possible order candidates for the admin queue so they can check the
+    # actual statement/receiving account and explicitly approve if appropriate.
+    if bank_receipt and not bank_target_verified:
+        classification = "BANK_ACCOUNT_UNVERIFIED"
+        method = "BANK_ACCOUNT_NOT_VERIFIED"
+        reason = "Incoming bank credit could not be verified against Denmart's configured receiving account. Administrator must verify the destination before approving."
+        exact_bank_candidates = [o for o in pos_source_orders if normalize_amount(o.expected_amount) == total]
+        review_candidates = exact_bank_candidates or (pos_source_orders if len(pos_source_orders) == 1 else [])
+        candidate_ids = [o.id for o in review_candidates]
+        for candidate in review_candidates:
+            candidate.payment_status = "MANUAL_REVIEW"
+            candidate.review_reason = reason
+            candidate.last_match_note = reason
+            db.session.add(PayEvent(payment_order_id=candidate.id, event_type="BANK_ACCOUNT_REVIEW", source="ANDROID_GATEWAY_BANK", note=reason))
+
+    # The strongest evidence wins first: online checkout must match the registered
+    # phone and exact amount. Bank account notifications don't reliably carry a payer
+    # mobile number, so they are never allowed to auto-approve an online checkout.
+    if not bank_receipt and phone_norm:
+        online_exact = [o for o in online_orders if o.customer_phone == phone_norm
+                        and normalize_amount(o.expected_amount) == total]
+        pos_same_amount = [o for o in pos_source_orders if normalize_amount(o.expected_amount) == total]
+        if online_exact and pos_same_amount:
+            # The payer phone makes an online request plausible, while the same
+            # amount matches a cashier ticket with no customer phone. Do not guess
+            # which channel received the money; let the administrator choose.
+            classification = "PAYMENT_AMBIGUOUS"
+            method = "ONLINE_POS_AMOUNT_COLLISION"
+            reason = "The receipt matches an online phone/amount request and a POS ticket for the same amount. Administrator review is required to prevent settling the wrong sale."
+            candidate_ids = list(dict.fromkeys([o.id for o in online_exact + pos_same_amount]))
+        elif len(online_exact) == 1:
+            order = online_exact[0]
+            method = "NAME_PHONE_AND_AMOUNT" if name_norm and order.customer_name_normalized == name_norm else "PHONE_AND_AMOUNT"
+            reason = ("Exact normalized M-PESA name + phone + amount match." if method == "NAME_PHONE_AND_AMOUNT"
+                      else "One exact online phone + amount candidate; payer name retained as supporting receipt data.")
+            classification = "PAYMENT_MATCHED"
+            candidate_ids = [order.id]
+        elif len(online_exact) > 1:
+            classification = "PAYMENT_AMBIGUOUS"
+            method = "MULTIPLE_ONLINE_PHONE_AND_AMOUNT"
+            reason = "More than one online request has the same phone and amount. Administrator review required."
+            candidate_ids = [o.id for o in online_exact]
         else:
-            # Safe fallback requested by the business: a single exact phone + amount
-            # identifies the payment even when the payer-name spelling/format differs.
-            method = "PHONE_AND_AMOUNT"
-            reason = "One exact pending phone + amount candidate; payer name kept as supporting review data."
-        classification = "PAYMENT_MATCHED"
-    else:
-        # Amount mismatch path.
-        phone_orders = (PayOrder.query.filter(
-            PayOrder.business_id == business_id,
-            PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"]),
-            PayOrder.customer_phone == phone_norm,
-        ).with_for_update().all())
-        live_phone_orders = []
-        for candidate in phone_orders:
-            expires = _utc(candidate.expires_at)
-            if expires is None or expires > current:
-                live_phone_orders.append(candidate)
-        phone_orders = live_phone_orders
-        if len(phone_orders) == 1:
-            order = phone_orders[0]
+            online_by_phone = [o for o in online_orders if o.customer_phone == phone_norm]
+            if len(online_by_phone) == 1:
+                order = online_by_phone[0]
+                expected = normalize_amount(order.expected_amount)
+                if expected is not None and total < expected:
+                    classification, method, reason = "UNDERPAYMENT", "ONLINE_PHONE_AMOUNT_LOW", "Received amount is below the pending online amount."
+                    candidate_ids = [order.id]
+                elif expected is not None and total > expected:
+                    classification, method, reason = "OVERPAYMENT", "ONLINE_PHONE_AMOUNT_HIGH", "Received amount is above the pending online amount."
+                    candidate_ids = [order.id]
+                else:
+                    classification, method, reason = "PAYMENT_UNMATCHED", "ONLINE_AMOUNT_UNRESOLVED", "The phone matched, but the receipt did not match an eligible online amount."
+                    candidate_ids = [order.id]
+            elif len(online_by_phone) > 1:
+                classification = "PAYMENT_AMBIGUOUS"
+                method = "MULTIPLE_ONLINE_PHONE_CANDIDATES"
+                reason = "More than one open online request belongs to this phone number. Administrator review required."
+                candidate_ids = [o.id for o in online_by_phone]
+
+    # POS path: match against the total currently owed on the till. A receipt is
+    # auto-approved only when there is exactly one amount match and no competing
+    # online request with that amount. A cashier never needs to enter the payer name.
+    if classification == "PAYMENT_UNMATCHED" and order is None:
+        pos_exact = [o for o in pos_source_orders if normalize_amount(o.expected_amount) == total]
+        competing_online = []
+        if not bank_receipt:
+            competing_online = [o for o in online_orders if normalize_amount(o.expected_amount) == total]
+        if len(pos_exact) == 1 and not competing_online:
+            order = pos_exact[0]
+            classification = "PAYMENT_MATCHED"
+            method = "POS_BANK_AMOUNT_EXACT" if bank_receipt else "POS_MPESA_AMOUNT_EXACT"
+            route_name = "bank-transfer" if bank_receipt else "M-PESA"
+            reason = f"Exact pending POS basket amount matched against the incoming {route_name} receipt; payer identity came from the gateway message."
+            candidate_ids = [order.id]
+        elif pos_exact or competing_online:
+            classification = "PAYMENT_AMBIGUOUS"
+            method = "POS_AMOUNT_COLLISION"
+            reason = "The incoming amount fits more than one possible request. Administrator review is required; no sale was auto-completed."
+            candidate_ids = list(dict.fromkeys([o.id for o in pos_exact + competing_online]))
+        elif len(pos_source_orders) == 1:
+            # Single pending POS ticket but no exact amount: identify it for review,
+            # never auto-complete an under/over-payment.
+            order = pos_source_orders[0]
             expected = normalize_amount(order.expected_amount)
             if expected is not None and total < expected:
-                classification, method, reason = "UNDERPAYMENT", "PHONE_MATCH_AMOUNT_LOW", "Received amount is below the pending amount."
+                classification, method, reason = "UNDERPAYMENT", "POS_AMOUNT_LOW", "The received amount is below the pending POS total; administrator review required."
+                candidate_ids = [order.id]
             elif expected is not None and total > expected:
-                classification, method, reason = "OVERPAYMENT", "PHONE_MATCH_AMOUNT_HIGH", "Received amount is above the pending amount."
-        elif len(phone_orders) > 1:
-            classification, method, reason = "PAYMENT_AMBIGUOUS", "MULTIPLE_PHONE_CANDIDATES", "More than one pending payment belongs to this phone number."
+                classification, method, reason = "OVERPAYMENT", "POS_AMOUNT_HIGH", "The received amount is above the pending POS total; administrator review required."
+                candidate_ids = [order.id]
+        elif len(pos_source_orders) > 1 and not bank_receipt:
+            # Same source/method but different open POS totals means an off-by-amount
+            # receipt cannot safely be attached to a particular ticket.
+            classification, method, reason = "PAYMENT_AMBIGUOUS", "MULTIPLE_POS_AMOUNT_CANDIDATES", "Several POS tickets are awaiting this payment route; the amount does not uniquely identify one."
+            candidate_ids = [o.id for o in pos_source_orders]
 
-    candidate_ids = [o.id for o in candidates]
-    if classification in {"UNDERPAYMENT", "OVERPAYMENT", "PAYMENT_UNMATCHED"} and order:
-        candidate_ids = [order.id]
+    # Only use the matched order as a single receipt foreign-key when evidence points
+    # to exactly one ticket. Ambiguous receipts stay unassigned with their candidates.
+    if classification == "PAYMENT_AMBIGUOUS":
+        order = None
 
     receipt = PayReceipt(
         business_id=business_id,
         transaction_code=code,
         amount=total,
-        payer_name=name or None,
-        payer_name_normalized=name_norm or None,
-        payer_phone=phone_norm,
+        payer_name=name or ("Bank payer" if bank_receipt else "M-PESA payer"),
+        payer_name_normalized=name_norm or ("BANK PAYER" if bank_receipt else "MPESA PAYER"),
+        payer_phone=phone_norm or "",
         received_at=received_at or now(),
         gateway_device_id=str(device_id or "android-gateway")[:120],
         sim_slot=int(sim_slot or 0),
@@ -366,52 +467,59 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
     db.session.add(receipt)
 
     if order and classification == "PAYMENT_MATCHED":
-        # Receipt recording + settlement occur in the same transaction.
         live_order = PayOrder.query.filter_by(id=order.id).with_for_update().first()
         if not live_order or live_order.payment_status not in {"PENDING", "MANUAL_REVIEW"}:
             db.session.rollback()
             return {"classification": "DUPLICATE_OR_ALREADY_PROCESSED", "matched": False, "payment_order_id": order.id}
         for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
             sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
-            available = Decimal(str(sp.stock_quantity or 0)) if sp else Decimal("-1")
+            available = (Decimal(str(sp.stock_quantity or 0)) - Decimal(str(sp.reserved_quantity or 0))) if sp else Decimal("-1")
             if not sp or available < Decimal(str(line.quantity)):
                 live_order.payment_status = "MANUAL_REVIEW"
                 live_order.review_reason = "STOCK_CONFLICT_AFTER_PAYMENT"
                 live_order.last_match_note = "Payment matched, but stock changed before settlement; administrator review required."
                 receipt.classification = "STOCK_CONFLICT"
                 receipt.matching_method = method + "_STOCK_CONFLICT"
+                receipt.matched_payment_order_id = live_order.id
                 db.session.add(PayEvent(payment_order_id=live_order.id, event_type="REVIEW_REQUIRED", source="ANDROID_GATEWAY", note=live_order.last_match_note))
                 db.session.commit()
                 return {"classification": "STOCK_CONFLICT", "matched": False, "payment_order_id": live_order.id, "reason": live_order.last_match_note}
         for line in PayOrderItem.query.filter_by(payment_order_id=live_order.id).all():
             sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
             sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - Decimal(str(line.quantity))
-            db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="ONLINE_PAYMENT" if (live_order.channel or "").upper() != "POS" else "POS_PAYMENT", quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price, reference_type="PAY_ORDER", reference_id=live_order.id))
+            db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id,
+                transaction_type="ONLINE_PAYMENT" if (live_order.channel or "").upper() != "POS" else "POS_PAYMENT",
+                quantity=-Decimal(str(line.quantity)), unit_cost=sp.cost_price,
+                reference_type="PAY_ORDER", reference_id=live_order.id))
         pos_sale = _get_or_create_pos_sale(live_order)
         live_order.payment_status = "PAID"
         live_order.fulfillment_status = "PACKAGING"
         live_order.mpesa_transaction_code = code
         live_order.paid_amount = total
         live_order.paid_name = name or None
-        live_order.paid_phone = phone_norm
+        live_order.paid_phone = phone_norm or None
         live_order.paid_at = received_at or now()
-        live_order.paid_source = "ANDROID_GATEWAY_AUTO"
+        live_order.paid_source = "ANDROID_GATEWAY_BANK_AUTO" if bank_receipt else "ANDROID_GATEWAY_AUTO"
         live_order.matched_by = method
         live_order.review_reason = None
         live_order.last_match_note = reason
         receipt.matched_payment_order_id = live_order.id
         if pos_sale:
             live_order.last_match_note = reason + " POS sale completed automatically."
-        db.session.add(PayEvent(payment_order_id=live_order.id, event_type="AUTO_APPROVED", source="ANDROID_GATEWAY", note=reason))
+        db.session.add(PayEvent(payment_order_id=live_order.id, event_type="AUTO_APPROVED", source="ANDROID_GATEWAY_BANK" if bank_receipt else "ANDROID_GATEWAY", note=reason))
     elif order and classification in {"UNDERPAYMENT", "OVERPAYMENT"}:
         order.payment_status = "MANUAL_REVIEW"
         order.review_reason = reason
         order.last_match_note = reason
-        db.session.add(PayEvent(payment_order_id=order.id, event_type="MATCH_REVIEW", source="ANDROID_GATEWAY", note=reason))
+        db.session.add(PayEvent(payment_order_id=order.id, event_type="MATCH_REVIEW", source="ANDROID_GATEWAY_BANK" if bank_receipt else "ANDROID_GATEWAY", note=reason))
     elif classification == "PAYMENT_AMBIGUOUS":
-        for candidate in candidates[:1]:
-            candidate.last_match_note = reason
-            db.session.add(PayEvent(payment_order_id=candidate.id, event_type="AMBIGUOUS_RECEIPT", source="ANDROID_GATEWAY", note=reason))
+        for candidate_id in candidate_ids:
+            candidate = next((row for row in live_orders if row.id == candidate_id), None)
+            if candidate:
+                candidate.payment_status = "MANUAL_REVIEW"
+                candidate.review_reason = reason
+                candidate.last_match_note = reason
+                db.session.add(PayEvent(payment_order_id=candidate.id, event_type="AMBIGUOUS_RECEIPT", source="ANDROID_GATEWAY_BANK" if bank_receipt else "ANDROID_GATEWAY", note=reason))
 
     try:
         db.session.commit()
@@ -422,8 +530,7 @@ def process_gateway_receipt(*, business_id, transaction_code, amount, payer_name
             return {"classification": "DUPLICATE", "matched": False, "duplicate": True, "payment_order_id": existing.matched_payment_order_id}
         raise
 
-    return {"classification": classification, "matched": classification == "PAYMENT_MATCHED", "payment_order_id": order.id if order else None, "reason": reason, "method": method}
-
+    return {"classification": classification, "matched": classification == "PAYMENT_MATCHED", "payment_order_id": order.id if order else None, "candidate_payment_order_ids": candidate_ids, "reason": reason, "method": method}
 
 
 def manual_approve(order, actor_id, reason="Manual approval"):
@@ -433,7 +540,7 @@ def manual_approve(order, actor_id, reason="Manual approval"):
         return False, "This payment is no longer awaiting approval."
     for line in PayOrderItem.query.filter_by(payment_order_id=order.id).all():
         sp = StoreProduct.query.filter_by(id=line.store_product_id).with_for_update().first()
-        available = Decimal(str(sp.stock_quantity or 0)) if sp else Decimal("-1")
+        available = (Decimal(str(sp.stock_quantity or 0)) - Decimal(str(sp.reserved_quantity or 0))) if sp else Decimal("-1")
         if not sp or available < Decimal(str(line.quantity)):
             return False, "Stock changed while waiting; resolve stock before approving."
     for line in PayOrderItem.query.filter_by(payment_order_id=order.id).all():
@@ -443,10 +550,20 @@ def manual_approve(order, actor_id, reason="Manual approval"):
     pos_sale = _get_or_create_pos_sale(order)
     receipt = (PayReceipt.query.filter_by(matched_payment_order_id=order.id)
                .order_by(PayReceipt.created_at.desc()).first())
+    if not receipt:
+        # A collision is intentionally stored without choosing a ticket. When an
+        # administrator explicitly approves one candidate, attach the receipt then.
+        possible = (PayReceipt.query.filter_by(business_id=order.business_id)
+                    .order_by(PayReceipt.created_at.desc()).limit(100).all())
+        receipt = next((candidate for candidate in possible
+                        if order.id in (candidate.candidate_payment_order_ids or [])), None)
+        if receipt:
+            receipt.matched_payment_order_id = order.id
+            receipt.candidate_payment_order_ids = None
     if receipt and receipt.transaction_code:
         order.mpesa_transaction_code = receipt.transaction_code
         order.paid_amount = receipt.amount
-        order.paid_name = receipt.payer_name
+        order.paid_name = None if (receipt.payer_name_normalized or "").upper() in {"MPESA PAYER", "BANK PAYER"} else receipt.payer_name
         order.paid_phone = receipt.payer_phone
         order.paid_at = receipt.received_at
         receipt.classification = "MANUAL_APPROVED"
