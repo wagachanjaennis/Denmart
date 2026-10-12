@@ -8,7 +8,7 @@
     <div>
       <div class="eyebrow">DENMART · STOCK TOOL</div>
       <h1>Scan stock</h1>
-      <p>Point the camera at a product barcode. Name it, add the quantity, and save.</p>
+      <p>Use the camera or a 1D/2D USB or Bluetooth keyboard-type scanner. Barcode lookup starts as soon as a code is scanned.</p>
     </div>
     <a class="scan-back" href="/control">← Control</a>
   </header>
@@ -43,7 +43,7 @@
       <div class="barcode-entry">
         <div>
           <label for="barcodeInput">Barcode</label>
-          <input id="barcodeInput" inputmode="text" autocomplete="off" spellcheck="false" placeholder="Camera or handheld scanner…">
+          <input id="barcodeInput" inputmode="text" autocomplete="off" spellcheck="false" placeholder="Scan here — 1D/2D USB or Bluetooth scanner">
         </div>
         <button type="button" id="lookupButton" class="scan-button">Find</button>
       </div>
@@ -90,5 +90,5 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="{{url_for('static',filename='js/scan.js')}}"></script>
+<script src="{{url_for('static',filename='js/scan.js')}}?v=20261012-scanner-input"></script>
 {% endblock %}

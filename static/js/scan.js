@@ -36,6 +36,8 @@
   let currentBarcode = '';
   let selectedProduct = null;
   let supportedFormats = [];
+  let barcodeInputTimer = null;
+  let lastBarcodeKeyAt = 0;
 
   const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
 
@@ -149,9 +151,9 @@
       return;
     }
     try {
+      // Use every format the browser's decoder advertises, including any supported 1D/2D types.
       supportedFormats = await BarcodeDetector.getSupportedFormats();
-      const preferred = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','itf_14','codabar'].filter(x => supportedFormats.includes(x));
-      detector = new BarcodeDetector({ formats: preferred.length ? preferred : supportedFormats });
+      detector = new BarcodeDetector({ formats: supportedFormats });
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       video.srcObject = stream;
       await video.play();
@@ -160,7 +162,7 @@
       stopButton.disabled = false;
       overlay.classList.add('active');
       setStatus('Scanning…', 'ok');
-      supportEl.textContent = `Formats detected: ${preferred.length ? preferred.join(', ') : 'browser supported formats'}.`;
+      supportEl.textContent = `Camera formats supported by this browser: ${supportedFormats.join(', ') || 'not reported'}. Handheld scanners can decode additional formats and type their result into the Barcode field.`;
       scanFrame();
     } catch (error) {
       stopCamera();
@@ -232,10 +234,23 @@
   stopButton.addEventListener('click', stopCamera);
   focusButton.addEventListener('click', () => { barcodeInput.focus(); barcodeInput.select(); });
   lookupButton.addEventListener('click', () => lookupBarcode(barcodeInput.value));
+  // USB/Bluetooth 1D and 2D scanners commonly emulate a keyboard. Some send
+  // Enter/Tab at the end; others send no suffix. Auto-lookup supports both.
+  barcodeInput.addEventListener('input', () => {
+    const value = barcodeInput.value.trim();
+    if (barcodeInputTimer) clearTimeout(barcodeInputTimer);
+    if (value.length < 3) return;
+    const now = performance.now();
+    const fastBurst = lastBarcodeKeyAt && (now - lastBarcodeKeyAt) < 55 && value.length >= 5;
+    lastBarcodeKeyAt = now;
+    barcodeInputTimer = setTimeout(() => lookupBarcode(value), fastBurst ? 140 : 520);
+  });
   barcodeInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
+    const scannerTabSuffix = event.key === 'Tab' && barcodeInput.value.trim().length >= 5 && lastBarcodeKeyAt && (performance.now() - lastBarcodeKeyAt) < 250;
+    if (event.key === 'Enter' || scannerTabSuffix) {
       event.preventDefault();
-      lookupBarcode(barcodeInput.value);
+      if (barcodeInputTimer) clearTimeout(barcodeInputTimer);
+      if (barcodeInput.value.trim()) lookupBarcode(barcodeInput.value);
     }
   });
   quantityInput.addEventListener('input', updateTotals);
@@ -292,6 +307,7 @@
       quantityInput.value = '';
       updateSaveAvailability();
       if (scanning) setStatus('Scanning…', 'ok');
+      barcodeInput.focus({ preventScroll: true });
     } catch (error) {
       showMessage(error.message || 'Save failed.', 'error');
       saveButton.disabled = false;
@@ -299,9 +315,10 @@
   });
 
   loadRecent();
+  barcodeInput.focus({ preventScroll: true });
   if (window.isSecureContext !== false) {
-    supportEl.textContent = 'Camera scanning works here over HTTPS. A handheld scanner can also send codes into the Barcode field.';
+    supportEl.textContent = 'Camera or keyboard-type handheld scanners work here. Common 1D/2D USB and Bluetooth scanners can scan into the Barcode field; lookup starts automatically, with or without an Enter suffix.';
   } else {
-    supportEl.textContent = 'Camera scanning requires HTTPS. Use the hosted /scan URL rather than an HTTP address.';
+    supportEl.textContent = 'Camera scanning requires HTTPS. Handheld scanners work when configured as a USB/Bluetooth keyboard and focused on the Barcode field.';
   }
 })();

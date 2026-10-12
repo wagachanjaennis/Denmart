@@ -1,8 +1,8 @@
-"""Forgiving catalogue search helpers.
+"""Relevant, field-aware product search shared by shop, POS and admin.
 
-Search is deliberately field-aware but forgiving: a query may match words
-across name, brand, description, SKU, barcode, keywords and aliases. Typos are
-handled with lightweight fuzzy scoring so the POS/storefront behave consistently.
+Every query token must match a token belonging to the same product. This avoids
+weak fuzzy matches (e.g. a search for "tissue paper" showing bread or milk),
+while still supporting prefixes during typing and small typos in longer words.
 """
 import re
 import unicodedata
@@ -21,21 +21,23 @@ def _words(value):
     return normalize_text(value).split()
 
 
-def _best_word_score(query_word, text_words):
+def _token_match(query_word, text_words):
+    """Best token score; short tokens only match exactly or by prefix."""
     if not query_word or not text_words:
         return 0.0
     best = 0.0
-    for tw in text_words:
-        if not tw:
-            continue
-        if tw == query_word:
-            best = max(best, 1.0)
-        elif query_word in tw or tw in query_word:
-            shorter = min(len(query_word), len(tw))
-            longer = max(len(query_word), len(tw))
-            containment = shorter / max(longer, 1)
-            best = max(best, 0.92 * containment + 0.08)
-        best = max(best, SequenceMatcher(None, query_word, tw).ratio())
+    for word in text_words:
+        if word == query_word:
+            score = 1.0
+        elif len(query_word) >= 2 and (word.startswith(query_word) or query_word.startswith(word)):
+            # Live search can match incomplete words such as "pap" -> "paper".
+            score = 0.93 + 0.06 * min(len(query_word), len(word)) / max(len(query_word), len(word))
+        elif len(query_word) >= 4 and len(word) >= 4:
+            ratio = SequenceMatcher(None, query_word, word).ratio()
+            score = ratio if ratio >= 0.82 else 0.0
+        else:
+            score = 0.0
+        best = max(best, score)
     return best
 
 
@@ -45,72 +47,59 @@ def _score(query, product, aliases=()):
         return 0.0
     q_words = q.split()
     fields = [
-        ("name", normalize_text(product.name), 1.00),
-        ("brand", normalize_text(product.brand), 0.88),
-        ("keywords", normalize_text(product.search_keywords), 0.82),
-        ("description", normalize_text(product.description), 0.72),
-        ("sku", normalize_text(product.sku), 0.70),
-        ("barcode", normalize_text(product.barcode), 0.70),
+        ("name", normalize_text(getattr(product, "name", "")), 1.00),
+        ("brand", normalize_text(getattr(product, "brand", "")), 0.90),
+        ("alias", "", 0.97),
+        ("sku", normalize_text(getattr(product, "sku", "")), 0.90),
+        ("barcode", normalize_text(getattr(product, "barcode", "")), 0.90),
+        ("keywords", normalize_text(getattr(product, "search_keywords", "")), 0.84),
+        ("description", normalize_text(getattr(product, "description", "")), 0.70),
     ]
     alias_values = [normalize_text(a) for a in (aliases or ()) if normalize_text(a)]
-    fields.extend(("alias", a, 0.95) for a in alias_values)
+    field_values = [(name, value, weight) for name, value, weight in fields if value]
+    field_values.extend(("alias", value, 0.97) for value in alias_values)
 
-    # A query can legitimately span fields: e.g. "brookside mala" where
-    # Brookside is the brand and Mala is the product name.
-    composite = " ".join(v for _, v, _ in fields if v)
-    composite_words = composite.split()
-    if q == composite:
-        return 1.0
-    if q in composite:
-        return 0.985
+    # Highest priority for a direct phrase match in a product's important fields.
+    for field_name, value, weight in field_values:
+        if value == q:
+            return min(1.0, 0.96 + 0.04 * weight)
+        if len(q_words) > 1 and q in value:
+            return min(0.995, 0.93 + 0.06 * weight)
 
-    per_word = [_best_word_score(qw, composite_words) for qw in q_words]
-    if not per_word:
+    # Each query word must be grounded in one of this product's own fields.
+    # Keep all tokens together across fields (e.g. brand + name is valid).
+    all_words = []
+    for _, value, _ in field_values:
+        all_words.extend(value.split())
+    token_scores = [_token_match(word, all_words) for word in q_words]
+    if not token_scores or any(score < 0.80 for score in token_scores):
         return 0.0
 
-    coverage = sum(1.0 for s in per_word if s >= 0.70) / len(per_word)
-    avg_word = sum(per_word) / len(per_word)
-    weakest = min(per_word)
-    # Multi-word searches must account for most of the words. This prevents
-    # a strong hit on just one word (for example "milk") from surfacing
-    # unrelated products for a query such as "cooking oil".
-    if len(q_words) > 1 and (coverage < 0.75 or weakest < 0.55):
-        return 0.0
-    score = 0.62 * avg_word + 0.28 * coverage + 0.10 * weakest
-
-    # Reward exact/near-exact phrase matches in higher-value fields.
-    for _, text, weight in fields:
-        if not text:
-            continue
-        if q == text:
-            return min(1.0, 0.995 * weight + 0.01)
-        if q in text:
-            score = max(score, 0.965 * weight)
-        field_words = text.split()
-        if field_words:
-            field_word_scores = [_best_word_score(qw, field_words) for qw in q_words]
-            field_coverage = sum(1.0 for s in field_word_scores if s >= 0.72) / len(q_words)
-            field_avg = sum(field_word_scores) / len(q_words)
-            if field_coverage == 1.0:
-                score = max(score, (0.86 + 0.11 * field_avg) * weight)
-
-    return min(1.0, score)
+    # Prefer names/brands over matches only in description/search metadata.
+    main_words = []
+    for field_name, value, weight in field_values:
+        field_words = value.split()
+        if field_name in {"name", "brand", "alias", "sku", "barcode"}:
+            main_words.extend(field_words)
+    main_scores = [_token_match(word, main_words) for word in q_words]
+    main_coverage = sum(score >= 0.80 for score in main_scores) / len(q_words)
+    all_average = sum(token_scores) / len(token_scores)
+    score = 0.76 * all_average + 0.24 * main_coverage
+    # Full token coverage is mandatory; product with only "milk" cannot match
+    # "tissue paper", regardless of how good one token looks.
+    return min(0.99, score)
 
 
-def forgiving_rank(rows, query, aliases_by_product=None, limit=300, minimum=0.48):
-    """Return rows ranked by exact/partial/fuzzy relevance.
-
-    The caller should already constrain rows to the correct business/store and
-    availability. When a query is empty, preserve deterministic alphabetical
-    ordering rather than returning arbitrary database order.
-    """
-    if not query:
-        return sorted(list(rows), key=lambda r: r.product.name.lower())[:limit]
+def forgiving_rank(rows, query, aliases_by_product=None, limit=300, minimum=0.72):
+    """Return only relevant rows, ranked by match quality then product name."""
+    rows = list(rows)
+    if not query or not normalize_text(query):
+        return sorted(rows, key=lambda r: (getattr(getattr(r, "product", None), "name", "") or "").lower())[:limit]
     aliases_by_product = aliases_by_product or {}
     scored = []
     for row in rows:
         score = _score(query, row.product, aliases_by_product.get(row.product_id, ()))
         if score >= minimum:
-            scored.append((score, row.product.name.lower(), row))
-    scored.sort(key=lambda x: (-x[0], x[1]))
+            scored.append((score, (row.product.name or "").lower(), row))
+    scored.sort(key=lambda item: (-item[0], item[1]))
     return [row for _, _, row in scored[:limit]]

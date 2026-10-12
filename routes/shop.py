@@ -49,9 +49,8 @@ def catalogue_query(store=None, q="", category=""):
         for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(product_ids)).all():
             aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
     ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=300)
-    # Real image-backed matches always precede unmatched products; relevance is preserved
-    # inside each group by retaining the forgiving_rank order.
-    return [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
+    # Preserve relevance for searches. Image availability must never outrank the query.
+    return ranked
 
 
 @bp.get("/")

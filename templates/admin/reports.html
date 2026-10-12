@@ -1,1 +1,123 @@
-{% extends 'base.html' %}{% block body_class %}admin-page{% endblock %}{% block chrome %}{% endblock %}{% block content %}<div class="control-shell">{% set admin_sidebar_class='control-sidebar' %}{% include 'admin/_nav.html' %}<main class="control-main"><header class="control-header"><div><span class="eyebrow">BUSINESS INTELLIGENCE</span><h1>Reports</h1><p>Sales and product performance over a selectable period.</p></div><form method="get"><select class="admin-input" name="days" onchange="this.form.submit()"><option value="7" {% if days==7 %}selected{% endif %}>7 days</option><option value="30" {% if days==30 %}selected{% endif %}>30 days</option><option value="60" {% if days==60 %}selected{% endif %}>60 days</option><option value="90" {% if days==90 %}selected{% endif %}>90 days</option></select></form></header><div class="control-grid"><div class="control-card emphasis"><span>Total sales</span><strong>KES {{'%.2f'|format(total_sales|float)}}</strong><small>Completed store sales</small></div><div class="control-card"><span>Items sold</span><strong>{{'%.0f'|format(total_items|float)}}</strong><small>Units recorded in sales</small></div></div><section class="admin-panel"><h2>Daily trend</h2><div class="table-wrap"><table class="admin-table"><tr><th>Date</th><th>Sales</th><th>Items</th></tr>{% for r in daily_rows %}<tr><td>{{r.date}}</td><td><strong>KES {{'%.2f'|format(r.sales|float)}}</strong></td><td>{{'%.0f'|format(r.items|float)}}</td></tr>{% else %}<tr><td colspan="3">No sales in this period.</td></tr>{% endfor %}</table></div></section><section class="admin-panel"><h2>Top products by sales</h2><div class="table-wrap"><table class="admin-table"><tr><th>Product</th><th>Units</th><th>Sales value</th></tr>{% for p in top_products %}<tr><td>{{p.name}}</td><td>{{p.qty}}</td><td><strong>KES {{'%.2f'|format(p.sales|float)}}</strong></td></tr>{% else %}<tr><td colspan="3">No product sales yet.</td></tr>{% endfor %}</table></div></section></main></div>{% endblock %}
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="control-shell">
+  {% set admin_sidebar_class='control-sidebar' %}
+  {% include 'admin/_nav.html' %}
+  <main class="control-main performance-page">
+    <header class="control-header">
+      <div>
+        <span class="eyebrow">BUSINESS INTELLIGENCE</span>
+        <h1>Performance &amp; graphs</h1>
+        <p>Follow sales, basket activity and product performance. Figures refresh automatically every 30 seconds.</p>
+      </div>
+      <div class="performance-toolbar">
+        <label for="reportDays">Period</label>
+        <select class="admin-input" id="reportDays" name="days">
+          <option value="7" {% if days==7 %}selected{% endif %}>7 days</option>
+          <option value="30" {% if days==30 %}selected{% endif %}>30 days</option>
+          <option value="60" {% if days==60 %}selected{% endif %}>60 days</option>
+          <option value="90" {% if days==90 %}selected{% endif %}>90 days</option>
+          <option value="180" {% if days==180 %}selected{% endif %}>180 days</option>
+          <option value="365" {% if days==365 %}selected{% endif %}>365 days</option>
+        </select>
+      </div>
+    </header>
+
+    <div class="performance-live-status"><span class="live-dot"></span><strong>Live report</strong><span id="reportUpdated">Updated {{report_payload.refreshed_at[:19].replace('T',' ')}} UTC</span><button type="button" id="refreshReports" class="admin-action">Refresh now</button></div>
+
+    <section class="performance-kpis" aria-label="Performance summary">
+      <article class="performance-kpi performance-kpi-primary"><span>Total sales</span><strong id="kpiSales">KES {{'%.2f'|format(total_sales|float)}}</strong><small id="salesChange">Compared with the previous period</small></article>
+      <article class="performance-kpi"><span>Units sold</span><strong id="kpiItems">{{'%.3f'|format(total_items|float)}}</strong><small>Completed sales only</small></article>
+      <article class="performance-kpi"><span>Completed receipts</span><strong id="kpiReceipts">{{report_payload.sales_count}}</strong><small>Transactions in this period</small></article>
+      <article class="performance-kpi"><span>Average basket</span><strong id="kpiAverage">KES {{'%.2f'|format(report_payload.average_basket|float)}}</strong><small>Sales value per receipt</small></article>
+    </section>
+
+    <section class="admin-panel performance-chart-panel">
+      <div class="performance-section-head"><div><span class="eyebrow">SALES TREND</span><h2>Sales by day</h2><p class="muted">Completed receipt value · KES</p></div><span class="chart-key"><i></i> Sales</span></div>
+      <div id="salesChart" class="performance-chart" role="img" aria-label="Daily sales line graph"></div>
+    </section>
+
+    <section class="performance-chart-grid">
+      <section class="admin-panel performance-chart-panel">
+        <div class="performance-section-head"><div><span class="eyebrow">SALES VOLUME</span><h2>Units sold by day</h2><p class="muted">Shows busy and quiet days</p></div></div>
+        <div id="itemsChart" class="performance-chart compact-chart" role="img" aria-label="Daily units sold bar chart"></div>
+      </section>
+      <section class="admin-panel performance-chart-panel">
+        <div class="performance-section-head"><div><span class="eyebrow">PRODUCT LEADERS</span><h2>Best sellers by value</h2><p class="muted">Top products in the selected period</p></div></div>
+        <div id="topProductsChart" class="top-products-chart"></div>
+      </section>
+    </section>
+
+    <section class="admin-panel performance-table-panel">
+      <div class="performance-section-head"><div><span class="eyebrow">DAY-BY-DAY DETAIL</span><h2>Sales and item breakdown</h2></div><span class="muted" id="dailyRowsCount">{{daily_rows|length}} days</span></div>
+      <div class="table-wrap"><table class="admin-table" id="dailyTable"><thead><tr><th>Date</th><th>Sales</th><th>Units sold</th></tr></thead><tbody>{% for r in daily_rows %}<tr><td>{{r.date}}</td><td><strong>KES {{'%.2f'|format(r.sales|float)}}</strong></td><td>{{'%.3f'|format(r.items|float)}}</td></tr>{% endfor %}</tbody></table></div>
+    </section>
+  </main>
+</div>
+<script>
+(() => {
+  const initial = {{ report_payload|tojson }};
+  const dataUrl = {{ url_for('admin.reports_data')|tojson }};
+  const currency = value => 'KES ' + Number(value || 0).toLocaleString('en-KE', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const compact = value => Number(value || 0).toLocaleString('en-KE', {maximumFractionDigits: 1});
+  const safe = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const salesEl = document.getElementById('salesChart');
+  const itemsEl = document.getElementById('itemsChart');
+  const topEl = document.getElementById('topProductsChart');
+  const tableBody = document.querySelector('#dailyTable tbody');
+  const svgStart = '<svg viewBox="0 0 900 290" width="100%" height="auto" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">';
+  const labelEvery = n => Math.max(1, Math.ceil(n / 7));
+
+  function renderSales(rows) {
+    const w=900,h=290,left=66,right=22,top=18,bottom=47,plotW=w-left-right,plotH=h-top-bottom;
+    const values=rows.map(r=>Number(r.sales||0)); const max=Math.max(1,...values); const scaleMax=max*1.12;
+    const x=i=>left+(rows.length<2?plotW/2:i*plotW/(rows.length-1));
+    const y=v=>top+plotH-(v/scaleMax)*plotH;
+    let svg=svgStart;
+    for(let i=0;i<=4;i++){const val=scaleMax*i/4, yy=y(val);svg+=`<line x1="${left}" y1="${yy}" x2="${w-right}" y2="${yy}" stroke="#2c3b43" stroke-width="1"/><text x="${left-10}" y="${yy+4}" text-anchor="end" fill="#8999a2" font-size="11">${compact(val)}</text>`;}
+    const points=values.map((v,i)=>`${x(i)},${y(v)}`).join(' ');
+    if(values.length>1){svg+=`<polygon points="${left},${top+plotH} ${points} ${w-right},${top+plotH}" fill="rgba(69,165,126,.12)"/>`;}
+    if(values.some(v=>v>0)){svg+=`<polyline points="${points}" fill="none" stroke="#55c28a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`;values.forEach((v,i)=>{if(rows.length<=45||i%Math.ceil(rows.length/35)===0)svg+=`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="#55c28a" stroke="#14251e" stroke-width="1.5"><title>${safe(rows[i].date)}: ${currency(v)}</title></circle>`;});}
+    rows.forEach((row,i)=>{if(i%labelEvery(rows.length)===0||i===rows.length-1)svg+=`<text x="${x(i)}" y="${h-15}" text-anchor="middle" fill="#8999a2" font-size="10">${safe(String(row.date).slice(5))}</text>`;});
+    if(!values.some(v=>v>0))svg+=`<text x="450" y="135" text-anchor="middle" fill="#97a5ac" font-size="15">No completed sales in this period yet</text>`;
+    salesEl.innerHTML=svg+'</svg>';
+  }
+  function renderItems(rows) {
+    const w=900,h=250,left=52,right=18,top=20,bottom=43,plotW=w-left-right,plotH=h-top-bottom;
+    const values=rows.map(r=>Number(r.items||0));const max=Math.max(1,...values);const step=plotW/Math.max(rows.length,1);const barW=Math.max(2,step*.64);let svg=svgStart.replace('0 0 900 290','0 0 900 250');
+    for(let i=0;i<=3;i++){const val=max*i/3,yy=top+plotH-(val/max)*plotH;svg+=`<line x1="${left}" y1="${yy}" x2="${w-right}" y2="${yy}" stroke="#2c3b43"/><text x="${left-9}" y="${yy+4}" text-anchor="end" fill="#8999a2" font-size="11">${compact(val)}</text>`;}
+    values.forEach((v,i)=>{const bh=(v/max)*plotH,xx=left+i*step+(step-barW)/2,yy=top+plotH-bh;svg+=`<rect x="${xx}" y="${yy}" width="${barW}" height="${bh}" rx="2" fill="#e9a45d"><title>${safe(rows[i].date)}: ${compact(v)} units</title></rect>`;if(i%labelEvery(rows.length)===0||i===rows.length-1)svg+=`<text x="${left+i*step+step/2}" y="${h-13}" text-anchor="middle" fill="#8999a2" font-size="10">${safe(String(rows[i].date).slice(5))}</text>`;});
+    if(!values.some(v=>v>0))svg+=`<text x="450" y="125" text-anchor="middle" fill="#97a5ac" font-size="15">No sold units in this period yet</text>`;
+    itemsEl.innerHTML=svg+'</svg>';
+  }
+  function renderTop(products) {
+    if(!products.length){topEl.innerHTML='<div class="performance-empty">No product sales in this period yet.</div>';return;}
+    const max=Math.max(1,...products.map(p=>Number(p.sales||0)));
+    topEl.innerHTML=products.slice(0,10).map((p,i)=>`<div class="top-product-row"><div class="top-product-heading"><span class="top-product-rank">${i+1}</span><strong title="${safe(p.name)}">${safe(p.name)}</strong><span>${currency(p.sales)}</span></div><div class="top-product-track"><i style="width:${Math.max(1,Math.min(100,Number(p.sales||0)/max*100))}%"></i></div><small>${compact(p.qty)} units sold</small></div>`).join('');
+  }
+  function renderTable(rows){tableBody.innerHTML=rows.map(r=>`<tr><td>${safe(r.date)}</td><td><strong>${currency(r.sales)}</strong></td><td>${Number(r.items||0).toLocaleString('en-KE',{maximumFractionDigits:3})}</td></tr>`).join('');document.getElementById('dailyRowsCount').textContent=`${rows.length} days`;}
+  function render(data){
+    document.getElementById('kpiSales').textContent=currency(data.total_sales);
+    document.getElementById('kpiItems').textContent=Number(data.total_items||0).toLocaleString('en-KE',{maximumFractionDigits:3});
+    document.getElementById('kpiReceipts').textContent=Number(data.sales_count||0).toLocaleString('en-KE');
+    document.getElementById('kpiAverage').textContent=currency(data.average_basket);
+    const change=document.getElementById('salesChange');
+    if(data.change_percent===null||data.change_percent===undefined)change.textContent=Number(data.previous_sales||0)===0?'No previous-period sales to compare':`Previous period: ${currency(data.previous_sales)}`;
+    else change.textContent=`${data.change_percent>0?'+':''}${data.change_percent}% versus previous ${data.days} days`;
+    renderSales(data.daily_rows||[]);renderItems(data.daily_rows||[]);renderTop(data.top_products||[]);renderTable(data.daily_rows||[]);
+    const stamp=data.refreshed_at?new Date(data.refreshed_at):new Date();document.getElementById('reportUpdated').textContent='Updated '+stamp.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }
+  async function refresh(){
+    const button=document.getElementById('refreshReports');button.disabled=true;button.textContent='Refreshing…';
+    try{const params=new URLSearchParams({days:document.getElementById('reportDays').value});const response=await fetch(dataUrl+'?'+params,{credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}});if(!response.ok)throw new Error('Refresh failed');render(await response.json());}
+    catch(_error){document.getElementById('reportUpdated').textContent='Could not refresh — showing last loaded data';}
+    finally{button.disabled=false;button.textContent='Refresh now';}
+  }
+  document.getElementById('reportDays').addEventListener('change',event=>{location.href='?days='+encodeURIComponent(event.target.value)});
+  document.getElementById('refreshReports').addEventListener('click',refresh);
+  render(initial);window.setInterval(()=>{if(!document.hidden)refresh()},30000);
+})();
+</script>
+{% endblock %}

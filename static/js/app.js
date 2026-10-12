@@ -23,6 +23,80 @@
   if(isIos&&!isStandalone()&&installPrompt&&!sessionStorage.getItem('denmart-install-dismissed'))setTimeout(()=>{installPrompt.hidden=false;installButton.textContent='How to install'},4500);
   if(isStandalone()){let touchStartY=0;document.addEventListener('touchstart',e=>{if(e.touches.length===1)touchStartY=e.touches[0].clientY},{passive:true});document.addEventListener('touchmove',e=>{if(e.touches.length!==1||window.scrollY>0)return;if(e.touches[0].clientY-touchStartY>8)e.preventDefault()},{passive:false});}
   if('serviceWorker' in navigator)navigator.serviceWorker.ready.then(reg=>reg.update?.().catch(()=>{})).catch(()=>{});
+  // Live public-catalogue search. Results are returned by the same ranked search
+  // endpoint used by the rest of Denmart; relevance is never reordered by photos.
+  const searchForms=[...document.querySelectorAll('.live-search-form')];
+  const searchEsc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const searchMoney=n=>Number(n||0).toLocaleString('en-KE',{minimumFractionDigits:0,maximumFractionDigits:2});
+  searchForms.forEach(form=>{
+    const input=form.querySelector('input[name="q"]'), dropdown=form.querySelector('.live-search-dropdown');
+    if(!input||!dropdown)return;
+    let timer=null, requestId=0, controller=null;
+    const isShopForm=form.id==='shopLiveSearch';
+    const grid=isShopForm?document.getElementById('liveShopGrid'):null;
+    const feedback=isShopForm?document.getElementById('liveSearchFeedback'):null;
+    const originalGrid=grid?grid.innerHTML:'';
+    const storeId=form.dataset.storeId||'';
+    const storeCode=form.dataset.storeCode||'';
+    const categoryId=form.dataset.categoryId||'';
+    const hide=()=>{dropdown.hidden=true;dropdown.innerHTML='';};
+    const productUrl=item=>'/product/'+encodeURIComponent(item.slug||'')+(storeCode?'?store='+encodeURIComponent(storeCode):'');
+    const renderSuggestions=items=>{
+      dropdown.innerHTML='';
+      if(!items.length){const empty=document.createElement('div');empty.className='live-search-empty';empty.textContent='No matching products. Try another name, brand or barcode.';dropdown.appendChild(empty);dropdown.hidden=false;return;}
+      items.slice(0,9).forEach(item=>{
+        const option=document.createElement('button');option.type='button';option.className='live-search-option';option.setAttribute('role','option');
+        const title=document.createElement('span');title.className='live-search-option-name';title.textContent=item.name||'Product';
+        const meta=document.createElement('small');meta.textContent=(item.brand?item.brand+' · ':'')+'KES '+searchMoney(item.price);
+        option.append(title,meta);option.addEventListener('click',()=>{window.location.href=productUrl(item)});dropdown.appendChild(option);
+      });
+      dropdown.hidden=false;
+    };
+    const renderShopGrid=items=>{
+      if(!grid)return;
+      grid.innerHTML='';
+      if(!items.length){const empty=document.createElement('div');empty.className='empty-state';empty.innerHTML='<strong>No matching products.</strong><span>Try another product name, brand, SKU or barcode.</span>';grid.appendChild(empty);return;}
+      items.forEach(item=>{
+        const article=document.createElement('article');article.className='product-card';
+        const link=document.createElement('a');link.className='product-image product-image-clean';link.href=productUrl(item);
+        if(item.image_url){const image=document.createElement('img');image.loading='lazy';image.src=item.image_url;image.alt=item.name||'Product';image.referrerPolicy='no-referrer';image.addEventListener('error',()=>{image.remove();link.classList.add('image-unavailable');const label=document.createElement('span');label.className='image-unavailable-label';label.textContent='Image unavailable';link.appendChild(label)},{once:true});link.appendChild(image)}else{link.classList.add('image-unavailable');const label=document.createElement('span');label.className='image-unavailable-label';label.textContent='Image unavailable';link.appendChild(label)}
+        const info=document.createElement('div');info.className='product-info';
+        const brand=document.createElement('span');brand.className='product-brand';brand.textContent=item.brand||'Everyday';
+        const title=document.createElement('a');title.className='product-title';title.href=productUrl(item);title.textContent=item.name||'Product';
+        const bottom=document.createElement('div');bottom.className='product-bottom';const price=document.createElement('strong');price.textContent='KES '+searchMoney(item.price);
+        const add=document.createElement('button');add.type='button';add.textContent='Add';add.setAttribute('aria-label','Add '+(item.name||'product')+' to basket');add.addEventListener('click',()=>window.addToCart(String(item.id),item.name||'Product',Number(item.price||0)));
+        bottom.append(price,add);info.append(brand,title,bottom);article.append(link,info);grid.appendChild(article);
+      });
+    };
+    const search=async()=>{
+      const q=input.value.trim();
+      if(q.length<2){hide();if(isShopForm){if(q===''){grid.innerHTML=originalGrid;if(feedback)feedback.textContent='Showing the catalogue. Start typing to filter products instantly.'}else{grid.innerHTML='<div class="empty-state"><strong>Keep typing…</strong><span>Enter at least two characters to search the catalogue.</span></div>';if(feedback)feedback.textContent='Enter at least two characters to search.'}}return;}
+      const id=++requestId;if(controller)controller.abort();controller=new AbortController();
+      const params=new URLSearchParams({q});if(storeId)params.set('store_id',storeId);else if(storeCode)params.set('store',storeCode);if(categoryId)params.set('category_id',categoryId);
+      try{
+        const response=await fetch('/api/products/search?'+params.toString(),{credentials:'same-origin',signal:controller.signal,headers:{'Accept':'application/json'}});
+        if(!response.ok)throw new Error('Search temporarily unavailable');
+        const data=await response.json();if(id!==requestId)return;
+        const items=Array.isArray(data.items)?data.items:[];
+        renderSuggestions(items);
+        if(isShopForm){renderShopGrid(items);if(feedback)feedback.textContent=items.length?`${items.length} relevant match${items.length===1?'':'es'} for “${q}”`:`No matches for “${q}”. Try another name, brand or barcode.`;}
+      }catch(error){if(error.name==='AbortError')return;if(id!==requestId)return;hide();if(feedback)feedback.textContent='Search could not connect. Press Search to retry.';}
+    };
+    input.addEventListener('input',()=>{clearTimeout(timer);requestId++;if(controller)controller.abort();timer=setTimeout(search,110)});
+    input.addEventListener('focus',()=>{if(input.value.trim().length>=2){clearTimeout(timer);timer=setTimeout(search,30)}});
+    document.addEventListener('click',event=>{if(!form.contains(event.target))hide()});
+    input.addEventListener('keydown',event=>{if(event.key==='Escape')hide();if(event.key==='ArrowDown'){const first=dropdown.querySelector('button');if(first){event.preventDefault();first.focus()}}});
+  });
+
+  // Keyboard-wedge scanners (USB/Bluetooth, 1D or 2D) type into ordinary inputs.
+  // Prevent their common Enter suffix from accidentally submitting the whole form.
+  document.querySelectorAll('input[name="barcode"]').forEach(input=>{
+    input.setAttribute('autocomplete','off');input.setAttribute('spellcheck','false');
+    input.addEventListener('keydown',event=>{
+      if(event.key==='Enter'){event.preventDefault();input.classList.add('scanner-captured');input.dispatchEvent(new Event('change',{bubbles:true}));}
+    });
+    input.addEventListener('input',()=>{input.classList.remove('scanner-captured');input.dataset.lastBarcodeInput=String(Date.now())});
+  });
   updateCounts();renderCartPage(); if(!location.pathname.startsWith('/control')&&!location.pathname.startsWith('/merchant')&&'serviceWorker' in navigator)navigator.serviceWorker.register('/shop/sw.js',{scope:'/'}).catch(()=>{});
 })();
 function shareDenmartShop(){const data={title:'Denmart Online Shop',text:'Browse Denmart online',url:window.location.origin+'/shop'};if(navigator.share){navigator.share(data).catch(()=>{});return;}if(navigator.clipboard)navigator.clipboard.writeText(data.url).then(()=>alert('Denmart shop link copied.')).catch(()=>{});}

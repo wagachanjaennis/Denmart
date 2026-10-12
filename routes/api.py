@@ -14,7 +14,7 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 
 
 def safe_product_payload(r, include_stock=False):
-    data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "barcode": r.product.barcode,
+    data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "brand": r.product.brand, "barcode": r.product.barcode,
             "sku": r.product.sku, "price": str(r.selling_price), "image_url": public_product_image(r.product), "slug": r.product.slug, "category_id": r.product.category_id}
     if include_stock:
         data["stock"] = str(r.stock_quantity)
@@ -131,8 +131,15 @@ def product_search():
     # PUBLIC catalogue: never expose stock, cost, supplier, internal IDs beyond
     # the cart-facing StoreProduct token, or operational endpoints.
     q = request.args.get("q", "").strip(); store_id = request.args.get("store_id")
+    if not store_id:
+        store_code = request.args.get("store", "").strip()
+        if store_code:
+            selected = Store.query.filter_by(code=store_code, is_active=True).first()
+            store_id = selected.id if selected else None
     query = StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), StoreProduct.stock_quantity > StoreProduct.reserved_quantity, Product.status == "ACTIVE")
     if store_id: query = query.filter(StoreProduct.store_id == store_id)
+    category_id = request.args.get("category_id", "").strip()
+    if category_id: query = query.filter(Product.category_id == category_id)
     rows = query.order_by(Product.name).limit(2000).all()
     if q:
         aliases_by_product = {}
@@ -141,7 +148,8 @@ def product_search():
             for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
                 aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
         ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=60)
-        rows = [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
+        # Search relevance comes first; missing/available images do not change matches.
+        rows = ranked
     else:
         rows = sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))[:60]
     return jsonify(items=[safe_product_payload(r) for r in rows])
@@ -172,7 +180,8 @@ def pos_product_search():
             for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
                 aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
         ranked = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=50)
-        rows = [row for _, row in sorted(enumerate(ranked), key=lambda pair: (0 if has_public_product_image(pair[1].product) else 1, pair[0]))]
+        # Search relevance comes first; missing/available images do not change matches.
+        rows = ranked
     else:
         rows = sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))[:50]
     return jsonify(items=[safe_product_payload(r, include_stock=True) for r in rows])

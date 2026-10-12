@@ -1,5 +1,5 @@
 from decimal import Decimal, InvalidOperation
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import secrets
 import json
 import base64
@@ -1165,18 +1165,118 @@ def settings():
     return render_template("admin/settings.html",business=business,footer_text=footer_setting.value if footer_setting else "",
                            loyalty_points_per_100=loyalty_setting.value if loyalty_setting else "1")
 
+def _reports_payload(days):
+    """Return correctly aggregated, gap-filled report data for charts and tables."""
+    business_id = current_user.business_id
+    today = now().date()
+    start_date = today - timedelta(days=days - 1)
+    since = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+
+    # Aggregate sales without joining SaleItem: joining items first multiplies each
+    # receipt total by its number of lines and gives incorrect reports.
+    sales_rows = db.session.query(
+        db.func.date(Sale.created_at),
+        db.func.coalesce(db.func.sum(Sale.total), 0),
+    ).filter(
+        Sale.business_id == business_id,
+        Sale.status == "COMPLETED",
+        Sale.created_at >= since,
+    ).group_by(db.func.date(Sale.created_at)).all()
+
+    item_rows = db.session.query(
+        db.func.date(Sale.created_at),
+        db.func.coalesce(db.func.sum(SaleItem.quantity), 0),
+    ).join(Sale, Sale.id == SaleItem.sale_id).filter(
+        Sale.business_id == business_id,
+        Sale.status == "COMPLETED",
+        Sale.created_at >= since,
+    ).group_by(db.func.date(Sale.created_at)).all()
+
+    sales_by_day = {str(day): float(total or 0) for day, total in sales_rows}
+    items_by_day = {str(day): float(qty or 0) for day, qty in item_rows}
+    daily_rows = []
+    for offset in range(days):
+        day = (start_date + timedelta(days=offset)).isoformat()
+        daily_rows.append({"date": day, "sales": round(sales_by_day.get(day, 0.0), 2),
+                           "items": round(items_by_day.get(day, 0.0), 3)})
+
+    top_rows = db.session.query(
+        SaleItem.product_id,
+        SaleItem.product_name_snapshot,
+        db.func.coalesce(db.func.sum(SaleItem.quantity), 0),
+        db.func.coalesce(db.func.sum(SaleItem.line_total), 0),
+    ).join(Sale, Sale.id == SaleItem.sale_id).filter(
+        Sale.business_id == business_id,
+        Sale.status == "COMPLETED",
+        Sale.created_at >= since,
+    ).group_by(SaleItem.product_id, SaleItem.product_name_snapshot).order_by(
+        db.func.sum(SaleItem.line_total).desc()
+    ).limit(12).all()
+
+    total_sales = round(sum(row["sales"] for row in daily_rows), 2)
+    total_items = round(sum(row["items"] for row in daily_rows), 3)
+    sales_count = Sale.query.filter(
+        Sale.business_id == business_id,
+        Sale.status == "COMPLETED",
+        Sale.created_at >= since,
+    ).count()
+
+    previous_since = since - timedelta(days=days)
+    previous_sales = db.session.query(db.func.coalesce(db.func.sum(Sale.total), 0)).filter(
+        Sale.business_id == business_id,
+        Sale.status == "COMPLETED",
+        Sale.created_at >= previous_since,
+        Sale.created_at < since,
+    ).scalar() or 0
+    previous_sales = float(previous_sales)
+    change_percent = None if previous_sales == 0 else round(((total_sales - previous_sales) / previous_sales) * 100, 1)
+
+    top_products = [{"name": name or "Unnamed product", "qty": round(float(qty or 0), 3),
+                     "sales": round(float(amount or 0), 2)} for _, name, qty, amount in top_rows]
+    return {
+        "days": days,
+        "daily_rows": daily_rows,
+        "top_products": top_products,
+        "total_sales": total_sales,
+        "total_items": total_items,
+        "sales_count": sales_count,
+        "average_basket": round(total_sales / sales_count, 2) if sales_count else 0.0,
+        "average_daily_sales": round(total_sales / days, 2) if days else 0.0,
+        "previous_sales": round(previous_sales, 2),
+        "change_percent": change_percent,
+        "refreshed_at": now().isoformat(),
+    }
+
+
+@bp.get(f"{ADMIN_BASE}/reports/data")
+@admin_required("reports.view")
+def reports_data():
+    try:
+        days = max(1, min(int(request.args.get("days", 30)), 365))
+    except (TypeError, ValueError):
+        days = 30
+    response = jsonify(_reports_payload(days))
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 @bp.get(f"{ADMIN_BASE}/reports")
 @admin_required("reports.view")
 def reports():
-    try: days=max(1,min(int(request.args.get("days",30)),365))
-    except ValueError: days=30
-    since=now()-timedelta(days=days)
-    sales_rows=db.session.query(db.func.date(Sale.created_at),db.func.coalesce(db.func.sum(Sale.total),0),db.func.coalesce(db.func.sum(SaleItem.quantity),0)).join(SaleItem,SaleItem.sale_id==Sale.id).filter(Sale.business_id==current_user.business_id,Sale.status=="COMPLETED",Sale.created_at>=since).group_by(db.func.date(Sale.created_at)).order_by(db.func.date(Sale.created_at)).all()
-    daily_rows=[{"date":key,"sales":Decimal(str(total or 0)),"items":Decimal(str(items or 0))} for key,total,items in sales_rows]
-    total_sales=sum((r["sales"] for r in daily_rows),Decimal("0")); total_items=sum((r["items"] for r in daily_rows),Decimal("0"))
-    top=db.session.query(SaleItem.product_id,SaleItem.product_name_snapshot,db.func.coalesce(db.func.sum(SaleItem.quantity),0),db.func.coalesce(db.func.sum(SaleItem.line_total),0)).join(Sale,Sale.id==SaleItem.sale_id).filter(Sale.business_id==current_user.business_id,Sale.status=="COMPLETED",Sale.created_at>=since).group_by(SaleItem.product_id,SaleItem.product_name_snapshot).order_by(db.func.sum(SaleItem.line_total).desc()).limit(20).all()
-    top_products=[{"name":name,"qty":Decimal(str(qty or 0)),"sales":Decimal(str(amount or 0))} for _,name,qty,amount in top]
-    return render_template("admin/reports.html",days=days,total_sales=total_sales,total_items=total_items,daily_rows=daily_rows,top_products=top_products)
+    try:
+        days = max(1, min(int(request.args.get("days", 30)), 365))
+    except (TypeError, ValueError):
+        days = 30
+    report_payload = _reports_payload(days)
+    return render_template(
+        "admin/reports.html",
+        days=days,
+        report_payload=report_payload,
+        total_sales=report_payload["total_sales"],
+        total_items=report_payload["total_items"],
+        daily_rows=report_payload["daily_rows"],
+        top_products=report_payload["top_products"],
+    )
 
 @bp.get(f"{ADMIN_BASE}/audit")
 @admin_required()
