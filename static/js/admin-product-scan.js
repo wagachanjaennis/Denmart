@@ -183,7 +183,7 @@
         } else resetGlobalScan();
         return;
       }
-      if (event.key.length !== 1) return;
+      if (typeof event.key !== 'string' || event.key.length !== 1) return;
       const t = performance.now();
       if (!globalScan.target || globalScan.target !== target || t - globalScan.lastAt > 130) {
         resetGlobalScan(); globalScan.target = target;

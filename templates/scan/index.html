@@ -83,12 +83,15 @@
   <section class="scan-list-panel">
     <div class="scan-panel-head">
       <div><span class="eyebrow">LISTS</span><h2>Recent scans</h2></div>
-      <button type="button" id="refreshList" class="scan-button">Refresh</button>
+      <div class="scan-list-actions">
+        <button type="button" id="toggleList" class="scan-button">Hide list</button>
+        <button type="button" id="refreshList" class="scan-button">Refresh</button>
+      </div>
     </div>
     <div id="recentList" class="recent-list"><div class="scan-empty">Nothing scanned yet.</div></div>
   </section>
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="{{url_for('static',filename='js/scan.js')}}?v=20261012-scanner-input"></script>
+<script src="{{url_for('static',filename='js/scan.js')}}?v=20261012-scanner-input-fix1"></script>
 {% endblock %}

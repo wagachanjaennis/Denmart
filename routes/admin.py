@@ -138,7 +138,7 @@ def daily_report():
                            total_sales=sales,expenses=expenses,cogs=cogs,gross_profit=gross,net_result=net,items=items,report_date=now())
 
 
-@bp.get(ADMIN_BASE)
+@bp.get(ADMIN_BASE, strict_slashes=False)
 @admin_required()
 def dashboard():
     business_id=current_user.business_id
@@ -420,14 +420,28 @@ def create_product():
         price = Decimal(request.form.get("selling_price", "0") or "0")
         cost = Decimal(cost_raw or "0")
         stock = Decimal(stock_raw or "0")
-    except InvalidOperation:
-        flash("Enter valid cost, price and stock values.", "error")
+    except (InvalidOperation, ValueError, TypeError):
+        flash("Enter valid numeric values for selling price, cost and stock.", "error")
         return redirect(url_for("admin.products"))
     if not name:
         flash("Product name is required. Scan the barcode again or enter a name.", "error")
         return redirect(url_for("admin.products"))
-    if price <= 0 or cost < 0 or stock < 0:
-        flash("Use a positive selling price and non-negative cost/stock.", "error")
+    # Reject non-finite values before comparing Decimals. Selling above cost is valid;
+    # only a selling price genuinely below its cost is a loss.
+    if not all(value.is_finite() for value in (price, cost, stock)):
+        flash("Selling price, cost and stock must be valid finite numbers.", "error")
+        return redirect(url_for("admin.products"))
+    if price <= 0:
+        flash("Selling price must be greater than zero.", "error")
+        return redirect(url_for("admin.products"))
+    if cost < 0:
+        flash("Cost price cannot be negative.", "error")
+        return redirect(url_for("admin.products"))
+    if stock < 0:
+        flash("Opening stock cannot be negative.", "error")
+        return redirect(url_for("admin.products"))
+    if price < cost:
+        flash(f"Selling price (KES {price:.2f}) cannot be below cost price (KES {cost:.2f}).", "error")
         return redirect(url_for("admin.products"))
     if category_id and not Category.query.filter_by(id=category_id, business_id=current_user.business_id).first():
         flash("Select a valid category.", "error"); return redirect(url_for("admin.products"))
@@ -575,9 +589,12 @@ def import_products():
         if not name: continue
         try:
             price = Decimal(row.get("selling_price", "0")); cost = Decimal(row.get("cost_price", "0") or "0"); stock = Decimal(row.get("stock_quantity", "0") or "0")
-            if price <= 0 or cost < 0 or stock < 0: raise InvalidOperation
-        except InvalidOperation:
+            if not all(value.is_finite() for value in (price, cost, stock)) or price <= 0 or cost < 0 or stock < 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError, TypeError):
             errors.append(f"Line {line_no}: invalid numeric values"); continue
+        if price < cost:
+            errors.append(f"Line {line_no}: selling price is below cost price"); continue
         category = None
         category_name = row.get("category", "")
         if category_name:
@@ -705,6 +722,8 @@ def save_product(product_id):
     sp = StoreProduct.query.filter_by(product_id=product.id, store_id=sp_store_id).first()
     if sp and sp.store.business_id == current_user.business_id:
         old_stock = Decimal(str(sp.stock_quantity or 0))
+        old_cost = Decimal(str(sp.cost_price or 0))
+        old_selling_price = Decimal(str(sp.selling_price or 0))
         try:
             sp.cost_price = Decimal(request.form.get("cost_price", str(sp.cost_price)))
             sp.selling_price = Decimal(request.form.get("selling_price", str(sp.selling_price)))
@@ -712,8 +731,18 @@ def save_product(product_id):
             maxv = request.form.get("maximum_price", "").strip(); sp.maximum_price = Decimal(maxv) if maxv else None
             new_stock = Decimal(request.form.get("stock_quantity", str(sp.stock_quantity)))
             sp.reorder_level = Decimal(request.form.get("reorder_level", str(sp.reorder_level or 0)))
-        except InvalidOperation:
+        except (InvalidOperation, ValueError, TypeError):
             db.session.rollback(); flash("Check the numeric mart values.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        numeric_values = [sp.cost_price, sp.selling_price, sp.minimum_price, new_stock, sp.reorder_level]
+        if sp.maximum_price is not None:
+            numeric_values.append(sp.maximum_price)
+        if not all(value.is_finite() for value in numeric_values):
+            db.session.rollback(); flash("Cost, selling price, minimum/maximum price and stock must be finite numbers.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.cost_price < 0 or sp.selling_price <= 0 or sp.minimum_price < 0 or (sp.maximum_price is not None and sp.maximum_price < 0) or sp.reorder_level < 0:
+            db.session.rollback(); flash("Selling price must be positive; cost, price limits and reorder level cannot be negative.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        prices_changed = sp.cost_price != old_cost or sp.selling_price != old_selling_price
+        if prices_changed and sp.selling_price < sp.cost_price:
+            db.session.rollback(); flash(f"Selling price (KES {sp.selling_price:.2f}) cannot be below cost price (KES {sp.cost_price:.2f}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         if new_stock < 0 or new_stock < Decimal(str(sp.reserved_quantity or 0)):
             db.session.rollback(); flash(f"Stock cannot fall below reserved quantity ({sp.reserved_quantity}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         sp.stock_quantity = new_stock
@@ -792,10 +821,13 @@ def update_price(store_product_id):
         return "Not found", 404
     try:
         new_price = Decimal(request.form.get("selling_price", "0"))
-    except InvalidOperation:
+    except (InvalidOperation, ValueError, TypeError):
         flash("Invalid price.", "error"); return redirect(url_for("admin.products"))
-    if new_price <= 0:
-        flash("Price must be greater than zero.", "error"); return redirect(url_for("admin.products"))
+    if not new_price.is_finite() or new_price <= 0:
+        flash("Price must be a valid number greater than zero.", "error"); return redirect(url_for("admin.products"))
+    item_cost = Decimal(str(item.cost_price or 0))
+    if new_price < item_cost:
+        flash(f"Selling price (KES {new_price:.2f}) cannot be below cost price (KES {item_cost:.2f}).", "error"); return redirect(url_for("admin.products"))
     old = Decimal(str(item.selling_price))
     item.selling_price = new_price
     db.session.add(PriceHistory(store_product_id=item.id, old_price=old, new_price=new_price,

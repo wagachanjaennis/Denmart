@@ -14,4 +14,4 @@
 <div class="form-actions span-2"><button class="primary-btn">Save product</button>{% if selected_store and store_product %}<a class="text-btn" href="/control/products?store_id={{selected_store.id}}">Back to mart catalogue</a>{% endif %}</div></form></section>
 <section class="admin-panel danger-panel"><div><h2>Catalogue removal</h2><p class="muted">Products with sales/history are archived instead of physically deleted so business records remain intact.</p></div><form method="post" action="/control/products/{{product.id}}/delete" onsubmit="return confirm('Delete/archive this product?')"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button class="admin-action danger-action">Delete / archive</button></form></section>
 </main></div>{% endblock %}
-{% block scripts %}<script src="{{url_for('static',filename='js/admin-product-scan.js')}}?v=20261012-barcode-autofill-v2"></script>{% endblock %}
+{% block scripts %}<script src="{{url_for('static',filename='js/admin-product-scan.js')}}?v=20261012-barcode-autofill-v3"></script>{% endblock %}

@@ -259,8 +259,8 @@
     setProduct(null, '');
     loadRecent();
   });
-  refreshList.addEventListener('click', loadRecent);
-  toggleList.addEventListener('click', () => {
+  if (refreshList) refreshList.addEventListener('click', loadRecent);
+  if (toggleList && recentList) toggleList.addEventListener('click', () => {
     const hidden = recentList.hidden;
     recentList.hidden = !hidden;
     toggleList.textContent = hidden ? 'Hide list' : 'Show list';
