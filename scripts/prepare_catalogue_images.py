@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Build a permanent catalogue image cache for Denmart.
+"""Build a local cache of verified catalogue photos during deployment.
 
-Run during the Render build, not from a customer request.  The script:
-1. reads product identities from the authoritative database;
-2. imports previously discovered source URLs from data/catalogue_image_sources.json;
-3. downloads/normalizes strong source images once;
-4. stores a stable local image URL in products.image_url and product_images;
-5. creates a deterministic product-specific image when no exact photo is available;
-6. writes an image manifest used by the service worker and audit tooling.
-
-Missing external photos never become blanks or unrelated products. A generated
-visual is explicitly labelled as generated rather than masquerading as a photo.
+Only exact curated product URLs, explicit product image URLs, and existing verified
+product photos count as photographs. Shared pack-size photos are not reused across
+SKUs. Generic placeholders are cached for file integrity but are never displayed as
+real product images by the public image helper.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+from functools import lru_cache
 import os
 import re
 import sys
@@ -38,10 +34,12 @@ from app import app  # noqa: E402
 from extensions import db  # noqa: E402
 from models import Product, ProductImage, Category  # noqa: E402
 from bootstrap import bootstrap_database  # noqa: E402
-from services.product_images import local_product_image_url, LOCAL_PREFIX  # noqa: E402
+from services.product_images import local_product_image_url, LOCAL_PREFIX, real_product_image_url  # noqa: E402
 
 CACHE_DIR = ROOT / "static" / "catalogue" / "products"
 MANIFEST_PATH = ROOT / "static" / "catalogue" / "catalogue-image-manifest.json"
+LEGACY_CACHE_DIR = ROOT / "catalogue" / "products"
+LEGACY_MANIFEST_PATH = ROOT / "catalogue" / "catalogue-image-manifest.json"
 SOURCES_PATH = ROOT / "data" / "catalogue_image_sources.json"
 USER_AGENT = "DenmartCatalogueBuilder/2026.09"
 MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
@@ -211,14 +209,52 @@ def data_url_image(url: str):
 
 def source_for(product, by_id, by_barcode):
     current = normalize_text(product.image_url or "")
-    if current.startswith(("http://", "https://")):
+    if current.startswith(("http://", "https://", "data:image/")):
         return current
-    if current.startswith("data:image/"):
-        return current
+    saved = normalize_text(getattr(product, "_denmart_saved_image_url", "") or "")
+    if saved.startswith(("http://", "https://", "data:image/")):
+        return saved
+    barcode = normalize_text(product.barcode or "")
     if str(product.id) in by_id:
         return by_id[str(product.id)]
-    barcode = normalize_text(product.barcode or "")
-    return by_barcode.get(barcode)
+    if barcode and barcode in by_barcode:
+        return by_barcode[barcode]
+    # Fall back to explicit exact-product mappings; never search by guess.
+    return real_product_image_url(product.name)
+
+
+def _pack_hint(text: str) -> str:
+    value = normalize_text(text).lower().replace(" ", "")
+    match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)(ml|l|kg|g|pcs|pc|pack|s)", value)
+    if not match:
+        return ""
+    number, unit = match.group(1).replace(",", "."), match.group(2)
+    if unit == "l" and number.startswith("0"):
+        unit = "ml"
+        try: number = str(int(float(number) * 1000))
+        except Exception: pass
+    return number + unit
+
+
+def _select_source_owners(products, sources):
+    groups = {}
+    for product in products:
+        source = sources.get(str(product.id))
+        if source:
+            groups.setdefault(source, []).append(product)
+    owners = {}
+    for source, members in groups.items():
+        if len(members) == 1:
+            owners[source] = str(members[0].id)
+            continue
+        url_hint = urlparse(source).path + " " + urlparse(source).query
+        hint = _pack_hint(url_hint)
+        exact = [item for item in members if hint and _pack_hint(item.name) == hint]
+        # If the source filename identifies a pack size, assign it only to the matching SKU.
+        # Otherwise select one representative and leave other sizes awaiting their own exact photo.
+        chosen = exact[0] if exact else sorted(members, key=lambda item: item.name.casefold())[0]
+        owners[source] = str(chosen.id)
+    return owners
 
 
 def persist_primary(product, local_url, source_type, source_url="", license_info=""):
@@ -241,63 +277,141 @@ def persist_primary(product, local_url, source_type, source_url="", license_info
         ))
 
 
+
+@lru_cache(maxsize=1)
+def legacy_photo_manifest():
+    try:
+        payload = json.loads(LEGACY_MANIFEST_PATH.read_text(encoding="utf-8"))
+        return payload.get("products", {}) if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def legacy_photo_bytes(product_id: str):
+    record = legacy_photo_manifest().get(str(product_id)) or {}
+    if record.get("type") != "photo":
+        return None
+    filename = str(record.get("file") or f"{product_id}.webp")
+    if Path(filename).name != filename or not filename.lower().endswith(".webp"):
+        return None
+    path = LEGACY_CACHE_DIR / filename
+    if not path.is_file():
+        return None
+    try:
+        return normalize_photo(path.read_bytes())
+    except Exception:
+        return None
+
+
+def download_unique_sources(sources):
+    """Download only source-owner URLs in parallel to avoid slow serial builds."""
+    http_sources = sorted({str(source) for source in sources if str(source).startswith(("http://", "https://"))})
+    result = {}
+    if not http_sources:
+        return result
+    with ThreadPoolExecutor(max_workers=min(4, len(http_sources))) as executor:
+        pending = {executor.submit(download_image, source): source for source in http_sources}
+        for future in as_completed(pending):
+            source = pending[future]
+            try:
+                result[source] = future.result()
+            except Exception:
+                result[source] = None
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--discover", action="store_true", help="Reserved for future external discovery; current build only imports stored sources.")
-    args = parser.parse_args()
-    if args.discover:
-        print("Image discovery mode requested: using only stored source URLs for this deterministic build.")
+    parser.add_argument("--discover", action="store_true", help="Use only exact, pre-curated product image source URLs.")
+    parser.parse_args()
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (ROOT / "data").mkdir(parents=True, exist_ok=True)
     by_id, by_barcode = source_maps()
+    source_cache = {}
 
     with app.app_context():
         bootstrap_database()
         products = Product.query.order_by(Product.name).all()
+        product_ids = [str(product.id) for product in products]
+        if product_ids:
+            try:
+                saved_images = (ProductImage.query.filter(ProductImage.product_id.in_(product_ids))
+                                .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all())
+                product_by_id = {str(item.id): item for item in products}
+                for saved in saved_images:
+                    product = product_by_id.get(str(saved.product_id))
+                    if product is not None and not getattr(product, "_denmart_saved_image_url", ""):
+                        product._denmart_saved_image_url = str(saved.image_url or "").strip()
+            except Exception:
+                print("Warning: could not preload ProductImage records; continuing with explicit Product.image_url and curated sources.")
+        product_sources = {str(product.id): source_for(product, by_id, by_barcode) for product in products}
+        source_owners = _select_source_owners(products, product_sources)
+        owner_sources = [source for source, owner_id in source_owners.items() if owner_id]
+        source_cache = download_unique_sources(owner_sources)
+        for product_id, source in product_sources.items():
+            if source and source.startswith("data:image/") and source in source_owners and source not in source_cache:
+                product_data = data_url_image(source)
+                source_cache[source] = product_data
+        content_owners = {}
         manifest = {
-            "version": "2026-09-21-local-v1",
+            "version": "2026-10-13-real-photo-cache-v2",
             "image_prefix": LOCAL_PREFIX,
             "products": {},
         }
-        stats = {"total": 0, "photo": 0, "placeholder": 0, "cached": 0, "existing": 0}
+        stats = {"total": 0, "photo": 0, "placeholder": 0, "duplicate": 0, "unique_sources": len(source_cache), "cache_hits": 0}
         for product in products:
             stats["total"] += 1
             filename = f"{safe_id(product.id)}.webp"
             destination = CACHE_DIR / filename
             local_url = local_product_image_url(product.id, "webp")
-            source = source_for(product, by_id, by_barcode)
+            source = product_sources.get(str(product.id), "")
             photo_data = None
-            source_type = "LOCAL_GENERATED"
-            license_info = "Generated from the exact product name/brand identity; not a photograph."
-            if source and source.startswith("data:image/"):
-                photo_data = data_url_image(source)
-            elif source and source.startswith(("http://", "https://")):
-                # Stored product sources are the only external URLs considered by the build.
-                # If the source is temporarily unavailable, keep the bundled local asset.
-                photo_data = download_image(source)
-            if photo_data:
-                destination.write_bytes(photo_data)
-                stats["photo"] += 1
-                stats["cached"] += 1
-                source_type = "LOCAL_CACHED_PHOTO"
-                license_info = "Downloaded and normalized during the Denmart build; retain source/usage rights appropriate to your commercial use."
-            else:
-                # No exact real photo was available at build time. Use an explicit
-                # placeholder rather than a generated look-alike or unrelated stock photo.
+            duplicate_of = ""
+
+            if source and source_owners.get(source) != str(product.id):
+                duplicate_of = source_owners.get(source, "")
+            elif source and source in source_cache:
+                photo_data = source_cache[source]
+                if photo_data:
+                    stats["cache_hits"] += 1
+
+            # If an older deployment already had a verified local photo, retain it
+            # when the original CDN is temporarily unavailable.
+            if not photo_data and not duplicate_of:
+                photo_data = legacy_photo_bytes(product.id)
+
+            # Never repeat one pack's photo on another differently named SKU.
+            if photo_data and not duplicate_of:
+                digest = hashlib.sha256(photo_data).hexdigest()
+                if digest in content_owners:
+                    duplicate_of = content_owners[digest]
+                else:
+                    content_owners[digest] = str(product.id)
+
+            if duplicate_of:
                 destination.write_bytes(placeholder_product_card(product))
+                image_type = "duplicate"
+                stats["duplicate"] += 1
+            elif photo_data:
+                destination.write_bytes(photo_data)
+                image_type = "photo"
+                stats["photo"] += 1
+            else:
+                destination.write_bytes(placeholder_product_card(product))
+                image_type = "placeholder"
                 stats["placeholder"] += 1
-            persist_primary(product, local_url, source_type, source_url=(source if source and source.startswith(("http://", "https://")) else ""), license_info=license_info)
+
             manifest["products"][str(product.id)] = {
                 "name": product.name,
                 "brand": product.brand or "",
                 "barcode": product.barcode or "",
                 "url": local_url,
-                "type": "photo" if source_type == "LOCAL_CACHED_PHOTO" else "placeholder",
+                "type": image_type,
+                "duplicate_of": duplicate_of,
                 "source_url": source if source and source.startswith(("http://", "https://")) else "",
                 "file": filename,
             }
-        db.session.commit()
+
         MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
         MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
         print(json.dumps(stats, indent=2))

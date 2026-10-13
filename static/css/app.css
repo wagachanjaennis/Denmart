@@ -113,3 +113,112 @@ html,body{overscroll-behavior-y:none}body.pwa-standalone{overscroll-behavior-y:n
 @media(max-width:760px){.control2-page .control-shell{display:block!important}.control2-page .control-sidebar{position:relative!important;width:100%!important;max-height:34vh;overflow:auto;padding:8px 10px!important}.control2-page .control-sidebar nav{display:flex;flex-wrap:wrap;gap:5px}.control2-page .control-sidebar nav a{display:inline-flex;padding:8px;font-size:.75rem}.control2-page .control-main{padding:11px!important}.control2-page .control-header{align-items:flex-start;flex-direction:column}.control2-page .admin-form-grid{grid-template-columns:minmax(0,1fr)}.control2-page .admin-form-grid .span-2{grid-column:span 1}.control2-inline-form{align-items:stretch}.control2-inline-form .admin-input{max-width:none;flex:1}.admin-dashboard-shortcuts .admin-action{flex:1;min-width:130px;justify-content:center}}
 
 @media(max-width:760px){.mobile-deprioritized{display:none!important}.admin-nav-group summary{font-size:.82rem}.notification-count{min-width:17px;height:17px;font-size:10px}.admin-dashboard-shortcuts{position:relative;z-index:1}}
+
+
+/* DENMART VISUAL CATALOGUE REFRESH — compact header, brighter retail palette, image-first cards */
+:root{--brand-orange:#27c878;--brand-orange-dark:#138d52;--brand-green:#149b5b;--brand-green-soft:#e9fff2;--brand-ink:#173329;--brand-muted:#697d73;--brand-line:#e0eee5;--brand-bg:#f8fcf9;--denmart-yellow:#ffdc4a;--denmart-coral:#ff6b61}
+html,body{background:#f8fcf9;color:#173329;font-family:"Nunito Sans","Aptos","Segoe UI",system-ui,-apple-system,sans-serif}
+.site-header{background:#27c878!important;box-shadow:0 3px 15px rgba(27,152,88,.14)!important;border-bottom:1px solid #b7f0d1!important}
+.site-search button,.catalogue-search button{background:#f5ce35!important;color:#23382d!important;border:1px solid #ebc323!important}
+.site-actions a:hover{background:rgba(255,255,255,.2)!important}
+.site-actions a[href="/cart"] b{background:#ffdc4a!important;color:#294334!important}
+.shop-home-layout{grid-template-columns:235px minmax(0,1fr)!important;gap:16px!important}
+.shop-home-sidebar{border-color:#dcefe3!important;background:#fff!important;box-shadow:0 8px 24px rgba(30,105,65,.055)!important;border-radius:16px!important}
+.shop-sidebar-link{font-size:.81rem!important;padding:9px 8px!important}
+.shop-sidebar-link.active,.shop-sidebar-link:hover{background:#e8fff1!important;color:#0f9854!important}
+.shop-sidebar-category-mark{background:#fff1aa!important;color:#416b2f!important}
+.shop-sidebar-ad{background:linear-gradient(135deg,#22c875 0%,#64da8a 70%,#ffdc4a 170%)!important;color:#143a28!important}
+.shop-sidebar-ad .eyebrow{color:#285a3c!important}
+.denmart-hero.denmart-hero-compact{display:flex!important;align-items:center!important;justify-content:flex-start!important;min-height:0!important;margin:0!important;padding:12px 16px!important;border:1px solid #c8f2d8!important;border-radius:16px!important;background:linear-gradient(100deg,#e8fff1 0%,#fff7c9 66%,#fff 100%)!important;box-shadow:0 5px 17px rgba(32,151,85,.065)!important}
+.denmart-hero-compact .hero-left{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;width:100%!important;min-width:0!important}
+.home-shop-now{display:inline-flex!important;align-items:center!important;justify-content:center!important;gap:15px!important;min-height:48px!important;padding:13px 24px!important;background:#27c878!important;border:2px solid #1eb767!important;color:#fff!important;border-radius:13px!important;font-size:1.02rem!important;font-weight:950!important;box-shadow:0 5px 0 #159a51!important;white-space:nowrap!important}
+.home-shop-now span{color:#ffdc4a!important;font-size:1.35rem!important}
+.home-shop-now:hover{transform:translateY(-1px);background:#18b968!important}
+.shop-qr-chip.shop-qr-feature{display:flex!important;align-items:center!important;gap:12px!important;margin:0!important;padding:6px 9px!important;max-width:none!important;background:rgba(255,255,255,.92)!important;border:1px solid #e4eec8!important;border-radius:14px!important}
+.shop-qr-feature img{width:76px!important;height:76px!important;object-fit:contain!important;padding:3px!important;background:#fff!important;border-radius:8px!important}
+.shop-qr-feature strong{display:block!important;color:#173329!important;font-size:.92rem!important}
+.shop-qr-feature small{display:block!important;color:#667b70!important;font-size:.72rem!important;margin-top:3px!important}
+.shop-qr-feature a,.shop-qr-feature button{padding:8px 10px!important;border-radius:9px!important;background:#fff3a8!important;border:1px solid #f2df6e!important;color:#365033!important;font-size:.72rem!important;font-weight:900!important;white-space:nowrap!important}
+.shop-qr-feature button{cursor:pointer!important}
+.home-all-products{margin-top:14px!important;padding:2px 0 18px!important}
+.home-all-products-head{display:flex!important;align-items:end!important;justify-content:space-between!important;margin:0 0 10px!important;padding:0 2px!important}
+.home-all-products-head .eyebrow{color:#168b4f!important;font-size:.64rem!important;letter-spacing:.12em!important}
+.home-all-products-head h2{font-family:"Nunito Sans","Aptos","Segoe UI",system-ui,sans-serif!important;font-weight:900!important;font-size:1.32rem!important;letter-spacing:-.025em!important;margin:3px 0 0!important;color:#173329!important}
+.home-all-products-head p{margin:2px 0 0!important;font-size:.72rem!important}
+.home-product-count{display:inline-flex;align-items:center;background:#fff1a8;color:#426138;border:1px solid #f1e28c;border-radius:999px;padding:6px 10px;font-size:.7rem;font-weight:950;white-space:nowrap}
+.shop-home-main .home-grid{grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:11px!important}
+.shop-home-main .product-card{border:1px solid #e0eee5!important;border-radius:13px!important;box-shadow:0 3px 12px rgba(22,72,47,.035)!important;overflow:hidden!important;background:#fff!important}
+.shop-home-main .product-card:hover{border-color:#aee8c4!important;box-shadow:0 9px 23px rgba(27,122,70,.105)!important}
+.shop-home-main .product-image{display:grid!important;place-items:center!important;aspect-ratio:1/1!important;min-height:0!important;background:linear-gradient(145deg,#fff 0%,#f3fff7 100%)!important;overflow:hidden!important;padding:7px!important}
+.shop-home-main .product-image img{display:block!important;width:100%!important;height:100%!important;max-height:none!important;object-fit:contain!important;padding:0!important;mix-blend-mode:multiply}
+.shop-home-main .product-info{padding:9px 10px 10px!important}
+.shop-home-main .product-brand{display:block!important;color:#7b8d81!important;font-size:.63rem!important}
+.shop-home-main .product-title{display:-webkit-box!important;-webkit-line-clamp:2!important;-webkit-box-orient:vertical!important;overflow:hidden!important;min-height:2.5em!important;color:#213c2e!important;font-size:.79rem!important;font-weight:850!important;line-height:1.25!important}
+.shop-home-main .product-bottom{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:6px!important;margin-top:9px!important}
+.shop-home-main .product-bottom strong{color:#163e2d!important;font-size:.89rem!important;white-space:nowrap!important}
+.shop-home-main .product-bottom button{min-width:33px!important;min-height:32px!important;border-radius:9px!important;background:#27c878!important;color:#fff!important;border:0!important;font-weight:950!important;box-shadow:inset 0 -2px 0 rgba(0,0,0,.07)!important}
+.shop-home-main .image-unavailable-label{display:none!important;place-items:center!important;width:100%!important;height:100%!important;min-height:110px!important;padding:12px!important;text-align:center!important;border-radius:10px!important;background:linear-gradient(145deg,#fff8d6,#effff5)!important;color:#617966!important;font-size:.7rem!important;font-weight:850!important}.shop-home-main .product-card.no-product-photo .image-unavailable-label,.shop-home-main .product-image.image-unavailable .image-unavailable-label{display:grid!important}
+.catalogue-limit-note{font-size:.74rem;color:#697d73;text-align:center;padding:14px}
+.product-card .product-image.image-unavailable{padding:0!important}
+@media(max-width:1120px){.shop-home-layout{grid-template-columns:210px minmax(0,1fr)!important}.shop-home-main .home-grid{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
+@media(max-width:760px){.shop-home-layout{grid-template-columns:minmax(0,1fr)!important;gap:10px!important}.shop-home-sidebar{position:static!important;max-height:none!important;padding:9px!important}.shop-home-sidebar .shop-sidebar-heading{padding:4px 5px 8px!important}.shop-home-sidebar .shop-sidebar-link{max-width:100%!important;margin:2px!important;padding:7px!important;font-size:.72rem!important}.shop-home-sidebar .shop-sidebar-link .shop-sidebar-category-mark{width:23px!important;height:23px!important;flex-basis:23px!important}.denmart-hero.denmart-hero-compact{padding:8px!important}.denmart-hero-compact .hero-left{gap:8px!important}.home-shop-now{min-height:42px!important;padding:10px 13px!important;font-size:.85rem!important;gap:8px!important}.shop-qr-chip.shop-qr-feature{gap:7px!important;padding:5px!important}.shop-qr-feature img{width:62px!important;height:62px!important}.shop-qr-feature strong{font-size:.75rem!important}.shop-qr-feature small{font-size:.62rem!important;max-width:100px!important}.shop-qr-feature a,.shop-qr-feature button{padding:6px 7px!important;font-size:.62rem!important}.shop-home-main .home-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:7px!important}.shop-home-main .product-info{padding:7px!important}.shop-home-main .product-title{font-size:.72rem!important}.shop-home-main .product-bottom strong{font-size:.72rem!important}.shop-home-main .product-bottom button{min-width:29px!important;min-height:29px!important}.home-all-products-head h2{font-size:1.1rem!important}.home-all-products-head p{max-width:215px!important;font-size:.65rem!important}.home-product-count{font-size:.62rem!important;padding:5px 7px!important}}
+@media(max-width:380px){.shop-qr-feature a.qr-save-link{display:none!important}.shop-home-main .home-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
+
+@media(max-width:760px){.shop-home-sidebar .shop-sidebar-heading{display:flex!important;align-items:center!important;gap:8px!important;justify-content:flex-start!important}.shop-home-sidebar .shop-sidebar-heading .eyebrow{font-size:.58rem!important}.shop-home-sidebar .shop-sidebar-heading strong{font-size:.78rem!important}.shop-home-sidebar .shop-sidebar-link{display:inline-flex!important;flex:0 0 auto!important;vertical-align:top!important;white-space:nowrap!important}.shop-home-sidebar{overflow:hidden!important}.shop-home-sidebar .shop-sidebar-ad{margin-top:7px!important;padding:10px!important}}
+
+/* Denmart final storefront polish: friendly plain text, handwritten section accents,
+   bright market-green with small yellow/coral highlights. Keeps admin/desktop layouts. */
+:root{--accent:#28c76f;--brand-green:#28c76f;--brand-green-soft:#eafff0;--brand-orange:#28c76f;--brand-orange-dark:#14984b;--denmart-yellow:#ffdf45;--denmart-coral:#ff695e;--line:#dfeee4}
+body:not(.admin-page):not(.pos-page){font-family:Aptos,"Segoe UI",Arial,system-ui,sans-serif!important;letter-spacing:normal}
+.site-header{background:#29ca70!important;color:#153b28!important}
+.site-header .brand,.site-header .brand strong{color:#133a27!important}
+.site-header .brand small{color:#21573a!important}
+.site-search{border-color:#a1e8b9!important;box-shadow:0 2px 0 rgba(12,110,55,.04)!important}
+.site-search button,.catalogue-search button,.admin-action.primary,.admin-launch.primary{background:#28c76f!important;color:#103d26!important;border-color:#20b966!important}
+.site-actions a[href="/cart"] b{background:#ffdf45!important;color:#493a02!important}
+.shop-home-layout{grid-template-columns:235px minmax(0,1fr)!important}
+.shop-home-sidebar{border-color:#d8eddf!important}
+.shop-sidebar-heading strong,.home-all-products-head h2,.section-head h2,.catalogue-head h1,.store-hero h1,.product-detail h1{font-family:"Segoe Print","Bradley Hand","Comic Sans MS",cursive!important;letter-spacing:-.015em!important;font-weight:700!important}
+.shop-sidebar-links{display:grid;gap:2px;min-width:0}
+.shop-home-sidebar .shop-sidebar-link{min-width:0}
+.denmart-hero.denmart-hero-compact{background:linear-gradient(108deg,#e6ffed 0%,#fff7c6 78%,#fff 100%)!important;border-color:#bdeed0!important}
+.denmart-hero-compact .hero-left{justify-content:flex-start!important;gap:18px!important}
+.home-shop-now{background:#28c76f!important;border-color:#20b966!important;color:#fff!important;box-shadow:0 4px 0 #14984b!important}
+.home-qr-only{display:grid!important;place-items:center!important;padding:4px!important;width:84px!important;height:84px!important;flex:0 0 84px!important;border:1px solid #f0d95b!important;border-radius:13px!important;background:#fff!important;box-shadow:0 3px 12px rgba(90,100,33,.08)!important}
+.home-qr-only img{display:block!important;width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important}
+.home-all-products{margin-top:12px!important}
+.home-all-products-head h2{font-size:1.38rem!important}
+.home-all-products-head p{font-family:Aptos,"Segoe UI",Arial,sans-serif!important;font-size:.76rem!important}
+.shop-home-main .home-grid{grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:12px!important}
+.shop-home-main .product-card{border-radius:14px!important;border-color:#e0eee5!important;box-shadow:0 3px 11px rgba(22,72,47,.035)!important}
+.shop-home-main .product-card:nth-child(5n+2){border-bottom:2px solid #ffdf45!important}
+.shop-home-main .product-card:nth-child(7n+3){border-bottom:2px solid #ff8b7f!important}
+.shop-home-main .product-image{background:#fff!important}
+.shop-home-main .product-image img{object-fit:contain!important;mix-blend-mode:multiply!important}
+.shop-home-main .product-bottom button{background:#28c76f!important;color:#fff!important}
+.shop-home-main .product-bottom button:hover{background:#14984b!important}
+.shop-home-main .image-unavailable-label{background:linear-gradient(140deg,#fff9d9,#ecfff2)!important;color:#536e5c!important;border:1px dashed #c5e7d1!important}
+.shop-sidebar-ad{background:linear-gradient(135deg,#28c76f,#83e2a4 70%,#ffdf45 135%)!important;color:#164229!important}
+@media(max-width:1100px){.shop-home-main .home-grid{grid-template-columns:repeat(4,minmax(0,1fr))!important}}
+@media(max-width:760px){
+ .shop-home-layout{grid-template-columns:minmax(0,1fr)!important;gap:10px!important}
+ .shop-home-sidebar{padding:9px!important}
+ .shop-sidebar-links{display:flex!important;flex-wrap:nowrap!important;gap:6px!important;overflow-x:auto!important;overflow-y:hidden!important;padding:2px 1px 5px!important;scroll-snap-type:x proximity!important;scrollbar-width:thin!important}
+ .shop-home-sidebar .shop-sidebar-link{display:inline-flex!important;flex:0 0 auto!important;margin:0!important;padding:7px 9px!important;scroll-snap-align:start!important}
+ .shop-home-sidebar .shop-sidebar-link b{display:none!important}
+ .shop-home-main .home-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:7px!important}
+ .denmart-hero-compact .hero-left{justify-content:flex-start!important;gap:11px!important}
+ .home-qr-only{width:69px!important;height:69px!important;flex-basis:69px!important}
+ .home-shop-now{min-height:43px!important;padding:10px 15px!important}
+ .shop-home-main .product-info{padding:7px!important}
+ .shop-home-main .product-title{font-size:.73rem!important;line-height:1.28!important}
+ .shop-home-main .product-bottom{align-items:center!important;gap:4px!important}
+ .shop-home-main .product-bottom strong{font-size:.72rem!important}
+ .home-all-products-head h2{font-size:1.16rem!important}
+}
+@media(max-width:380px){.shop-home-main .home-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
+
+/* Make navigation readable on the brighter green brand header. */
+.site-header .site-actions a,.site-header .site-actions button{color:#153b28!important;font-weight:850!important}
+.site-header .site-actions a:hover,.site-header .site-actions button:hover{background:rgba(255,255,255,.42)!important}
+.site-header .site-search input{color:#20352a!important}

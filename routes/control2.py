@@ -14,6 +14,7 @@ from models import (
     AuditLog, InventoryTransaction, PayOrder, Product, Role, Sale, SaleItem,
     Store, StoreProduct, SystemSetting, User, now,
 )
+from services.branding import brand_display_name
 from services.audit import audit
 from services.payment_engine import manual_approve, set_fulfillment
 
@@ -47,7 +48,7 @@ def manager_manifest():
     from flask import request
     base = request.host_url.rstrip("/")
     setting = SystemSetting.query.filter_by(business_id=current_user.business_id, key="brand_name").first() if current_user.is_authenticated else None
-    label = setting.value.strip() if setting and setting.value and setting.value.strip() else "Toror Mart"
+    label = brand_display_name(setting.value if setting else "")
     return jsonify({"name": f"{label} Control 2", "short_name": "Control 2", "start_url": f"{base}/control2/",
                     "scope": f"{base}/control2/", "display": "standalone", "background_color": "#f5faf7",
                     "theme_color": "#10a37f", "description": "Restricted day-to-day store operations.",

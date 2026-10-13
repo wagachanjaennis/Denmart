@@ -37,7 +37,7 @@
       if (prior !== null && (p > prior.payments || c > prior.cash)) {
         beep();
         if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(`${document.querySelector('meta[name=app-brand-name]')?.content || 'Toror Mart'} needs your attention`, {body: `${p > prior.payments ? 'Payment approval pending. ' : ''}${c > prior.cash ? 'A POS cash sale awaits approval.' : ''}`.trim(), icon:'/static/pwa/icon.svg', tag:'denmart-admin-approvals'});
+          new Notification(`${document.querySelector('meta[name=app-brand-name]')?.content || 'Denmart'} needs your attention`, {body: `${p > prior.payments ? 'Payment approval pending. ' : ''}${c > prior.cash ? 'A POS cash sale awaits approval.' : ''}`.trim(), icon:'/static/pwa/icon.svg', tag:'denmart-admin-approvals'});
         }
       }
       prior = {payments:p, cash:c};

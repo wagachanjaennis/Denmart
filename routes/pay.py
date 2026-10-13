@@ -8,6 +8,7 @@ from flask_login import current_user, login_required
 
 from extensions import db, csrf
 from models import Business, Store, StoreProduct, PayOrder, PayOrderItem, PayReceipt, PaySettings, PayEvent, User, SystemSetting, now
+from services.branding import brand_display_name
 from services.payment_engine import (
     create_payment_order,
     enabled_methods,
@@ -328,7 +329,7 @@ def pos_payment_status(payment_id):
     receipt_amount = receipt.amount if receipt else None
     paid_amount = order.paid_amount if order.paid_amount is not None else receipt_amount
     pay_settings = get_pay_settings(order.business_id, create=False)
-    display_name = pay_settings.display_name if pay_settings else "Denmart"
+    display_name = brand_display_name(pay_settings.display_name if pay_settings else "")
     expected = Decimal(str(order.expected_amount or 0))
     confirmation = ""
     if order.payment_status == "PAID":

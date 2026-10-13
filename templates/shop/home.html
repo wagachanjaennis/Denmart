@@ -1,15 +1,32 @@
 {% extends 'base.html' %}{% block content %}
 <div class="shop-home-layout">
-  <aside class="shop-home-sidebar">
-    <div class="shop-sidebar-heading"><span class="eyebrow">BROWSE AISLES</span><strong>All categories</strong></div>
-    <a class="shop-sidebar-link active" href="/shop">Shop everything <span>›</span></a>
-    {% for c in categories %}<a class="shop-sidebar-link" href="/shop?category={{c.id}}"><span class="shop-sidebar-category-mark">{{c.name[:1]|upper}}</span><span>{{c.name}}</span><b>›</b></a>{% endfor %}
-    {% if sidebar_ad_title or sidebar_ad_body %}<a class="shop-sidebar-ad" href="{{sidebar_ad_link or '/shop'}}"><span class="eyebrow">FEATURED</span><strong>{{sidebar_ad_title or 'Discover more at Toror Mart'}}</strong>{% if sidebar_ad_body %}<span>{{sidebar_ad_body}}</span>{% endif %}<b>Explore offer →</b></a>{% endif %}
+  <aside class="shop-home-sidebar" aria-label="Shop departments">
+    <div class="shop-sidebar-heading"><span class="eyebrow">BROWSE</span><strong>Shop by category</strong></div>
+    <div class="shop-sidebar-links">
+      <a class="shop-sidebar-link active" href="/shop"><span class="shop-sidebar-category-mark">✦</span><span>All products</span><b>›</b></a>
+      {% for c in categories %}<a class="shop-sidebar-link" href="/shop?category={{c.id}}"><span class="shop-sidebar-category-mark">{{c.name[:1]|upper}}</span><span>{{c.name}}</span><b>›</b></a>{% endfor %}
+    </div>
+    {% if sidebar_ad_title or sidebar_ad_body %}<a class="shop-sidebar-ad" href="{{sidebar_ad_link or '/shop'}}"><span class="eyebrow">FEATURED</span><strong>{{sidebar_ad_title or 'Discover more at ' ~ business_name}}</strong>{% if sidebar_ad_body %}<span>{{sidebar_ad_body}}</span>{% endif %}<b>Explore offer →</b></a>{% endif %}
   </aside>
   <div class="shop-home-main">
-    <section class="denmart-hero"><div class="hero-left"><span class="eyebrow">{{business_name|upper}}</span><h1>Stock up on everyday favourites.</h1><p>From kitchen basics and drinks to home essentials, personal care, toys and tech accessories.</p><div class="hero-quick"><a class="hero-pill solid" href="/shop">Shop now</a><a class="hero-pill" href="/cart">Basket <span data-cart-count>0</span></a></div><div class="shop-qr-chip"><img src="/app-qr.png" alt="Scan QR to open the online shop"><div><strong>Scan to shop</strong><small>Open the online mart on your phone</small></div><a href="/app-qr.png" download="online-shop-qr.png">Save</a><button type="button" onclick="shareDenmartShop()">Share</button></div></div><div class="hero-aisles"><span>Popular aisles</span><div><a href="/shop?q=milk">Milk</a><a href="/shop?q=bread">Bread</a><a href="/shop?q=rice">Rice</a><a href="/shop?q=water">Water</a><a href="/shop?q=soap">Soap</a><a href="/shop?q=basket">Baskets</a></div></div></section>
-    <section class="quick-section"><div class="section-head"><div><span class="eyebrow">EVERYDAY</span><h2>Stock up on everyday favourites</h2><p class="muted">Popular products, with repeated pack-size photos kept out of this featured row.</p></div><a href="/shop">Shop all →</a></div><div class="product-grid home-grid">{% for item in essentials %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">Products will appear here as they are made available for online ordering.</div>{% endfor %}</div></section>
-    <section class="category-section"><div class="section-head"><div><span class="eyebrow">DEPARTMENTS</span><h2>Shop by category</h2></div><a href="/shop">View all</a></div><div class="category-grid supermarket-departments">{% for c in categories %}<a class="category-card" href="/shop?category={{c.id}}"><span class="category-symbol">{{c.name[:1]|upper}}</span><div><strong>{{c.name}}</strong><small>Browse aisle</small></div></a>{% endfor %}</div></section>
-    <section class="catalogue-section"><div class="section-head"><div><span class="eyebrow">MORE TO DISCOVER</span><h2>More things for your home and day</h2></div><a href="/shop">View catalogue →</a></div><div class="product-grid home-grid">{% for item in more_products %}{% include 'shop/_card.html' %}{% endfor %}</div></section>
+    <section class="denmart-hero denmart-hero-compact" aria-label="Shop online">
+      <div class="hero-left">
+        <a class="hero-pill solid home-shop-now" href="/shop">Shop now <span aria-hidden="true">→</span></a>
+        <a class="shop-qr-chip shop-qr-feature home-qr-only" href="/app-qr.png" target="_blank" rel="noopener" aria-label="Open {{business_name}} shop QR code">
+          <img src="/app-qr.png" alt="{{business_name}} online shop QR code" loading="eager">
+        </a>
+      </div>
+    </section>
+    <section class="catalogue-section home-all-products" aria-labelledby="home-all-products-title">
+      <div class="section-head home-all-products-head">
+        <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">All products</h2><p class="muted">Browse the full range below.</p></div>
+        <span class="home-product-count">{{total_products}} products</span>
+      </div>
+      <div class="product-grid home-grid" id="homeProductGrid">
+        {% for item in products %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">New products will appear here when they are available for online ordering.</div>{% endfor %}
+      </div>
+      {% if products|length >= 2000 %}<p class="catalogue-limit-note">Showing the first 2,000 available products. Use search or categories to find more.</p>{% endif %}
+    </section>
   </div>
-</div>{% endblock %}
+</div>
+{% endblock %}

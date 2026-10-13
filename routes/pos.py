@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, render_template, request, Response
 from flask_login import current_user, login_required
 from extensions import csrf, db
 from models import Sale, SaleItem, StoreProduct, InventoryTransaction, Shift, now, Store, User, SystemSetting
+from services.branding import brand_display_name
 from services.audit import audit
 
 bp=Blueprint("pos", __name__)
@@ -30,7 +31,7 @@ def dashboard_entry():
     shift=Shift.query.filter_by(store_id=current_user.store_id,cashier_id=current_user.id,status="OPEN").first()
     last_agent=User.query.filter(User.business_id==current_user.business_id,User.store_id==current_user.store_id,User.id!=current_user.id,User.last_login_at.isnot(None)).order_by(User.last_login_at.desc()).first()
     brand = SystemSetting.query.filter_by(business_id=current_user.business_id, key="brand_name").first()
-    display_name = (brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart")
+    display_name = brand_display_name(brand.value if brand else "")
     return render_template("pos/index.html",store=store,shift=shift,last_agent=last_agent,business_name=display_name,footer_text="",title="Till")
 
 @bp.get("/merchant/manifest.webmanifest")
@@ -38,7 +39,7 @@ def pos_manifest():
     base=request.host_url.rstrip("/")
     business = Store.query.filter_by(is_active=True).order_by(Store.created_at).first()
     brand = SystemSetting.query.filter_by(business_id=(business.business_id if business else None), key="brand_name").first() if business else None
-    display_name = (brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart")
+    display_name = brand_display_name(brand.value if brand else "")
     return jsonify({"name":f"{display_name} Till","short_name":"Till","start_url":f"{base}/merchant/on","scope":f"{base}/merchant","display":"standalone","background_color":"#f5faf7","theme_color":"#10a37f","description":"Store sales application.","icons":[{"src":f"{base}/static/pwa/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]})
 
 @bp.get("/merchant/sw.js")

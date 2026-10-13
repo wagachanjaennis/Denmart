@@ -15,6 +15,7 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for,
 from flask_login import current_user, login_required
 from sqlalchemy import or_
 from extensions import db
+from services.branding import brand_display_name, brand_display_copy
 from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryTransaction, User,
                     AuditLog, Sale, SaleItem, Store, Business, Category, SystemError,
                     Expense, Role, SystemSetting, Permission, Customer, ProductAlias, ProductImage,
@@ -126,7 +127,7 @@ def admin_manifest():
     base = request.host_url.rstrip("/")
     business = Business.query.filter_by(id=(current_user.business_id if current_user.is_authenticated else None)).first() if current_user.is_authenticated else Business.query.order_by(Business.created_at).first()
     brand = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
-    label = brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart"
+    label = brand_display_name(brand.value if brand else "")
     return jsonify({"name": f"{label} Control Centre", "short_name": f"{label[:12]} Admin", "start_url": f"{base}/control/",
                     "scope": f"{base}/control/", "display": "standalone", "background_color": "#f5faf7",
                     "theme_color": "#10a37f", "description": f"Installable {label} administration workspace.",
@@ -212,7 +213,7 @@ def reject_pos_cash_sale(sale_id):
 def daily_report():
     business_id=current_user.business_id
     brand_row=SystemSetting.query.filter_by(business_id=business_id,key="brand_name").first()
-    business_name=(brand_row.value.strip() if brand_row and brand_row.value and brand_row.value.strip() else "Toror Mart")
+    business_name=brand_display_name(brand_row.value if brand_row else "")
     today_sale=db.func.date(Sale.created_at)==db.func.current_date()
     today_expense=db.func.date(Expense.incurred_at)==db.func.current_date()
     today_inventory=db.func.date(InventoryTransaction.created_at)==db.func.current_date()
@@ -1638,7 +1639,7 @@ def settings():
         footer=(request.form.get("footer_text") or "").strip()[:500]
         if name: business.name=name
         brand_setting=brand_setting or SystemSetting(business_id=business_id,key="brand_name")
-        brand_setting.value=brand_name or "Toror Mart"
+        brand_setting.value=brand_name or "Denmart"
         announcement_setting=announcement_setting or SystemSetting(business_id=business_id,key="storefront_announcement")
         announcement_setting.value=announcement
         sidebar_ad_title_setting=sidebar_ad_title_setting or SystemSetting(business_id=business_id,key="storefront_sidebar_ad_title")
@@ -1665,11 +1666,11 @@ def settings():
         if request.form.get("remove_logo")=="1": business.logo_url=None
         db.session.commit(); audit("SETTINGS_UPDATED","Business",business_id,new_values={"business_name":business.name})
         flash("Settings saved.","success")
-    return render_template("admin/settings.html",business=business,footer_text=footer_setting.value if footer_setting else "",
-                           brand_name=brand_setting.value if brand_setting and brand_setting.value else "Toror Mart",
-                           storefront_announcement=(announcement_setting.value if announcement_setting else f"{brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else 'Toror Mart'} online delivery service will be available from 27 October 2026."),
-                           sidebar_ad_title=sidebar_ad_title_setting.value if sidebar_ad_title_setting else "",
-                           sidebar_ad_body=sidebar_ad_body_setting.value if sidebar_ad_body_setting else "",
+    return render_template("admin/settings.html",business=business,footer_text=brand_display_copy(footer_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if footer_setting else "",
+                           brand_name=brand_display_name(brand_setting.value if brand_setting else ""),
+                           storefront_announcement=(brand_display_copy(announcement_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if announcement_setting else f"{brand_display_name(brand_setting.value if brand_setting else '')} online delivery service will be available from 27 October 2026."),
+                           sidebar_ad_title=brand_display_copy(sidebar_ad_title_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if sidebar_ad_title_setting else "",
+                           sidebar_ad_body=brand_display_copy(sidebar_ad_body_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if sidebar_ad_body_setting else "",
                            sidebar_ad_link=sidebar_ad_link_setting.value if sidebar_ad_link_setting else "",
                            control2_can_approve_payments=(control2_approval_setting.value if control2_approval_setting else "0") == "1",
                            storefront_orders_enabled=(storefront_orders_setting.value if storefront_orders_setting else "0") == "1",

@@ -6,6 +6,11 @@ supported. Unknown products intentionally show a neutral unavailable-image state
 """
 
 import base64
+import json
+from functools import lru_cache
+from pathlib import Path
+import re
+from urllib.parse import unquote
 
 
 REAL_PRODUCT_IMAGES = {
@@ -150,14 +155,52 @@ REAL_PRODUCT_IMAGES = {
 }
 
 _NORMALIZED_REAL_IMAGES = {" ".join(k.split()).casefold(): v for k, v in REAL_PRODUCT_IMAGES.items()}
+_REAL_IMAGE_URL_TO_NAMES = {}
+for _product_name, _image_url in REAL_PRODUCT_IMAGES.items():
+    _REAL_IMAGE_URL_TO_NAMES.setdefault(_image_url, []).append(" ".join(_product_name.split()).casefold())
+
+
+def _size_hint(value: str) -> str:
+    text = unquote(str(value or "")).lower().replace(" ", "")
+    match = re.search(r"(?<![a-z0-9])(\d+(?:[.,]\d+)?)(ml|l|kg|g|pcs|pc|pack|s)(?![a-z])", text)
+    if not match:
+        return ""
+    number, unit = match.group(1).replace(",", "."), match.group(2)
+    if unit == "l" and number.startswith("0"):
+        try:
+            number, unit = str(int(float(number) * 1000)), "ml"
+        except Exception:
+            pass
+    return number + unit
+
+
+def _exact_photo_for_name(name: str) -> str:
+    normalized = normalize_product_name(name)
+    url = _NORMALIZED_REAL_IMAGES.get(normalized, "")
+    if not url:
+        return ""
+    names = sorted(_REAL_IMAGE_URL_TO_NAMES.get(url, []))
+    if len(names) <= 1:
+        return url
+    url_hint = _size_hint(url)
+    name_hint = _size_hint(name)
+    # When a URL says 500ml, never display it for the 1L/2L variant.
+    if url_hint and name_hint:
+        if url_hint != name_hint:
+            return ""
+        same_size = [candidate for candidate in names if _size_hint(candidate) == name_hint]
+        return url if same_size and normalized == same_size[0] else ""
+    # If the same picture has been mapped to several different SKUs without a
+    # pack-size identifier, show it for one representative only, not repeatedly.
+    return url if normalized == names[0] else ""
 
 def normalize_product_name(value: str) -> str:
     return " ".join(str(value or "").split()).strip().casefold()
 
 
 def real_product_image_url(name: str) -> str:
-    """Return the curated direct photo URL for an exact known product name."""
-    return _NORMALIZED_REAL_IMAGES.get(normalize_product_name(name), "")
+    """Return a curated direct URL only when it is safe for this exact pack/name."""
+    return _exact_photo_for_name(name)
 
 
 def is_data_image_url(url: str) -> bool:
@@ -165,20 +208,79 @@ def is_data_image_url(url: str) -> bool:
     return raw.startswith("data:image/") and "," in raw
 
 
-def public_product_image(product) -> str:
-    """Return only a trusted exact match or an administrator-uploaded image.
+LOCAL_PREFIX = "/static/catalogue/products/"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-    Unknown remote URLs are intentionally ignored so the storefront cannot show a
-    stale or unverified image.
+
+def local_product_image_url(product_id: str, ext: str = "webp") -> str:
+    safe_id = "".join(ch for ch in str(product_id or "") if ch.isalnum() or ch in "_-")
+    safe_ext = "".join(ch for ch in str(ext or "webp") if ch.isalnum()) or "webp"
+    return f"{LOCAL_PREFIX}{safe_id}.{safe_ext}"
+
+
+@lru_cache(maxsize=1)
+def _local_image_manifest():
+    path = _PROJECT_ROOT / "static" / "catalogue" / "catalogue-image-manifest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload.get("products", {}) if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _cached_real_photo(product):
+    product_id = str(getattr(product, "id", "") or "")
+    if not product_id:
+        return ""
+    record = _local_image_manifest().get(product_id) or {}
+    if record.get("type") != "photo":
+        return ""
+    filename = str(record.get("file") or f"{product_id}.webp")
+    if Path(filename).name != filename or not filename.lower().endswith(".webp"):
+        return ""
+    if not (_PROJECT_ROOT / "static" / "catalogue" / "products" / filename).is_file():
+        return ""
+    return f"{LOCAL_PREFIX}{filename}"
+
+
+def public_product_image(product) -> str:
+    """Return a verified cached photo, an explicitly stored photo URL, or no image.
+
+    Product.image_url is an explicit merchant/catalogue choice and must remain usable.
+    The manifest suppresses only known duplicate catalogue photos. Generic generated
+    placeholders are never returned as real product imagery.
     """
-    exact = real_product_image_url(getattr(product, "name", ""))
-    if exact:
-        return exact
     raw = str(getattr(product, "image_url", "") or "").strip()
+    saved = str(getattr(product, "_denmart_saved_image_url", "") or "").strip()
+    if not raw.startswith(("https://", "http://", "data:image/")) and saved.startswith(("https://", "http://", "data:image/")):
+        raw = saved
+    record = _local_image_manifest().get(str(getattr(product, "id", "") or "")) or {}
+    if record.get("type") == "duplicate":
+        return ""
     if is_data_image_url(raw):
         return raw
+    cached = _cached_real_photo(product)
+    if cached:
+        return cached
+    # Preserve explicitly saved direct product images if caching failed at build time.
+    if raw.startswith(("https://", "http://")):
+        return raw
+    if raw.startswith(LOCAL_PREFIX):
+        return ""
+    # Older releases stored relative catalogue cache URLs outside Flask's static tree.
+    if raw.startswith(("/catalogue/products/", "catalogue/products/")):
+        filename = Path(raw).name
+        candidate_static = _PROJECT_ROOT / "static" / "catalogue" / "products" / filename
+        if filename and candidate_static.is_file() and filename.lower().endswith(".webp"):
+            return f"/static/catalogue/products/{filename}"
+        return ""
+    exact = _exact_photo_for_name(getattr(product, "name", ""))
+    if exact:
+        return exact
+    manifest_url = str(record.get("source_url") or "").strip()
+    if manifest_url.startswith(("https://", "http://")):
+        return manifest_url
     return ""
-
 
 def has_public_product_image(product) -> bool:
     return bool(public_product_image(product))

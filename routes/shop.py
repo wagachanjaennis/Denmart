@@ -8,6 +8,7 @@ from flask import Blueprint, render_template, request, session, send_file, Respo
 from extensions import db
 from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business, SystemSetting
 from services.search import forgiving_rank
+from services.branding import brand_display_name
 from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 
 bp = Blueprint("shop", __name__)
@@ -32,6 +33,27 @@ def selected_store():
     return stores[0] if stores else None
 
 
+def _attach_saved_product_images(rows):
+    """Make older ProductImage-table records visible without one query per product."""
+    product_ids = {str(row.product_id) for row in rows}
+    if not product_ids:
+        return rows
+    try:
+        image_rows = (ProductImage.query.filter(ProductImage.product_id.in_(product_ids))
+                      .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all())
+    except Exception:
+        current_app.logger.exception("Could not load saved catalogue images")
+        return rows
+    primary_by_product = {}
+    for image_row in image_rows:
+        primary_by_product.setdefault(str(image_row.product_id), str(image_row.image_url or "").strip())
+    for row in rows:
+        saved = primary_by_product.get(str(row.product_id), "")
+        if saved:
+            row.product._denmart_saved_image_url = saved
+    return rows
+
+
 def catalogue_query(store=None, q="", category=""):
     query = (StoreProduct.query.join(Product)
              .filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True),
@@ -41,6 +63,7 @@ def catalogue_query(store=None, q="", category=""):
     if category:
         query = query.filter(Product.category_id == category)
     rows = query.order_by(Product.name).limit(2000).all()
+    rows = _attach_saved_product_images(rows)
     if not q:
         return sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))
     product_ids = [row.product_id for row in rows]
@@ -58,39 +81,17 @@ def home():
     store = selected_store()
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
-    rows = catalogue_query(store)[:600] if store else []
-    priority = [
-        "sugar", "fresh milk", "yoghurt", "bread", "maize meal", "rice", "cooking oil",
-        "eggs", "tea", "coffee", "water", "tissue", "toilet", "washing", "soap", "biscuits",
-    ]
-    def rank(item):
-        text = f"{item.product.name} {item.product.brand or ''}".lower()
-        for i, term in enumerate(priority):
-            if term in text:
-                return i
-        return 99
-    ranked = sorted(rows, key=lambda x: (0 if has_public_product_image(x.product) else 1, rank(x), x.product.name.lower()))
-    def image_diverse(source, excluded=None, limit=120):
-        seen = set(excluded or [])
-        chosen = []
-        used_images = set()
-        for row in source:
-            photo = public_product_image(row.product) or ""
-            # Repeated package-size variants commonly share the exact same photo.
-            # Keep one copy per image in the landing-page feature rows.
-            identity = photo.strip()
-            if identity and identity in used_images:
-                continue
-            if identity: used_images.add(identity)
-            chosen.append(row)
-            if len(chosen) >= limit: break
-        return chosen
-    essentials = image_diverse(ranked, limit=30)
-    excluded_ids = {x.product_id for x in essentials}
-    remaining = [x for x in ranked if x.product_id not in excluded_ids]
-    more_products = image_diverse(remaining, limit=120)
-    return render_template("shop/home.html", stores=active_stores(), store=store, essentials=essentials, more_products=more_products, categories=categories, total_products=len(rows))
-
+    # Render the entire available online range on the landing page. Images are lazy-loaded
+    # by the product card so customers can scroll the catalogue without a second click.
+    products = catalogue_query(store) if store else []
+    return render_template(
+        "shop/home.html",
+        stores=active_stores(),
+        store=store,
+        products=products,
+        categories=categories,
+        total_products=len(products),
+    )
 
 @bp.get("/shop")
 def shop():
@@ -149,6 +150,7 @@ def product(slug):
     item = (StoreProduct.query.join(Product)
             .filter(Product.slug == slug, StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE")
             .filter(StoreProduct.store_id == store.id if store else True).first_or_404())
+    _attach_saved_product_images([item])
     return render_template("shop/product.html", item=item, store=store)
 
 
@@ -204,6 +206,18 @@ def product_photo(product_id):
     if not product or product.status != "ACTIVE":
         return ("", 404)
 
+    # Older uploads may be stored in ProductImage instead of Product.image_url.
+    # Resolve one product here too so direct photo links work outside catalogue pages.
+    raw_image = str(product.image_url or "").strip()
+    if not raw_image.startswith(("https://", "http://", "data:image/")):
+        try:
+            saved_image = (ProductImage.query.filter_by(product_id=product.id)
+                           .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).first())
+            if saved_image and str(saved_image.image_url or "").strip():
+                product._denmart_saved_image_url = str(saved_image.image_url).strip()
+        except Exception:
+            current_app.logger.exception("Could not load saved product photo")
+
     # Exact curated photo: return a redirect so legacy callers can still resolve it.
     exact = public_product_image(product)
     if exact and not is_data_image_url(exact):
@@ -225,17 +239,17 @@ def shop_manifest():
     base = request.host_url.rstrip("/")
     business = Business.query.order_by(Business.created_at).first()
     brand = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
-    name = (brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart")
+    name = brand_display_name(brand.value if brand else "")
     return jsonify({
         "id": "/",
         "name": name,
-        "short_name": name[:12] or "Toror Mart",
+        "short_name": name[:12] or "Denmart",
         "start_url": f"{base}/",
         "scope": f"{base}/",
         "display": "standalone",
         "display_override": ["standalone", "browser"],
         "background_color": "#f7fafb",
-        "theme_color": "#10a37f",
+        "theme_color": "#28c76f",
         "description": f"{name} online supermarket",
         "orientation": "any",
         "categories": ["shopping", "food", "business"],
@@ -257,8 +271,8 @@ def _icon_bytes(size):
     business = Business.query.order_by(Business.created_at).first()
     logo_url = (business.logo_url or "").strip() if business else ""
     brand_setting = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
-    brand_name = brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else "Toror Mart"
-    canvas = Image.new("RGBA", (size, size), (16, 163, 127, 255))
+    brand_name = brand_display_name(brand_setting.value if brand_setting else "")
+    canvas = Image.new("RGBA", (size, size), (39, 200, 120, 255))
     if logo_url.startswith("data:image/") and "," in logo_url:
         try:
             raw = base64.b64decode(logo_url.split(",", 1)[1])
@@ -278,7 +292,7 @@ def _icon_bytes(size):
         words = [part for part in brand_name.split() if part]
         text = "".join(part[0] for part in words[:2]).upper() if len(words) > 1 else brand_name[:2].upper()
         bbox = draw.textbbox((0,0), text, font=font)
-        draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(16,163,127,255), font=font)
+        draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(39,200,120,255), font=font)
     out = BytesIO()
     canvas.convert("RGB").save(out, format="PNG", optimize=True)
     out.seek(0)
@@ -294,7 +308,7 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v22-basket-only";
+    js = '''const CACHE_VERSION = "denmart-public-v24-storefront-visuals";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;

@@ -5,6 +5,7 @@ from flask_login import current_user
 from config import Config
 from extensions import db, migrate, login_manager, csrf
 from models import User, Business, SystemError, SystemSetting, Sale, PayOrder
+from services.branding import brand_display_name, brand_display_copy
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_wtf.csrf import CSRFError
@@ -76,8 +77,8 @@ def create_app():
         sidebar_ad_title_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_title").first() if business else None)
         sidebar_ad_body_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_body").first() if business else None)
         sidebar_ad_link_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_link").first() if business else None)
-        footer = footer_setting.value if footer_setting else "All rights reserved · Denmart Merchants"
-        display_name = (brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else "Toror Mart")
+        display_name = brand_display_name(brand_setting.value if brand_setting else "")
+        footer = brand_display_copy(footer_setting.value, display_name) if footer_setting else f"All rights reserved · {display_name} Merchants"
         pending_pos_approvals = pending_pay_approvals = 0
         if request.path.startswith("/control") and current_user.is_authenticated and getattr(current_user, "business_id", None):
             pending_pos_approvals = Sale.query.filter_by(business_id=current_user.business_id, status="PENDING_APPROVAL").count()
@@ -89,9 +90,9 @@ def create_app():
             "business_logo": business.logo_url if business else "",
             "currency": app.config["CURRENCY"],
             "footer_text": footer,
-            "storefront_announcement": (announcement_setting.value if announcement_setting else f"{display_name} online delivery service will be available from 27 October 2026."),
-            "sidebar_ad_title": sidebar_ad_title_setting.value if sidebar_ad_title_setting and sidebar_ad_title_setting.value else "",
-            "sidebar_ad_body": sidebar_ad_body_setting.value if sidebar_ad_body_setting and sidebar_ad_body_setting.value else "",
+            "storefront_announcement": (brand_display_copy(announcement_setting.value, display_name) if announcement_setting else f"{display_name} online delivery service will be available from 27 October 2026."),
+            "sidebar_ad_title": brand_display_copy(sidebar_ad_title_setting.value, display_name) if sidebar_ad_title_setting and sidebar_ad_title_setting.value else "",
+            "sidebar_ad_body": brand_display_copy(sidebar_ad_body_setting.value, display_name) if sidebar_ad_body_setting and sidebar_ad_body_setting.value else "",
             "sidebar_ad_link": sidebar_ad_link_setting.value if sidebar_ad_link_setting and sidebar_ad_link_setting.value else "/shop",
             "pending_pos_approvals": pending_pos_approvals,
             "pending_pay_approvals": pending_pay_approvals,
