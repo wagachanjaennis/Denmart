@@ -6,11 +6,6 @@ supported. Unknown products intentionally show a neutral unavailable-image state
 """
 
 import base64
-import json
-from functools import lru_cache
-from pathlib import Path
-import re
-from urllib.parse import unquote
 
 
 REAL_PRODUCT_IMAGES = {
@@ -155,52 +150,14 @@ REAL_PRODUCT_IMAGES = {
 }
 
 _NORMALIZED_REAL_IMAGES = {" ".join(k.split()).casefold(): v for k, v in REAL_PRODUCT_IMAGES.items()}
-_REAL_IMAGE_URL_TO_NAMES = {}
-for _product_name, _image_url in REAL_PRODUCT_IMAGES.items():
-    _REAL_IMAGE_URL_TO_NAMES.setdefault(_image_url, []).append(" ".join(_product_name.split()).casefold())
-
-
-def _size_hint(value: str) -> str:
-    text = unquote(str(value or "")).lower().replace(" ", "")
-    match = re.search(r"(?<![a-z0-9])(\d+(?:[.,]\d+)?)(ml|l|kg|g|pcs|pc|pack|s)(?![a-z])", text)
-    if not match:
-        return ""
-    number, unit = match.group(1).replace(",", "."), match.group(2)
-    if unit == "l" and number.startswith("0"):
-        try:
-            number, unit = str(int(float(number) * 1000)), "ml"
-        except Exception:
-            pass
-    return number + unit
-
-
-def _exact_photo_for_name(name: str) -> str:
-    """Return a direct source only when its mapping is not ambiguous.
-
-    Some historical mappings pointed one image at several different pack sizes or
-    product names. Without a source filename/metadata that distinguishes the SKU,
-    it is safer to show no photo than to mislabel another size or model.
-    """
-    normalized = normalize_product_name(name)
-    url = _NORMALIZED_REAL_IMAGES.get(normalized, "")
-    if not url:
-        return ""
-    names = sorted(_REAL_IMAGE_URL_TO_NAMES.get(url, []))
-    if len(names) <= 1:
-        return url
-    url_hint = _size_hint(url)
-    if not url_hint:
-        return ""
-    matches = [candidate for candidate in names if _size_hint(candidate) == url_hint]
-    return url if len(matches) == 1 and matches[0] == normalized else ""
 
 def normalize_product_name(value: str) -> str:
     return " ".join(str(value or "").split()).strip().casefold()
 
 
 def real_product_image_url(name: str) -> str:
-    """Return a curated direct URL only when it is safe for this exact pack/name."""
-    return _exact_photo_for_name(name)
+    """Return the curated direct photo URL for an exact known product name."""
+    return _NORMALIZED_REAL_IMAGES.get(normalize_product_name(name), "")
 
 
 def is_data_image_url(url: str) -> bool:
@@ -208,212 +165,52 @@ def is_data_image_url(url: str) -> bool:
     return raw.startswith("data:image/") and "," in raw
 
 
-LOCAL_PREFIX = "/static/catalogue/products/"
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+def _local_static_image(raw: str) -> bool:
+    """Return True only for an image file that is actually bundled with the app."""
+    from pathlib import Path
+    from urllib.parse import unquote
 
-
-def local_product_image_url(product_id: str, ext: str = "webp") -> str:
-    safe_id = "".join(ch for ch in str(product_id or "") if ch.isalnum() or ch in "_-")
-    safe_ext = "".join(ch for ch in str(ext or "webp") if ch.isalnum()) or "webp"
-    return f"{LOCAL_PREFIX}{safe_id}.{safe_ext}"
-
-
-@lru_cache(maxsize=1)
-def _local_image_manifest():
-    path = _PROJECT_ROOT / "static" / "catalogue" / "catalogue-image-manifest.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload.get("products", {}) if isinstance(payload, dict) else {}
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
-LEGACY_MANIFEST_PATH = _PROJECT_ROOT / "catalogue" / "catalogue-image-manifest.json"
-
-
-@lru_cache(maxsize=1)
-def _legacy_image_manifest():
-    try:
-        payload = json.loads(LEGACY_MANIFEST_PATH.read_text(encoding="utf-8"))
-        products = payload.get("products", {}) if isinstance(payload, dict) else {}
-        return products if isinstance(products, dict) else {}
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
-@lru_cache(maxsize=1)
-def _legacy_records_by_barcode():
-    indexed = {}
-    for record in _legacy_image_manifest().values():
-        barcode = str(record.get("barcode") or "").strip()
-        if barcode:
-            indexed.setdefault(barcode, []).append(record)
-    return indexed
-
-
-def legacy_catalogue_record(product):
-    """Find a prior catalogue record by ID, then exact barcode + name + brand.
-
-    Product UUIDs changed between catalogue imports. The barcode/name identity is
-    the recovery key, but all fields must agree so no neighbour SKU receives this
-    product's photo.
-    """
-    product_id = str(getattr(product, "id", "") or "")
-    barcode = str(getattr(product, "barcode", "") or "").strip()
-    name = normalize_product_name(getattr(product, "name", ""))
-    brand = normalize_product_name(getattr(product, "brand", ""))
-
-    def matches(record):
-        if name != normalize_product_name(record.get("name", "")):
-            return False
-        prior_barcode = str(record.get("barcode") or "").strip()
-        if barcode and prior_barcode and barcode != prior_barcode:
-            return False
-        prior_brand = normalize_product_name(record.get("brand", ""))
-        if brand and prior_brand and brand != prior_brand:
-            return False
-        return bool(name and (not barcode or not prior_barcode or barcode == prior_barcode))
-
-    direct = _legacy_image_manifest().get(product_id)
-    if direct and matches(direct):
-        return direct
-    if not barcode:
-        return None
-    candidates = [record for record in _legacy_records_by_barcode().get(barcode, []) if matches(record)]
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def _legacy_source_is_unambiguous(source_url, record):
-    source_url = str(source_url or "").strip()
-    if not source_url.startswith(("https://", "http://")):
+    value = str(raw or "").strip()
+    if not value.startswith("/static/") or ".." in value.split("?")[0].split("/"):
         return False
-    candidates = [item for item in _legacy_image_manifest().values()
-                  if item.get("type") == "photo" and str(item.get("source_url") or "").strip() == source_url]
-    if len(candidates) == 1:
-        return True
-    hint = _size_hint(source_url)
-    if not hint:
-        return False
-    sized = [item for item in candidates if _size_hint(item.get("name", "")) == hint]
-    return len(sized) == 1 and sized[0] is record
-
-
-def legacy_catalogue_source_url(product):
-    """Return an older curated URL only for the exact and unambiguous SKU."""
-    record = legacy_catalogue_record(product)
-    if not record or record.get("type") != "photo":
-        return ""
-    source = str(record.get("source_url") or "").strip()
-    return source if _legacy_source_is_unambiguous(source, record) else ""
-
-
-@lru_cache(maxsize=512)
-def _database_source_owner(source_url):
-    """Determine whether a database-stored URL is shared across different SKUs."""
+    relative = unquote(value.split("?", 1)[0]).removeprefix("/static/")
+    root = Path(__file__).resolve().parents[1] / "static"
+    candidate = (root / relative).resolve()
     try:
-        from models import Product as ProductModel
-        rows = ProductModel.query.filter(ProductModel.image_url == source_url).with_entities(
-            ProductModel.id, ProductModel.name, ProductModel.brand,
-            ProductModel.pack_size, ProductModel.unit
-        ).all()
-    except Exception:
-        return ("unknown", ())
-    if not rows:
-        return ("unknown", ())
-    ids = tuple(str(row.id) for row in rows)
-    if len(rows) == 1:
-        return ("owner", ids)
-    identities = {(normalize_product_name(row.name), normalize_product_name(row.brand),
-                   normalize_product_name(row.pack_size or row.unit)) for row in rows}
-    if len(identities) == 1:
-        return ("same_product", ids)
-    hint = _size_hint(source_url)
-    if hint:
-        matches = [row for row in rows if _size_hint(" ".join((row.name or "", row.pack_size or "", row.unit or ""))) == hint]
-        if len(matches) == 1:
-            return ("owner", (str(matches[0].id),))
-    return ("ambiguous", ())
-
-
-def _source_allowed_for_product(product, source_url):
-    status, owner_ids = _database_source_owner(str(source_url or "").strip())
-    if status == "ambiguous":
+        candidate.relative_to(root.resolve())
+    except ValueError:
         return False
-    if status == "owner":
-        return str(getattr(product, "id", "") or "") in owner_ids
-    if status == "same_product":
-        return str(getattr(product, "id", "") or "") in owner_ids
-    return True
-
-
-def _cached_real_photo(product):
-    product_id = str(getattr(product, "id", "") or "")
-    if not product_id:
-        return ""
-    record = _local_image_manifest().get(product_id) or {}
-    if record.get("type") != "photo":
-        return ""
-    # Refuse stale manifest IDs if the product identity has changed since the cache
-    # was produced. IDs alone are not a safe mapping across catalogue imports.
-    if normalize_product_name(record.get("name", "")) != normalize_product_name(getattr(product, "name", "")):
-        return ""
-    current_barcode = str(getattr(product, "barcode", "") or "").strip()
-    record_barcode = str(record.get("barcode", "") or "").strip()
-    if current_barcode and record_barcode and current_barcode != record_barcode:
-        return ""
-    current_brand = normalize_product_name(getattr(product, "brand", ""))
-    record_brand = normalize_product_name(record.get("brand", ""))
-    if current_brand and record_brand and current_brand != record_brand:
-        return ""
-    filename = str(record.get("file") or f"{product_id}.webp")
-    if Path(filename).name != filename or not filename.lower().endswith(".webp"):
-        return ""
-    if not (_PROJECT_ROOT / "static" / "catalogue" / "products" / filename).is_file():
-        return ""
-    return f"{LOCAL_PREFIX}{filename}"
+    return candidate.is_file() and candidate.stat().st_size > 0
 
 
 def public_product_image(product) -> str:
-    """Return only an identity-matched product photo/source, never a fake card.
+    """Resolve an image without losing saved URLs after a database restore.
 
-    Current and legacy manifests are matched by exact name/barcode/brand. Shared
-    URLs are allowed only when the manifest or pack-size hint establishes a unique
-    owner; arbitrary alphabetic assignment is deliberately forbidden.
+    Prefer a real bundled barcode-keyed file, then an administrator-saved URL,
+    then the curated exact-name map. Remote URLs are accepted only for HTTP(S);
+    arbitrary schemes and stale local paths are rejected. The older implementation
+    ignored most saved HTTP URLs, which made images disappear after importing a DB
+    whose product names were not an exact key in the curated map.
     """
+    barcode = str(getattr(product, "barcode", "") or "").strip()
+    if barcode and barcode.isdigit():
+        stable = f"/static/catalogue/products/by-barcode/{barcode}.webp"
+        if _local_static_image(stable):
+            return stable
+
     raw = str(getattr(product, "image_url", "") or "").strip()
-    saved = str(getattr(product, "_denmart_saved_image_url", "") or "").strip()
-    if not raw.startswith(("https://", "http://", "data:image/")) and saved.startswith(("https://", "http://", "data:image/")):
-        raw = saved
-
-    record = _local_image_manifest().get(str(getattr(product, "id", "") or "")) or {}
-    blocked_source = record.get("type") in {"duplicate", "ambiguous_source", "ambiguous"}
-    if is_data_image_url(raw) and not blocked_source:
+    if is_data_image_url(raw):
+        return raw
+    if raw.startswith(("https://", "http://")):
+        return raw
+    if _local_static_image(raw):
         return raw
 
-    cached = _cached_real_photo(product)
-    if cached:
-        return cached
-
-    # If build-time download was unavailable, serve the original exact source URL
-    # directly rather than presenting a generated silhouette as a photograph.
-    manifest_url = str(record.get("source_url") or "").strip()
-    if record.get("type") in {"photo", "source_unavailable"} and manifest_url.startswith(("https://", "http://")):
-        if _source_allowed_for_product(product, manifest_url):
-            return manifest_url
-
-    if not blocked_source and raw.startswith(("https://", "http://")) and _source_allowed_for_product(product, raw):
-        return raw
-
-    # Old image manifests use UUIDs that no longer match the product table. Recover
-    # the source by exact barcode + name + brand, not the stale UUID or filename.
-    legacy_url = legacy_catalogue_source_url(product)
-    if legacy_url and _source_allowed_for_product(product, legacy_url):
-        return legacy_url
-
-    exact = _exact_photo_for_name(getattr(product, "name", ""))
-    if exact and _source_allowed_for_product(product, exact):
+    exact = real_product_image_url(getattr(product, "name", ""))
+    if exact.startswith(("https://", "http://")):
         return exact
     return ""
+
 
 def has_public_product_image(product) -> bool:
     return bool(public_product_image(product))

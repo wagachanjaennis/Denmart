@@ -57,6 +57,112 @@ def _restore_value(column, value):
     return value
 
 
+
+def _usable_image_reference(value):
+    """Accept safe remote/data URLs or local static files that really exist."""
+    import re
+    from urllib.parse import unquote
+
+    raw = str(value or "").strip()
+    if raw.startswith(("https://", "http://")):
+        return True
+    if re.match(r"^data:image/[a-zA-Z0-9.+-]+;base64,", raw):
+        return True
+    if not raw.startswith("/static/") or ".." in raw.split("?", 1)[0].split("/"):
+        return False
+    root = Path(__file__).resolve().parents[1] / "static"
+    candidate = (root / unquote(raw.split("?", 1)[0]).removeprefix("/static/")).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return candidate.is_file() and candidate.stat().st_size > 0
+
+
+def _capture_existing_product_images():
+    """Keep live image references before a full database restore replaces rows."""
+    try:
+        from models import Product, ProductImage
+        products = Product.query.all()
+        images = {}
+        for product in products:
+            candidates = []
+            if _usable_image_reference(product.image_url):
+                candidates.append(str(product.image_url).strip())
+            for image in ProductImage.query.filter_by(product_id=product.id).order_by(
+                ProductImage.is_primary.desc(), ProductImage.sort_order.asc()
+            ).all():
+                if _usable_image_reference(image.image_url):
+                    candidates.append(str(image.image_url).strip())
+            chosen = next((url for url in candidates if url), "")
+            if not chosen:
+                continue
+            record = {
+                "barcode": str(product.barcode or "").strip(),
+                "name": " ".join(str(product.name or "").split()).casefold(),
+                "brand": " ".join(str(product.brand or "").split()).casefold(),
+                "url": chosen,
+            }
+            if record["barcode"]:
+                images.setdefault(("barcode", record["barcode"]), record)
+            if record["name"]:
+                images.setdefault(("name", record["name"], record["brand"]), record)
+        return images
+    except Exception:
+        # Image preservation must never make an otherwise valid backup impossible.
+        return {}
+
+
+def _reconcile_restored_product_images(previous_images):
+    """Preserve matching photos across restores and synchronize the primary image table."""
+    previous_images = previous_images or {}
+    from models import Product, ProductImage
+    import uuid
+
+    changed = False
+    for product in Product.query.all():
+        current = str(product.image_url or "").strip()
+        rows = ProductImage.query.filter_by(product_id=product.id).order_by(
+            ProductImage.is_primary.desc(), ProductImage.sort_order.asc()
+        ).all()
+        if not _usable_image_reference(current):
+            # A backup may store the only valid image reference in product_images.
+            current = next((str(image.image_url or "").strip() for image in rows
+                            if _usable_image_reference(image.image_url)), "")
+            if current:
+                product.image_url = current
+                changed = True
+            else:
+                barcode = str(product.barcode or "").strip()
+                name = " ".join(str(product.name or "").split()).casefold()
+                brand = " ".join(str(product.brand or "").split()).casefold()
+                previous = previous_images.get(("barcode", barcode)) if barcode else None
+                if not previous and name:
+                    previous = previous_images.get(("name", name, brand))
+                if previous and _usable_image_reference(previous.get("url")):
+                    current = previous["url"]
+                    product.image_url = current
+                    changed = True
+
+        # Keep the legacy product_images table in step with products.image_url.
+        if _usable_image_reference(current):
+            if not rows:
+                db.session.add(ProductImage(
+                    id=str(uuid.uuid4()), product_id=product.id,
+                    image_url=current, thumbnail_url=current,
+                    alt_text=product.name, source_type="RESTORE_PRESERVED",
+                    license_info="Image reference preserved during database restore.",
+                    sort_order=0, is_primary=True,
+                ))
+                changed = True
+            elif not _usable_image_reference(rows[0].image_url):
+                rows[0].image_url = current
+                rows[0].thumbnail_url = current
+                rows[0].is_primary = True
+                changed = True
+    if changed:
+        db.session.commit()
+
 def export_database_json():
     """Export every application table and row as a portable JSON snapshot."""
     tables = {}
@@ -83,6 +189,7 @@ def restore_database_json(payload):
     if missing:
         raise ValueError(f"Backup contains unknown tables: {', '.join(missing[:8])}")
 
+    previous_images = _capture_existing_product_images()
     db.session.rollback()
     dialect = db.engine.url.get_backend_name()
     if dialect == "sqlite":
@@ -107,6 +214,7 @@ def restore_database_json(payload):
                 cleaned.append(item)
             db.session.execute(table.insert(), cleaned)
         db.session.commit()
+        _reconcile_restored_product_images(previous_images)
     except Exception:
         db.session.rollback()
         raise
@@ -243,6 +351,7 @@ def restore_sqlite_snapshot(path: str | Path, batch_size: int = 2000):
             + (" …" if len(unknown) > 8 else "")
         )
 
+    previous_images = _capture_existing_product_images()
     db.session.rollback()
     dialect = db.engine.url.get_backend_name()
     if dialect == "sqlite":
@@ -267,6 +376,7 @@ def restore_sqlite_snapshot(path: str | Path, batch_size: int = 2000):
                         target_conn.execute(table.insert(), cleaned)
 
         db.session.commit()
+        _reconcile_restored_product_images(previous_images)
     except Exception:
         db.session.rollback()
         raise
