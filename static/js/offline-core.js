@@ -60,10 +60,16 @@
       req.onerror = () => reject(req.error || new Error('Could not list local data'));
     });
   }
+  function isStaffWorkspace() {
+    // Storage/backup warnings are operational notices for work areas, not storefront
+    // copy for shoppers or anonymous visitors.
+    return /^\/(control2?|merchant)(?:\/|$)/.test(location.pathname);
+  }
   async function persistStorage() {
     try {
       let persistent = false;
       if (navigator.storage && navigator.storage.persist) persistent = await navigator.storage.persist();
+      if (!isStaffWorkspace()) return; // request persistence silently for public pages
       if (!persistent) {
         let alreadyWarned = false;
         try { alreadyWarned = sessionStorage.getItem('denmart-storage-warning-shown') === '1'; } catch (_) {}
