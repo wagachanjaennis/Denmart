@@ -11,7 +11,7 @@
     <div class="pay-merchant-row">
       <div>
         <span class="eyebrow">PAYMENT</span>
-        <strong>{{ order.payment_instructions.label or 'Denmart' }}</strong>
+        <strong>{{ order.payment_instructions.label or business_name }}</strong>
       </div>
       <span class="pay-method-pill">{{ 'Buy Goods' if order.payment_method == 'BUY_GOODS' else 'PayBill' }}</span>
     </div>

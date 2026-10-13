@@ -85,6 +85,7 @@
       setStatus(status, 'Looking up barcode…');
       const store = field(form, 'store_id')?.value || new URLSearchParams(location.search).get('store_id') || '';
       const params = new URLSearchParams({ barcode });
+      if (form.hasAttribute('data-quick-product')) params.set('fast', '1');
       if (store) params.set('store_id', store);
       try {
         const response = await fetch(`/control/api/products/barcode-lookup?${params}`, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });

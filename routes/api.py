@@ -233,6 +233,27 @@ def pos_product_search():
     return jsonify(items=[safe_product_payload(r, include_stock=True) for r in rows])
 
 
+@bp.get("/pos/products/offline-catalogue")
+@cashier_api
+def pos_offline_catalogue():
+    """Paginated, cashier-scoped catalogue sync for offline scan/search. No cost data is exposed."""
+    try:
+        offset = max(0, min(50000, int(request.args.get("offset", "0"))))
+        limit = max(1, min(500, int(request.args.get("limit", "500"))))
+    except ValueError:
+        return jsonify(error="invalid_page"), 400
+    query = StoreProduct.query.join(Product).filter(
+        StoreProduct.store_id == current_user.store_id,
+        StoreProduct.is_available.is_(True), StoreProduct.available_pos.is_(True), Product.status == "ACTIVE")
+    total = query.count()
+    rows = query.order_by(Product.name, Product.id).offset(offset).limit(limit).all()
+    return jsonify(ok=True, total=total, offset=offset, limit=limit, items=[{
+        "id": row.id, "name": row.product.name, "barcode": row.product.barcode or "",
+        "price": str(row.selling_price), "stock": str(row.stock_quantity),
+        "available": str(max(Decimal("0"), Decimal(str(row.stock_quantity or 0)) - Decimal(str(row.reserved_quantity or 0))))
+    } for row in rows])
+
+
 @csrf.exempt
 @bp.route("/payment-gateway/ping", methods=["GET", "POST"])
 def android_gateway_ping():

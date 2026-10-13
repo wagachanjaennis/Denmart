@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app, jsonify
 from extensions import db
-from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business
+from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business, SystemSetting
 from services.search import forgiving_rank
 from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
 
@@ -70,8 +70,25 @@ def home():
                 return i
         return 99
     ranked = sorted(rows, key=lambda x: (0 if has_public_product_image(x.product) else 1, rank(x), x.product.name.lower()))
-    essentials = ranked[:36]
-    more_products = [x for x in ranked[36:] if x not in essentials][:120]
+    def image_diverse(source, excluded=None, limit=120):
+        seen = set(excluded or [])
+        chosen = []
+        used_images = set()
+        for row in source:
+            photo = public_product_image(row.product) or ""
+            # Repeated package-size variants commonly share the exact same photo.
+            # Keep one copy per image in the landing-page feature rows.
+            identity = photo.strip()
+            if identity and identity in used_images:
+                continue
+            if identity: used_images.add(identity)
+            chosen.append(row)
+            if len(chosen) >= limit: break
+        return chosen
+    essentials = image_diverse(ranked, limit=30)
+    excluded_ids = {x.product_id for x in essentials}
+    remaining = [x for x in ranked if x.product_id not in excluded_ids]
+    more_products = image_diverse(remaining, limit=120)
     return render_template("shop/home.html", stores=active_stores(), store=store, essentials=essentials, more_products=more_products, categories=categories, total_products=len(rows))
 
 
@@ -144,7 +161,9 @@ def cart():
         from services.payment_engine import get_pay_settings, enabled_methods
         settings = get_pay_settings(store.business_id)
         methods = enabled_methods(settings)
-    return render_template("shop/cart.html", store=store, payment_methods=methods, pay_settings=settings)
+    launch_setting = SystemSetting.query.filter_by(business_id=(store.business_id if store else None), key="storefront_orders_enabled").first() if store else None
+    orders_enabled = bool(launch_setting and launch_setting.value == "1")
+    return render_template("shop/cart.html", store=store, payment_methods=methods, pay_settings=settings, orders_enabled=orders_enabled)
 
 
 @bp.get("/favicon.ico")
@@ -205,17 +224,18 @@ def product_photo(product_id):
 def shop_manifest():
     base = request.host_url.rstrip("/")
     business = Business.query.order_by(Business.created_at).first()
-    name = business.name if business else "Denmart"
+    brand = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
+    name = (brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart")
     return jsonify({
         "id": "/",
         "name": name,
-        "short_name": name[:12] or "Denmart",
+        "short_name": name[:12] or "Toror Mart",
         "start_url": f"{base}/",
         "scope": f"{base}/",
         "display": "standalone",
         "display_override": ["standalone", "browser"],
         "background_color": "#f7fafb",
-        "theme_color": "#f57c00",
+        "theme_color": "#10a37f",
         "description": f"{name} online supermarket",
         "orientation": "any",
         "categories": ["shopping", "food", "business"],
@@ -236,7 +256,9 @@ def shop_manifest():
 def _icon_bytes(size):
     business = Business.query.order_by(Business.created_at).first()
     logo_url = (business.logo_url or "").strip() if business else ""
-    canvas = Image.new("RGBA", (size, size), (245, 124, 0, 255))
+    brand_setting = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
+    brand_name = brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else "Toror Mart"
+    canvas = Image.new("RGBA", (size, size), (16, 163, 127, 255))
     if logo_url.startswith("data:image/") and "," in logo_url:
         try:
             raw = base64.b64decode(logo_url.split(",", 1)[1])
@@ -253,9 +275,10 @@ def _icon_bytes(size):
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(size * .30))
         except Exception:
             font = ImageFont.load_default()
-        text = "DM"
+        words = [part for part in brand_name.split() if part]
+        text = "".join(part[0] for part in words[:2]).upper() if len(words) > 1 else brand_name[:2].upper()
         bbox = draw.textbbox((0,0), text, font=font)
-        draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(25,118,74,255), font=font)
+        draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(16,163,127,255), font=font)
     out = BytesIO()
     canvas.convert("RGB").save(out, format="PNG", optimize=True)
     out.seek(0)

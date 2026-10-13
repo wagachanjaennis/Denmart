@@ -6,7 +6,7 @@
 <div class="scan-shell">
   <header class="scan-header">
     <div>
-      <div class="eyebrow">DENMART · STOCK TOOL</div>
+      <div class="eyebrow">{{business_name|upper}} · STOCK TOOL</div>
       <h1>Scan stock</h1>
       <p>Use the camera or a 1D/2D USB or Bluetooth keyboard-type scanner. Barcode lookup starts as soon as a code is scanned.</p>
     </div>
@@ -67,14 +67,20 @@
         <label>Product name
           <input id="nameInput" type="text" maxlength="240" autocomplete="off" placeholder="e.g. Brookside Milk 500ml">
         </label>
+        <label>Category
+          <select id="categoryInput"><option value="">Choose category</option>{% for category in categories %}<option value="{{category.id}}">{{category.name}}</option>{% endfor %}</select>
+        </label>
+        <div class="scan-price-grid"><label>Selling price (KES)<input id="sellingPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Optional"></label><label>Cost price (KES)<input id="costPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Optional"></label></div>
+        <div class="scan-price-grid"><label>Brand<input id="brandInput" type="text" maxlength="160" placeholder="Optional"></label><label>Unit / pack<input id="unitInput" type="text" maxlength="40" value="unit" placeholder="unit"></label></div>
+        <label>Pack size<input id="packSizeInput" type="text" maxlength="80" placeholder="e.g. 500ml, 1kg, 12 pieces"></label>
         <label>Quantity to add
-          <input id="quantityInput" type="number" min="0" step="1" value="" inputmode="decimal" placeholder="Optional — leave blank to keep stock unchanged">
+          <input id="quantityInput" type="number" min="0" step="0.001" value="" inputmode="decimal" placeholder="Optional — leave blank to keep stock unchanged">
         </label>
         <div class="stock-strip">
           <div><small>Current stock</small><strong id="currentStock">—</strong></div>
           <div><small>After save</small><strong id="afterStock">—</strong></div>
         </div>
-        <button type="submit" id="saveButton" class="scan-save" disabled>Save to database</button>
+        <button type="submit" id="saveButton" class="scan-save" disabled>Save & scan next</button>
       </form>
       <div id="saveMessage" class="scan-message" hidden></div>
     </aside>

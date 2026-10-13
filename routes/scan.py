@@ -100,10 +100,12 @@ def _product_candidates(barcode):
 def scan_page():
     stores = _business_stores()
     selected_store = _valid_store(request.args.get("store_id")) or _default_store(stores)
+    categories = Category.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Category.sort_order, Category.name).all()
     return render_template(
         "scan/index.html",
         stores=stores,
         selected_store=selected_store,
+        categories=categories,
     )
 
 
@@ -136,6 +138,9 @@ def lookup():
             "barcode": product.barcode,
             "sku": product.sku,
             "brand": product.brand,
+            "category_id": product.category_id or "",
+            "unit": product.unit or "unit",
+            "pack_size": product.pack_size or "",
             "image_url": product.image_url or "",
             "stock": str(selected_sp.stock_quantity if selected_sp else 0),
             "reserved": str(selected_sp.reserved_quantity if selected_sp else 0),
@@ -196,6 +201,12 @@ def save():
     barcode = _normalize_barcode(data.get("barcode"))
     name = str(data.get("name") or "").strip()
     product_id = str(data.get("product_id") or "").strip()
+    category_id = str(data.get("category_id") or "").strip() or None
+    brand = str(data.get("brand") or "").strip()[:160] or None
+    unit = str(data.get("unit") or "unit").strip()[:40] or "unit"
+    pack_size = str(data.get("pack_size") or "").strip()[:80] or unit
+    raw_price = str(data.get("selling_price") or "").strip()
+    raw_cost = str(data.get("cost_price") or "").strip()
     store = _valid_store(str(data.get("store_id") or "")) or _default_store(_business_stores())
     if not store:
         return jsonify(ok=False, error="store_required", message="Choose the mart where this stock belongs."), 400
@@ -215,6 +226,20 @@ def save():
         quantity = Decimal("0")
     if quantity > Decimal("1000000"):
         return jsonify(ok=False, error="invalid_quantity", message="Quantity is too large for one scan.") , 400
+    try:
+        price = Decimal(raw_price) if raw_price else None
+        cost = Decimal(raw_cost) if raw_cost else None
+    except InvalidOperation:
+        return jsonify(ok=False, error="invalid_price", message="Enter valid selling and cost prices."), 400
+    for value in (price, cost):
+        if value is not None and (not value.is_finite() or value < 0):
+            return jsonify(ok=False, error="invalid_price", message="Prices must be finite and cannot be negative."), 400
+    if price is not None and price > 0 and cost is not None and price < cost:
+        return jsonify(ok=False, error="selling_below_cost", message=f"Selling price KES {price:.2f} is below cost KES {cost:.2f}."), 400
+    if price is not None and price == 0 and cost is not None and cost > 0:
+        return jsonify(ok=False, error="selling_price_required", message="Enter a selling price or leave both price fields blank for identity-only capture."), 400
+    if category_id and not Category.query.filter_by(id=category_id, business_id=current_user.business_id, is_active=True).first():
+        return jsonify(ok=False, error="invalid_category", message="Choose a valid category."), 400
 
     try:
         product = db.session.get(Product, product_id) if product_id else None
@@ -242,6 +267,10 @@ def save():
                 barcode=barcode,
                 name=name,
                 slug=_unique_slug(name, barcode),
+                category_id=category_id,
+                brand=brand,
+                unit=unit,
+                pack_size=pack_size,
                 status="ACTIVE",
             )
             db.session.add(product)
@@ -253,25 +282,39 @@ def save():
             if product.name.strip() != name:
                 product.name = name
                 renamed = True
+            if category_id and not product.category_id: product.category_id = category_id
+            if brand and not product.brand: product.brand = brand
+            if unit and not product.unit: product.unit = unit
+            if pack_size and not product.pack_size: product.pack_size = pack_size
 
         sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
         if not sp:
             sp = StoreProduct(
                 store_id=store.id,
                 product_id=product.id,
-                cost_price=Decimal("0"),
-                selling_price=Decimal("0"),
-                minimum_price=Decimal("0"),
+                cost_price=cost if cost is not None else Decimal("0"),
+                selling_price=price if price is not None else Decimal("0"),
+                minimum_price=price if price is not None else Decimal("0"),
+                maximum_price=(price * Decimal("1.30") if price is not None and price > 0 else None),
                 stock_quantity=Decimal("0"),
                 reserved_quantity=Decimal("0"),
-                reorder_level=Decimal("0"),
-                is_available=False,
-                available_online=False,
-                available_pos=False,
+                reorder_level=Decimal("5"),
+                is_available=bool(price is not None and price > 0),
+                available_online=bool(price is not None and price > 0),
+                available_pos=bool(price is not None and price > 0),
             )
             db.session.add(sp)
             db.session.flush()
 
+        if price is not None and price > 0:
+            old_price = Decimal(str(sp.selling_price or 0))
+            if old_price != price:
+                from models import PriceHistory
+                db.session.add(PriceHistory(store_product_id=sp.id, old_price=old_price, new_price=price,
+                    reason="Price set via scan stock form", source="SCAN_STOCK_SETUP", changed_by=current_user.id))
+            sp.selling_price = price; sp.minimum_price = price; sp.maximum_price = price * Decimal("1.30")
+            sp.is_available = True; sp.available_online = True; sp.available_pos = True
+        if cost is not None: sp.cost_price = cost
         before = Decimal(sp.stock_quantity or 0)
         if quantity > 0:
             sp.stock_quantity = before + quantity
@@ -312,6 +355,8 @@ def save():
                 "stock_changed": bool(quantity > 0),
                 "store": store.name,
                 "needs_setup": sp.selling_price in (None, 0),
+                "selling_price": str(sp.selling_price),
+                "cost_price": str(sp.cost_price),
             },
         )
     except Exception:

@@ -4,7 +4,7 @@ from flask import Flask, Blueprint, jsonify, redirect, url_for, request, render_
 from flask_login import current_user
 from config import Config
 from extensions import db, migrate, login_manager, csrf
-from models import User, Business, SystemError, SystemSetting
+from models import User, Business, SystemError, SystemSetting, Sale, PayOrder
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_wtf.csrf import CSRFError
@@ -32,6 +32,7 @@ def create_app():
     from routes.api import bp as api_bp
     from routes.scan import bp as scan_bp
     from routes.pay import bp as pay_bp
+    from routes.control2 import bp as control2_bp
     app.register_blueprint(auth_bp)
     app.register_blueprint(shop_bp)
     app.register_blueprint(pos_bp)
@@ -39,6 +40,7 @@ def create_app():
     app.register_blueprint(api_bp)
     app.register_blueprint(scan_bp)
     app.register_blueprint(pay_bp)
+    app.register_blueprint(control2_bp)
 
     # Render services sometimes start with `gunicorn app:app` and skip
     # the explicit init_db.py command. Ensure a fresh database cannot
@@ -58,6 +60,8 @@ def create_app():
         # visitors to the correct login screen instead of relying on a
         # single Flask-Login endpoint that does not exist.
         target = request.args.get("next", "")
+        if request.path.startswith("/control2"):
+            return redirect(f"/control2?next={request.path}")
         if request.path.startswith("/control") or request.path.startswith("/scan"):
             return redirect(f"/control?next={request.path}")
         return redirect(f"/merchant?next={request.path}")
@@ -67,13 +71,30 @@ def create_app():
         business = (current_user.business if current_user.is_authenticated and getattr(current_user, "business", None)
                     else Business.query.first())
         footer_setting = (SystemSetting.query.filter_by(business_id=business.id, key="footer_text").first() if business else None)
+        brand_setting = (SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None)
+        announcement_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_announcement").first() if business else None)
+        sidebar_ad_title_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_title").first() if business else None)
+        sidebar_ad_body_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_body").first() if business else None)
+        sidebar_ad_link_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_link").first() if business else None)
         footer = footer_setting.value if footer_setting else "All rights reserved · Denmart Merchants"
+        display_name = (brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else "Toror Mart")
+        pending_pos_approvals = pending_pay_approvals = 0
+        if request.path.startswith("/control") and current_user.is_authenticated and getattr(current_user, "business_id", None):
+            pending_pos_approvals = Sale.query.filter_by(business_id=current_user.business_id, status="PENDING_APPROVAL").count()
+            pending_pay_approvals = PayOrder.query.filter(PayOrder.business_id==current_user.business_id,
+                PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"])).count()
         from services.product_images import public_product_image, has_public_product_image
         return {
-            "business_name": business.name if business else "Denmart",
+            "business_name": display_name,
             "business_logo": business.logo_url if business else "",
             "currency": app.config["CURRENCY"],
             "footer_text": footer,
+            "storefront_announcement": (announcement_setting.value if announcement_setting else f"{display_name} online delivery service will be available from 27 October 2026."),
+            "sidebar_ad_title": sidebar_ad_title_setting.value if sidebar_ad_title_setting and sidebar_ad_title_setting.value else "",
+            "sidebar_ad_body": sidebar_ad_body_setting.value if sidebar_ad_body_setting and sidebar_ad_body_setting.value else "",
+            "sidebar_ad_link": sidebar_ad_link_setting.value if sidebar_ad_link_setting and sidebar_ad_link_setting.value else "/shop",
+            "pending_pos_approvals": pending_pos_approvals,
+            "pending_pay_approvals": pending_pay_approvals,
             "title": None,
             "product_image_url": public_product_image,
             "has_product_image": has_public_product_image,

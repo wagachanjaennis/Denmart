@@ -18,7 +18,7 @@ from extensions import db
 from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryTransaction, User,
                     AuditLog, Sale, SaleItem, Store, Business, Category, SystemError,
                     Expense, Role, SystemSetting, Permission, Customer, ProductAlias, ProductImage,
-                    Supplier, PurchaseOrder, PurchaseOrderItem, GatewaySmsMessage, LoyaltyAccount, LoyaltyTransaction, Shift, now)
+                    Supplier, PurchaseOrder, PurchaseOrderItem, GatewaySmsMessage, LoyaltyAccount, LoyaltyTransaction, Shift, PayOrder, now)
 from services.audit import audit
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
 from services.search import forgiving_rank
@@ -121,10 +121,98 @@ def _set_product_image(product, data_url, source_type="ADMIN_UPLOAD"):
 
 
 
+@bp.get(f"{ADMIN_BASE}/manifest.webmanifest")
+def admin_manifest():
+    base = request.host_url.rstrip("/")
+    business = Business.query.filter_by(id=(current_user.business_id if current_user.is_authenticated else None)).first() if current_user.is_authenticated else Business.query.order_by(Business.created_at).first()
+    brand = SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None
+    label = brand.value.strip() if brand and brand.value and brand.value.strip() else "Toror Mart"
+    return jsonify({"name": f"{label} Control Centre", "short_name": f"{label[:12]} Admin", "start_url": f"{base}/control/",
+                    "scope": f"{base}/control/", "display": "standalone", "background_color": "#f5faf7",
+                    "theme_color": "#10a37f", "description": f"Installable {label} administration workspace.",
+                    "icons": [{"src": f"{base}/static/pwa/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]})
+
+
+@bp.get(f"{ADMIN_BASE}/sw.js")
+def admin_service_worker():
+    js = """const CACHE='denmart-admin-static-v2';
+const ASSETS=['/static/css/app.css','/static/js/app.js','/static/pwa/icon.svg','/control/manifest.webmanifest'];
+self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).catch(()=>{}).then(()=>self.skipWaiting())));
+self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('denmart-admin-static-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
+self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.origin!==location.origin||e.request.method!=='GET')return;const staticAsset=u.pathname==='/static/css/app.css'||u.pathname==='/static/js/app.js'||u.pathname==='/static/pwa/icon.svg'||u.pathname==='/control/manifest.webmanifest';const privatePage=u.pathname.startsWith('/control/');if(!staticAsset&&!privatePage)return;e.respondWith(fetch(e.request).then(r=>{if(staticAsset&&r.ok){const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));}return r;}).catch(async()=>{if(staticAsset){const hit=await caches.match(e.request,{ignoreSearch:true});if(hit)return hit;}if(e.request.mode==='navigate')return new Response('<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Admin offline</title><main style="font:16px system-ui;max-width:36rem;margin:3rem auto;padding:1rem"><h1>Admin is offline</h1><p>Private records and approvals are not cached on this device. Reconnect to continue safely.</p><a href="/control/">Try again</a></main>',{status:503,headers:{'Content-Type':'text/html; charset=utf-8'}});return new Response('Offline. Reconnect to load current admin records.',{status:503,headers:{'Content-Type':'text/plain; charset=utf-8'}});}));});
+"""
+    return Response(js, mimetype="application/javascript", headers={"Service-Worker-Allowed": "/control/", "Cache-Control": "no-cache"})
+
+
+@bp.get(f"{ADMIN_BASE}/api/notifications")
+@admin_required()
+def admin_notifications_api():
+    business_id = current_user.business_id
+    payments = PayOrder.query.filter(PayOrder.business_id == business_id,
+        PayOrder.payment_status.in_(["PENDING", "MANUAL_REVIEW"])).count()
+    cash = Sale.query.filter_by(business_id=business_id, status="PENDING_APPROVAL").count()
+    return jsonify(ok=True, payments=payments, cash_sales=cash, total=payments + cash)
+
+
+@bp.get(f"{ADMIN_BASE}/pos-approvals")
+@admin_required()
+def pos_approvals():
+    sales = Sale.query.filter_by(business_id=current_user.business_id, status="PENDING_APPROVAL").order_by(Sale.created_at.desc()).limit(250).all()
+    items_by_sale = {sale.id: SaleItem.query.filter_by(sale_id=sale.id).all() for sale in sales}
+    cashier_ids = {sale.cashier_id for sale in sales}
+    cashiers = {u.id: u.name for u in User.query.filter(User.id.in_(cashier_ids)).all()} if cashier_ids else {}
+    stores = {s.id: s.name for s in Store.query.filter(Store.business_id == current_user.business_id).all()}
+    return render_template("admin/pos_approvals.html", sales=sales, items_by_sale=items_by_sale, cashiers=cashiers, stores=stores)
+
+
+@bp.post(f"{ADMIN_BASE}/pos-approvals/<sale_id>/approve")
+@admin_required()
+def approve_pos_cash_sale(sale_id):
+    sale = Sale.query.filter_by(id=sale_id, business_id=current_user.business_id).with_for_update().first_or_404()
+    if sale.status != "PENDING_APPROVAL":
+        flash("This sale is no longer awaiting approval.", "error"); return redirect(url_for("admin.pos_approvals"))
+    items = SaleItem.query.filter_by(sale_id=sale.id).all()
+    prepared = []
+    for item in items:
+        sp = StoreProduct.query.filter_by(store_id=sale.store_id, product_id=item.product_id).with_for_update().first()
+        qty = Decimal(str(item.quantity or 0))
+        if not sp or Decimal(str(sp.stock_quantity or 0)) < qty or Decimal(str(sp.reserved_quantity or 0)) < qty:
+            db.session.rollback(); flash(f"Approval stopped: stock reservation is no longer valid for {item.product_name_snapshot}. No stock was deducted.", "error")
+            return redirect(url_for("admin.pos_approvals"))
+        prepared.append((item, sp, qty))
+    for item, sp, qty in prepared:
+        sp.reserved_quantity = Decimal(str(sp.reserved_quantity or 0)) - qty
+        sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) - qty
+        db.session.add(InventoryTransaction(store_id=sp.store_id, product_id=sp.product_id, transaction_type="SALE", quantity=-qty,
+            unit_cost=sp.cost_price, reference_type="SALE", reference_id=sale.id, notes="Cash sale stock deducted after administrator approval", created_by=current_user.id))
+    sale.status = "COMPLETED"; sale.completed_at = now()
+    db.session.commit(); audit("POS_CASH_SALE_APPROVED", "Sale", sale.id, new_values={"total": str(sale.total), "approved_by": current_user.name})
+    flash(f"Cash sale {sale.receipt_number} approved. Stock deducted and receipt enabled.", "success")
+    return redirect(url_for("admin.pos_approvals"))
+
+
+@bp.post(f"{ADMIN_BASE}/pos-approvals/<sale_id>/reject")
+@admin_required()
+def reject_pos_cash_sale(sale_id):
+    sale = Sale.query.filter_by(id=sale_id, business_id=current_user.business_id).with_for_update().first_or_404()
+    if sale.status != "PENDING_APPROVAL":
+        flash("This sale is no longer awaiting approval.", "error"); return redirect(url_for("admin.pos_approvals"))
+    for item in SaleItem.query.filter_by(sale_id=sale.id).all():
+        sp = StoreProduct.query.filter_by(store_id=sale.store_id, product_id=item.product_id).with_for_update().first()
+        if sp:
+            sp.reserved_quantity = max(Decimal("0"), Decimal(str(sp.reserved_quantity or 0)) - Decimal(str(item.quantity or 0)))
+    sale.status = "REJECTED"; sale.completed_at = None
+    db.session.commit(); audit("POS_CASH_SALE_REJECTED", "Sale", sale.id, new_values={"total": str(sale.total), "rejected_by": current_user.name})
+    flash(f"Cash sale {sale.receipt_number} rejected. Its stock reservation was released.", "success")
+    return redirect(url_for("admin.pos_approvals"))
+
+
 @bp.get(f"{ADMIN_BASE}/daily-report")
 @admin_required("reports.view")
 def daily_report():
     business_id=current_user.business_id
+    brand_row=SystemSetting.query.filter_by(business_id=business_id,key="brand_name").first()
+    business_name=(brand_row.value.strip() if brand_row and brand_row.value and brand_row.value.strip() else "Toror Mart")
     today_sale=db.func.date(Sale.created_at)==db.func.current_date()
     today_expense=db.func.date(Expense.incurred_at)==db.func.current_date()
     today_inventory=db.func.date(InventoryTransaction.created_at)==db.func.current_date()
@@ -134,7 +222,7 @@ def daily_report():
     items=db.session.query(db.func.coalesce(db.func.sum(SaleItem.quantity),0)).join(Sale,Sale.id==SaleItem.sale_id).filter(Sale.business_id==business_id,Sale.status=="COMPLETED",today_sale).scalar() or 0
     sales=Decimal(str(sales)); expenses=Decimal(str(expenses)); cogs=Decimal(str(cogs)); items=Decimal(str(items))
     gross=sales-cogs; net=gross-expenses
-    return render_template("admin/daily_report.html",business_name=current_user.business.name if current_user.business else "Denmart",
+    return render_template("admin/daily_report.html",business_name=business_name,
                            total_sales=sales,expenses=expenses,cogs=cogs,gross_profit=gross,net_result=net,items=items,report_date=now())
 
 
@@ -228,26 +316,34 @@ def live_messages_api():
 @bp.get(f"{ADMIN_BASE}/products")
 @admin_required("products.view")
 def products():
-    q = request.args.get("q", "").strip()
+    q = request.args.get("q", "").strip()[:160]
     store_id = request.args.get("store_id", "").strip()
     category_id = request.args.get("category_id", "").strip()
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    page_size = 100
     query = StoreProduct.query.join(Product).join(Store).filter(Store.business_id == current_user.business_id)
     if store_id:
         query = query.filter(StoreProduct.store_id == store_id)
     if category_id:
         query = query.filter(Product.category_id == category_id)
-    items = query.order_by(Product.name).limit(10000).all()
-    if q and items:
-        aliases_by_product = {}
-        ids = [item.product_id for item in items]
-        for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
-            aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
-        items = forgiving_rank(items, q, aliases_by_product=aliases_by_product, limit=5000, minimum=0.50)
+    if q:
+        pattern = f"%{q}%"
+        alias_ids = [x[0] for x in db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(pattern)).limit(300).all()]
+        match_terms = [Product.name.ilike(pattern), Product.brand.ilike(pattern), Product.sku.ilike(pattern), Product.barcode.ilike(pattern), Product.search_keywords.ilike(pattern)]
+        if alias_ids:
+            match_terms.append(Product.id.in_(alias_ids))
+        query = query.filter(or_(*match_terms))
+    total_rows = query.count()
+    items = query.order_by(Product.name, Store.name).offset((page - 1) * page_size).limit(page_size).all()
     return render_template(
         "admin/products.html", items=items,
-        stores=Store.query.filter_by(business_id=current_user.business_id).order_by(Store.name).all(),
-        categories=Category.query.filter_by(business_id=current_user.business_id).order_by(Category.sort_order, Category.name).all(),
-        q=q, store_id=store_id, category_id=category_id,
+        stores=Store.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Store.name).all(),
+        categories=Category.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Category.sort_order, Category.name).all(),
+        q=q, store_id=store_id, category_id=category_id, page=page, page_size=page_size,
+        total_rows=total_rows, total_pages=max(1, (total_rows + page_size - 1) // page_size),
     )
 
 
@@ -370,6 +466,10 @@ def product_barcode_lookup():
             category_id=category.id if category else "", unit=str(item.get("unit") or "unit"),
             pack_size=str(item.get("pack_size") or ""), sku="", description="",
             image_url=real_product_image_url(name), message="Matched in Denmart's bundled catalogue. Prices and stock were left for you to enter.")
+
+    if request.args.get("fast") == "1":
+        return jsonify(ok=True, found=False, barcode=barcode,
+                       message="No local product match. Barcode retained; type the product name and save without waiting for online lookups.")
 
     external = _external_barcode_lookup(barcode)
     if external:
@@ -563,6 +663,106 @@ def create_product():
     audit("PRODUCT_CREATED", "Product", product.id, new_values={"name": name, "sku": sku, "barcode": barcode, "stores": len(stores), "opening_stock": str(stock)})
     flash(f"{name} added to {len(stores)} mart(s).", "success")
     return redirect(url_for("admin.product_edit", product_id=product.id, store_id=stores[0].id))
+
+
+@bp.post(f"{ADMIN_BASE}/api/products/quick-create")
+@admin_required("products.create")
+def quick_create_product():
+    """Fast, local-first barcode/keyboard product capture without a page reload."""
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()[:240]
+    barcode = re.sub(r"\s+", "", str(data.get("barcode") or "")).strip()[:80] or None
+    store_id = str(data.get("store_id") or "").strip()
+    category_id = str(data.get("category_id") or "").strip() or None
+    brand = str(data.get("brand") or "").strip()[:160] or None
+    unit = str(data.get("unit") or "unit").strip()[:40] or "unit"
+    pack_size = str(data.get("pack_size") or "").strip()[:80] or unit
+    sku = str(data.get("sku") or "").strip()[:80] or None
+    description = str(data.get("description") or "").strip()[:1200] or None
+    if not name:
+        return jsonify(ok=False, error="name_required", message="Enter a product name. Barcode-only capture is allowed after adding a name."), 400
+    store = Store.query.filter_by(id=store_id, business_id=current_user.business_id, is_active=True).first() if store_id else Store.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Store.name).first()
+    if not store:
+        return jsonify(ok=False, error="store_required", message="Select an active mart first."), 400
+    if category_id and not Category.query.filter_by(id=category_id, business_id=current_user.business_id, is_active=True).first():
+        return jsonify(ok=False, error="invalid_category", message="Choose a valid category."), 400
+    try:
+        raw_price = str(data.get("selling_price") or "").strip()
+        raw_cost = str(data.get("cost_price") or "").strip()
+        raw_stock = str(data.get("stock_quantity") or "").strip()
+        price = Decimal(raw_price) if raw_price else None
+        cost = Decimal(raw_cost) if raw_cost else None
+        quantity = Decimal(raw_stock) if raw_stock else Decimal("0")
+    except (InvalidOperation, ValueError, TypeError):
+        return jsonify(ok=False, error="invalid_number", message="Check selling price, cost price and quantity."), 400
+    vals = [x for x in (price, cost, quantity) if x is not None]
+    if not all(x.is_finite() for x in vals) or quantity < 0 or (price is not None and price < 0) or (cost is not None and cost < 0):
+        return jsonify(ok=False, error="invalid_number", message="Prices and stock must be finite non-negative numbers."), 400
+    if price is not None and price > 0 and cost is not None and price < cost:
+        return jsonify(ok=False, error="selling_below_cost", message=f"Selling price (KES {price:.2f}) is below cost price (KES {cost:.2f})."), 400
+    if price is not None and price == 0 and cost is not None and cost > 0:
+        return jsonify(ok=False, error="selling_price_required", message="Enter a selling price or leave both price fields blank for identity-only capture."), 400
+    if sku:
+        duplicate_sku = Product.query.filter_by(sku=sku).first()
+        if duplicate_sku and (not barcode or duplicate_sku.barcode != barcode):
+            return jsonify(ok=False, error="duplicate_sku", message="That SKU is already in use."), 409
+    try:
+        product = Product.query.filter_by(barcode=barcode).first() if barcode else None
+        created = False
+        if product is None:
+            from seed import slugify
+            base_slug = slugify(name) or "product"
+            slug, number = base_slug, 2
+            while Product.query.filter_by(slug=slug).first():
+                slug = f"{base_slug}-{number}"; number += 1
+            product = Product(name=name, slug=slug, barcode=barcode, brand=brand, category_id=category_id,
+                              unit=unit, pack_size=pack_size, sku=sku, description=description, status="ACTIVE",
+                              search_keywords=" ".join(x for x in [name.lower(), (brand or "").lower(), (description or "").lower()] if x))
+            db.session.add(product); db.session.flush(); created = True
+            db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
+        else:
+            # Shared catalogue names should not be overwritten by another store's scan.
+            if not product.name.strip(): product.name = name
+            if not product.category_id and category_id: product.category_id = category_id
+            if not product.brand and brand: product.brand = brand
+            if not product.unit: product.unit = unit
+            if not product.pack_size: product.pack_size = pack_size
+        sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
+        if sp is None:
+            sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost or Decimal("0"),
+                              selling_price=price or Decimal("0"), minimum_price=price or Decimal("0"),
+                              maximum_price=(price * Decimal("1.30") if price and price > 0 else None),
+                              stock_quantity=Decimal("0"), reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
+                              is_available=bool(price and price > 0), available_online=bool(price and price > 0),
+                              available_pos=bool(price and price > 0))
+            db.session.add(sp); db.session.flush()
+        else:
+            if price is not None and price > 0:
+                old_price = Decimal(str(sp.selling_price or 0))
+                if old_price != price:
+                    db.session.add(PriceHistory(store_product_id=sp.id, old_price=old_price, new_price=price,
+                                                reason="Quick product entry", source="QUICK_ENTRY", changed_by=current_user.id))
+                sp.selling_price = price; sp.minimum_price = price; sp.maximum_price = price * Decimal("1.30")
+                sp.is_available = True; sp.available_pos = True; sp.available_online = True
+            if cost is not None: sp.cost_price = cost
+        if quantity > 0:
+            sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) + quantity
+            db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
+                transaction_type="OPENING_STOCK" if created else "ADJUSTMENT_IN", quantity=quantity,
+                unit_cost=sp.cost_price, reference_type="QUICK_PRODUCT_ENTRY", reference_id=sp.id,
+                notes="Stock added through quick product entry; existing stock was preserved", created_by=current_user.id))
+        db.session.commit()
+        audit("PRODUCT_QUICK_SAVED", "Product", product.id, new_values={"name": product.name, "barcode": barcode,
+              "store_id": store.id, "selling_price": str(sp.selling_price), "cost_price": str(sp.cost_price),
+              "quantity_added": str(quantity), "created": created})
+        return jsonify(ok=True, created=created, message=(f"{product.name} saved. Add the next product." if sp.selling_price and sp.selling_price > 0 else f"{product.name} captured. Add prices before enabling it for sale."),
+                       product={"id": product.id, "name": product.name, "barcode": product.barcode or "", "store": store.name,
+                                "selling_price": str(sp.selling_price), "cost_price": str(sp.cost_price), "stock": str(sp.stock_quantity),
+                                "available": bool(sp.is_available)})
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Quick product save failed")
+        return jsonify(ok=False, error="save_failed", message="Could not save this product. Nothing was partially saved; check the fields and try again."), 500
 
 
 @bp.post(f"{ADMIN_BASE}/products/import")
@@ -1417,10 +1617,40 @@ def settings():
     business=Business.query.filter_by(id=business_id).first_or_404()
     footer_setting=SystemSetting.query.filter_by(business_id=business_id,key="footer_text").first()
     loyalty_setting=SystemSetting.query.filter_by(business_id=business_id,key="loyalty_points_per_100").first()
+    brand_setting=SystemSetting.query.filter_by(business_id=business_id,key="brand_name").first()
+    announcement_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_announcement").first()
+    sidebar_ad_title_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_title").first()
+    sidebar_ad_body_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_body").first()
+    sidebar_ad_link_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_link").first()
+    control2_approval_setting=SystemSetting.query.filter_by(business_id=business_id,key="control2_can_approve_payments").first()
+    storefront_orders_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_orders_enabled").first()
     if request.method=="POST":
         name=(request.form.get("business_name") or "").strip()[:200]
+        brand_name=(request.form.get("brand_name") or "").strip()[:100]
+        announcement=(request.form.get("storefront_announcement") or "").strip()[:300]
+        sidebar_ad_title=(request.form.get("sidebar_ad_title") or "").strip()[:100]
+        sidebar_ad_body=(request.form.get("sidebar_ad_body") or "").strip()[:300]
+        sidebar_ad_link=(request.form.get("sidebar_ad_link") or "").strip()[:300]
+        control2_can_approve = "1" if request.form.get("control2_can_approve_payments") == "1" else "0"
+        storefront_orders_enabled = "1" if request.form.get("storefront_orders_enabled") == "1" else "0"
+        if sidebar_ad_link and not (sidebar_ad_link.startswith("/") or sidebar_ad_link.startswith("https://")):
+            sidebar_ad_link = ""
         footer=(request.form.get("footer_text") or "").strip()[:500]
         if name: business.name=name
+        brand_setting=brand_setting or SystemSetting(business_id=business_id,key="brand_name")
+        brand_setting.value=brand_name or "Toror Mart"
+        announcement_setting=announcement_setting or SystemSetting(business_id=business_id,key="storefront_announcement")
+        announcement_setting.value=announcement
+        sidebar_ad_title_setting=sidebar_ad_title_setting or SystemSetting(business_id=business_id,key="storefront_sidebar_ad_title")
+        sidebar_ad_title_setting.value=sidebar_ad_title
+        sidebar_ad_body_setting=sidebar_ad_body_setting or SystemSetting(business_id=business_id,key="storefront_sidebar_ad_body")
+        sidebar_ad_body_setting.value=sidebar_ad_body
+        sidebar_ad_link_setting=sidebar_ad_link_setting or SystemSetting(business_id=business_id,key="storefront_sidebar_ad_link")
+        sidebar_ad_link_setting.value=sidebar_ad_link
+        control2_approval_setting=control2_approval_setting or SystemSetting(business_id=business_id,key="control2_can_approve_payments")
+        control2_approval_setting.value=control2_can_approve
+        storefront_orders_setting=storefront_orders_setting or SystemSetting(business_id=business_id,key="storefront_orders_enabled")
+        storefront_orders_setting.value=storefront_orders_enabled
         footer_setting=footer_setting or SystemSetting(business_id=business_id,key="footer_text")
         footer_setting.value=footer
         try: lp=max(0,int(request.form.get("loyalty_points_per_100","1") or "1"))
@@ -1436,6 +1666,13 @@ def settings():
         db.session.commit(); audit("SETTINGS_UPDATED","Business",business_id,new_values={"business_name":business.name})
         flash("Settings saved.","success")
     return render_template("admin/settings.html",business=business,footer_text=footer_setting.value if footer_setting else "",
+                           brand_name=brand_setting.value if brand_setting and brand_setting.value else "Toror Mart",
+                           storefront_announcement=(announcement_setting.value if announcement_setting else f"{brand_setting.value.strip() if brand_setting and brand_setting.value and brand_setting.value.strip() else 'Toror Mart'} online delivery service will be available from 27 October 2026."),
+                           sidebar_ad_title=sidebar_ad_title_setting.value if sidebar_ad_title_setting else "",
+                           sidebar_ad_body=sidebar_ad_body_setting.value if sidebar_ad_body_setting else "",
+                           sidebar_ad_link=sidebar_ad_link_setting.value if sidebar_ad_link_setting else "",
+                           control2_can_approve_payments=(control2_approval_setting.value if control2_approval_setting else "0") == "1",
+                           storefront_orders_enabled=(storefront_orders_setting.value if storefront_orders_setting else "0") == "1",
                            loyalty_points_per_100=loyalty_setting.value if loyalty_setting else "1")
 
 def _reports_payload(days):
@@ -1560,7 +1797,9 @@ def audit_page():
         needle = f"%{q}%"
         query = query.filter(or_(AuditLog.action.ilike(needle), AuditLog.entity_type.ilike(needle), AuditLog.entity_id.ilike(needle)))
     logs = query.order_by(AuditLog.created_at.desc()).limit(500).all()
-    return render_template("admin/audit.html", logs=logs, q=q)
+    user_ids = {row.user_id for row in logs if row.user_id}
+    audit_users = {user.id: user for user in User.query.filter(User.business_id == current_user.business_id, User.id.in_(user_ids)).all()} if user_ids else {}
+    return render_template("admin/audit.html", logs=logs, audit_users=audit_users, q=q)
 
 
 @bp.route(f"{ADMIN_BASE}/system-errors", methods=["GET", "POST"])

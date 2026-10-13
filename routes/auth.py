@@ -10,7 +10,7 @@ ADMIN_PORTAL = "/control"
 
 def _login(target):
     if current_user.is_authenticated and session.get("portal") == target:
-        return redirect(ADMIN_PORTAL if target == "admin" else "/merchant/on")
+        return redirect(ADMIN_PORTAL if target == "admin" else "/control2" if target == "control2" else "/merchant/on")
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
@@ -18,6 +18,8 @@ def _login(target):
         if user and user.is_active and user.check_password(password):
             if target == "admin" and not (user.role and user.role.name == "OWNER"):
                 flash("Control-centre access is reserved for the master administrator.", "error")
+            elif target == "control2" and not (user.role and user.role.name == "MANAGER"):
+                flash("Control 2 access is reserved for manager accounts created by the master administrator.", "error")
             elif target == "pos" and not (user.is_active and user.business_id and user.role):
                 flash("This account is not enabled for merchant access.", "error")
             else:
@@ -36,11 +38,11 @@ def _login(target):
                 session["portal"] = target
                 user.last_login_at = datetime.now(timezone.utc)
                 db.session.commit()
-                return redirect(ADMIN_PORTAL if target == "admin" else "/merchant/on")
+                return redirect(ADMIN_PORTAL if target == "admin" else "/control2" if target == "control2" else "/merchant/on")
         else:
             flash("Invalid username or password.", "error")
     return render_template("auth/login.html", target=target,
-                           pwa_manifest="/merchant/manifest.webmanifest" if target == "pos" else None)
+                           pwa_manifest=("/merchant/manifest.webmanifest" if target == "pos" else "/control2/manifest.webmanifest" if target == "control2" else None))
 
 
 @bp.route("/merchants", methods=["GET", "POST"])
@@ -64,6 +66,13 @@ def hidden_admin_portal():
     return _login("admin")
 
 
+@bp.route("/control2", methods=["GET", "POST"])
+def manager_portal_login():
+    if current_user.is_authenticated and session.get("portal") == "control2" and current_user.role and current_user.role.name == "MANAGER":
+        return redirect("/control2/")
+    return _login("control2")
+
+
 @bp.post("/logout")
 @login_required
 def logout():
@@ -73,4 +82,4 @@ def logout():
     portal = session.get("portal")
     logout_user()
     session.clear()
-    return redirect("/control" if portal == "admin" else "/merchant" if portal == "pos" else "/")
+    return redirect("/control" if portal == "admin" else "/control2" if portal == "control2" else "/merchant" if portal == "pos" else "/")

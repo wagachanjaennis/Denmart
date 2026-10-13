@@ -16,6 +16,12 @@
   const productIdInput = document.getElementById('productId');
   const nameInput = document.getElementById('nameInput');
   const quantityInput = document.getElementById('quantityInput');
+  const sellingPriceInput = document.getElementById('sellingPriceInput');
+  const costPriceInput = document.getElementById('costPriceInput');
+  const categoryInput = document.getElementById('categoryInput');
+  const brandInput = document.getElementById('brandInput');
+  const unitInput = document.getElementById('unitInput');
+  const packSizeInput = document.getElementById('packSizeInput');
   const currentStock = document.getElementById('currentStock');
   const afterStock = document.getElementById('afterStock');
   const saveButton = document.getElementById('saveButton');
@@ -78,6 +84,12 @@
     currentBarcode = barcode;
     productIdInput.value = product?.id || '';
     nameInput.value = product?.name || '';
+    if (sellingPriceInput) sellingPriceInput.value = product?.selling_price || '';
+    if (costPriceInput) costPriceInput.value = product?.cost_price || '';
+    if (categoryInput && product?.category_id) categoryInput.value = product.category_id;
+    if (brandInput) brandInput.value = product?.brand || '';
+    if (unitInput) unitInput.value = product?.unit || 'unit';
+    if (packSizeInput) packSizeInput.value = product?.pack_size || ''; 
     currentStock.dataset.value = String(product?.stock || 0);
     currentStock.textContent = fmtNumber(product?.stock || 0);
     itemMode.textContent = product ? 'Existing product' : 'New product';
@@ -277,6 +289,12 @@
         product_id: productIdInput.value || '',
         name: nameInput.value.trim(),
         quantity: quantityInput.value,
+        selling_price: sellingPriceInput?.value || '',
+        cost_price: costPriceInput?.value || '',
+        category_id: categoryInput?.value || '',
+        brand: brandInput?.value || '',
+        unit: unitInput?.value || 'unit',
+        pack_size: packSizeInput?.value || '',
         store_id: storeSelect.value,
       };
       const response = await fetch('/scan/api/save', {
@@ -305,6 +323,11 @@
       afterStock.textContent = '—';
       nameInput.value = '';
       quantityInput.value = '';
+      if (sellingPriceInput) sellingPriceInput.value = '';
+      if (costPriceInput) costPriceInput.value = '';
+      if (brandInput) brandInput.value = '';
+      if (unitInput) unitInput.value = 'unit';
+      if (packSizeInput) packSizeInput.value = '';
       updateSaveAvailability();
       if (scanning) setStatus('Scanning…', 'ok');
       barcodeInput.focus({ preventScroll: true });

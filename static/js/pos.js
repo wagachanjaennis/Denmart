@@ -4,8 +4,26 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&
 let cart=[];
 const HOLD_KEY='denmart-held-sales-v7';
 const VIEW_TITLES={sale:'New sale',catalogue:'Catalogue',held:'Held sales',summary:'Today',shift:'Shift'};
-async function apiJSON(url,opts={}){const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...opts});let d={};try{d=await r.json()}catch(_e){}return {r,d}}
-function toast(msg){const el=$('#posToast');if(el){el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2200)}}
+async function apiJSON(url,opts={}){try{const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...opts});let d={};try{d=await r.json()}catch(_e){}return {r,d}}catch(error){return {r:{ok:false,status:0},d:{error:'connection_unavailable',message:'Connection unavailable.'}}}}
+function toast(msg){const el=$('#posToast');if(el){el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2600)}}
+const posStoreMeta=document.querySelector('meta[name="pos-store-id"]')?.content||'';
+if(posStoreMeta){try{localStorage.setItem('denmart-pos-current-store',posStoreMeta)}catch(_e){}}
+const posStoreId=posStoreMeta||(()=>{try{return localStorage.getItem('denmart-pos-current-store')||'default'}catch(_e){return 'default'}})();
+const OFFLINE_CATALOG_KEY='denmart-pos-catalog-'+posStoreId;
+const OFFLINE_SALES_KEY='denmart-pos-pending-cash-'+posStoreId;
+const MAX_OFFLINE_CATALOGUE=10000;
+function readOfflineCatalogue(){try{const raw=JSON.parse(localStorage.getItem(OFFLINE_CATALOG_KEY)||'[]');return Array.isArray(raw)?raw:[]}catch(_e){return []}}
+function writeOfflineCatalogue(rows){try{localStorage.setItem(OFFLINE_CATALOG_KEY,JSON.stringify((rows||[]).slice(0,MAX_OFFLINE_CATALOGUE)))}catch(_e){toast('This device storage is full. Offline catalogue may be incomplete.')}}
+function mergeOfflineCatalogue(rows){if(!Array.isArray(rows)||!rows.length)return;const current=readOfflineCatalogue();const byId=new Map(current.map(x=>[x.id,x]));rows.forEach(x=>{if(x&&x.id)byId.set(x.id,{id:x.id,name:x.name||'',barcode:x.barcode||'',price:Number(x.price||0),stock:Number(x.stock||0),available:Number(x.available??x.stock??0)})});writeOfflineCatalogue([...byId.values()].sort((a,b)=>String(a.name).localeCompare(String(b.name))).slice(0,MAX_OFFLINE_CATALOGUE))}
+function offlineFindBarcode(code){const q=normalizeScannedBarcode(code);return readOfflineCatalogue().find(x=>normalizeScannedBarcode(x.barcode)===q)}
+function offlineSearch(q){const text=String(q||'').trim().toLocaleLowerCase();const rows=readOfflineCatalogue();if(!text)return rows.slice(0,50);const exact=rows.filter(x=>normalizeScannedBarcode(x.barcode)===normalizeScannedBarcode(text));if(exact.length)return exact.slice(0,10);return rows.filter(x=>String(x.name||'').toLocaleLowerCase().includes(text)||String(x.barcode||'').toLocaleLowerCase().includes(text)).slice(0,50)}
+let offlineWarmBusy=false;
+async function warmOfflineCatalogue(){if(offlineWarmBusy||!navigator.onLine||!posStoreMeta)return;offlineWarmBusy=true;try{let offset=0,total=0;do{const z=await apiJSON('/api/pos/products/offline-catalogue?offset='+offset+'&limit=500');if(!z.r.ok||!z.d.ok)break;total=Number(z.d.total||0);mergeOfflineCatalogue(z.d.items||[]);offset+=Number(z.d.items?.length||0);if(!z.d.items?.length||offset>=Math.min(total,MAX_OFFLINE_CATALOGUE))break;if(offset>0)await new Promise(resolve=>setTimeout(resolve,100));}while(offset<total)}finally{offlineWarmBusy=false}}
+function readOfflineSales(){try{const rows=JSON.parse(localStorage.getItem(OFFLINE_SALES_KEY)||'[]');return Array.isArray(rows)?rows:[]}catch(_e){return []}}
+function updateOfflineQueueCount(){const n=readOfflineSales().length;document.querySelectorAll('#offlineQueueCount').forEach(el=>{el.textContent=n?`${n} sale${n===1?'':'s'} waiting to sync`:'Offline queue clear'});}
+function queueOfflineCashSale(items,reason='Offline'){if(!Array.isArray(items)||!items.length)return false;const queue=readOfflineSales();if(queue.length>=200){toast('Offline queue is full. This sale was NOT saved; reconnect and sync before accepting more sales.');return false;}const ref='OFF-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,8).toUpperCase();queue.push({client_ref:ref,items:items.map(x=>({store_product_id:x.id,quantity:x.qty})),queued_at:new Date().toISOString()});try{localStorage.setItem(OFFLINE_SALES_KEY,JSON.stringify(queue));updateOfflineQueueCount();}catch(_e){toast('Device storage is full. This sale was NOT queued. Keep the items and reconnect.');return false;}toast(`${reason}: saved on device, NOT completed; approval required`);const note=$('#posCashFeedback');if(note)note.textContent=`${queue.length} cash sale(s) waiting to sync. These are NOT completed or paid. Keep goods until the server receives and an administrator approves each sale.`;return true;}
+let offlineSyncBusy=false;
+async function syncOfflineSales(){if(offlineSyncBusy||!navigator.onLine)return;const queue=readOfflineSales();if(!queue.length)return;offlineSyncBusy=true;try{let remaining=[...queue],sent=0;for(let start=0;start<queue.length;start+=50){const chunk=queue.slice(start,start+50);const z=await apiJSON('/api/pos/sync/offline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sales:chunk})});if(!z.r.ok||!Array.isArray(z.d.results))break;const accepted=new Set();z.d.results.forEach((result,index)=>{if(result.ok)accepted.add(chunk[index]?.client_ref)});sent+=accepted.size;remaining=remaining.filter(x=>!accepted.has(x.client_ref));}try{localStorage.setItem(OFFLINE_SALES_KEY,JSON.stringify(remaining))}catch(_e){}updateOfflineQueueCount();if(sent){const note=$('#posCashFeedback');if(note)note.textContent=`${sent} offline sale(s) reached the server and await administrator approval. They are NOT completed until approved.`;toast(`${sent} offline sale(s) synced · approval still required`);}}finally{offlineSyncBusy=false}}
 function add(id,name,price){if(posPaymentPoll)return toast('An electronic payment is active. Resolve it before changing this basket.');const i=cart.find(x=>x.id===id);if(i)i.qty+=1;else cart.push({id,name,price:Number(price),qty:1});renderCart()}
 function productButton(x){return `<button class="product-result" onclick="add('${esc(x.id)}','${esc(x.name)}',${Number(x.price||0)})"><span><strong>${esc(x.name)}</strong><small>${esc(x.barcode||'')}</small></span><b>KES ${money(x.price)}</b></button>`}
 function renderCart(){const el=$('#saleLines'),totalEl=$('#saleTotal');if(!el)return;let total=0;el.innerHTML=cart.map((x,i)=>{const line=x.price*x.qty;total+=line;return `<div class="sale-line"><div><strong>${esc(x.name)}</strong><small>KES ${money(x.price)} each</small></div><div class="cart-qty"><button onclick="cartQty(${i},-1)">−</button><b>${x.qty}</b><button onclick="cartQty(${i},1)">+</button><strong>KES ${money(line)}</strong></div></div>`}).join('')||'<div class="muted">Basket is empty.</div>';if(totalEl)totalEl.textContent=money(total)}
@@ -23,28 +41,21 @@ async function searchPOS(options={}){
     lastBarcodeHandled=q;lastBarcodeHandledAt=Date.now();
     barcodeRequestInFlight=q;
     try{
+      if(!navigator.onLine){const cached=offlineFindBarcode(q);if(cached){add(cached.id,cached.name,cached.price);renderProductResults([],`${cached.name} found in the offline catalogue.`);toast(`${cached.name} added from offline catalogue`);if(input)input.value='';}else{renderProductResults([],`Barcode ${q} is not in this device's cached catalogue. Reconnect or add it to Products first.`);toast('Barcode not available offline');}return;}
       const z=await apiJSON('/api/pos/products/barcode/'+encodeURIComponent(q));
-      if(z.r.ok&&z.d?.id){
-        add(z.d.id,z.d.name,z.d.price);
-        lastBarcodeHandled=q;lastBarcodeHandledAt=Date.now();
-        renderProductResults([],`${z.d.name} added to basket.`);
-        toast(`${z.d.name} added · KES ${money(z.d.price)}`);
-        if(input){setTimeout(()=>{if(input.value.trim()===q)input.value='';},80)}
-        return;
-      }
-      // A barcode is an identifier, not a text-search query. Never fall back to
-      // fuzzy search here: that was what showed milk/bread for unrelated codes.
-      renderProductResults([],`Barcode ${q} was not found in this mart's active POS catalogue. Add or link the product in Products first.`);
-      toast('Barcode not found in this mart');
-      return;
+      if(z.r.ok&&z.d?.id){mergeOfflineCatalogue([{...z.d,available:z.d.stock??0}]);add(z.d.id,z.d.name,z.d.price);lastBarcodeHandled=q;lastBarcodeHandledAt=Date.now();renderProductResults([],`${z.d.name} added to basket.`);toast(`${z.d.name} added · KES ${money(z.d.price)}`);if(input){setTimeout(()=>{if(input.value.trim()===q)input.value='';},80)}return;}
+      const cached=offlineFindBarcode(q);if(z.r.status===0&&cached){add(cached.id,cached.name,cached.price);renderProductResults([],`${cached.name} found in the offline catalogue.`);toast(`${cached.name} added from offline catalogue`);return;}
+      renderProductResults([],z.r.status===0?`Could not reach the server and barcode ${q} is not cached on this device.`:`Barcode ${q} was not found in this mart's active POS catalogue. Add or link the product in Products first.`);toast('Barcode not found');return;
     }finally{barcodeRequestInFlight=''}
   }
+  if(!navigator.onLine){const cached=offlineSearch(q);renderProductResults(cached,cached.length?'Offline catalogue results. Stock/price must be confirmed when syncing.':'No cached match. Reconnect to search the full catalogue.');return;}
   const z=await apiJSON('/api/pos/products/search?q='+encodeURIComponent(q));
-  if(z.r.ok)renderProductResults(z.d.items||[]);else renderProductResults([],'Product search is temporarily unavailable.');
+  if(z.r.ok){mergeOfflineCatalogue(z.d.items||[]);renderProductResults(z.d.items||[])}else{const cached=offlineSearch(q);if(cached.length)renderProductResults(cached,'Connection unavailable · showing saved catalogue matches.');else renderProductResults([],'Product search is temporarily unavailable.');}
 }
 async function autoScanPOS(value){const q=String(value||'').trim();if(!q)return;lastScannerBurstAt=Date.now();await searchPOS({scanner:true})}
-async function searchCatalogue(){const q=$('#catalogueSearch')?.value.trim()||'';const z=await apiJSON('/api/pos/products/search?q='+encodeURIComponent(q));const el=$('#catalogueResults');if(el)el.innerHTML=z.r.ok?(z.d.items||[]).map(productButton).join('')||'<div class="pos-empty">No matching product.</div>':'<div class="pos-empty">Catalogue unavailable.</div>'}
-async function makeSale(){if(posPaymentPoll)return toast('An electronic payment is active. Wait for its receipt or administrator review before completing a cash sale.');if(!cart.length)return toast('Basket is empty');const z=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart.map(x=>({store_product_id:x.id,quantity:x.qty}))})});if(!z.r.ok)return toast(z.d.error||'Sale failed');toast('Cash sale complete · '+z.d.receipt_number);window.open('/merchant/receipt/'+encodeURIComponent(z.d.receipt_number),'_blank','noopener');cart=[];renderCart()}
+async function searchCatalogue(){const q=$('#catalogueSearch')?.value.trim()||'';const el=$('#catalogueResults');if(!navigator.onLine){const rows=offlineSearch(q);if(el)el.innerHTML=rows.map(productButton).join('')||'<div class="pos-empty">No cached match available offline.</div>';return}const z=await apiJSON('/api/pos/products/search?q='+encodeURIComponent(q));if(z.r.ok){mergeOfflineCatalogue(z.d.items||[]);if(el)el.innerHTML=(z.d.items||[]).map(productButton).join('')||'<div class="pos-empty">No matching product.</div>'}else{const rows=offlineSearch(q);if(el)el.innerHTML=rows.map(productButton).join('')||'<div class="pos-empty">Catalogue unavailable.</div>'}}
+async function makeSale(){if(posPaymentPoll)return toast('An electronic payment is active. Wait for its receipt or administrator review before submitting a cash sale.');if(!cart.length)return toast('Basket is empty');const snapshot=cart.map(x=>({...x}));if(!navigator.onLine){if(queueOfflineCashSale(snapshot,'Offline')){cart=[];renderCart()}return}const z=await apiJSON('/api/pos/sales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:snapshot.map(x=>({store_product_id:x.id,quantity:x.qty}))})});if(z.r.status===0){if(queueOfflineCashSale(snapshot,'Connection lost')){cart=[];renderCart()}return}if(!z.r.ok)return toast(z.d.message||z.d.error||'Sale was not submitted');if(z.d.status==='PENDING_APPROVAL'||z.d.approval_required){const note=$('#posCashFeedback');if(note)note.textContent=`Cash sale ${z.d.receipt_number||''} submitted. Awaiting administrator approval. This sale is NOT completed; stock is reserved until approval, and no receipt is available yet.`;toast('Cash sale submitted · awaiting approval');cart=[];renderCart();return}toast('Sale status: '+(z.d.status||'unknown'));}
+
 async function openShift(){const z=await apiJSON('/api/pos/shifts/open',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});toast(z.r.ok?'Shift opened.':(z.d.error||'Could not open shift'));if(z.r.ok)location.reload()}
 async function closeShift(){const z=await apiJSON('/api/pos/shifts/close',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});toast(z.r.ok?'Shift closed.':(z.d.error||'Could not close shift'));if(z.r.ok)setTimeout(()=>location.reload(),700)}
 window.loadDaySummary=async()=>{const z=await apiJSON('/api/pos/day-summary');if(!z.r.ok)return toast(z.d.error||'Summary unavailable');const el=$('#summaryCards');if(el)el.innerHTML=`<div class="mini-stat"><small>Sales count</small><strong>${z.d.sales_count}</strong></div><div class="mini-stat"><small>Sales total</small><strong>KES ${money(z.d.sales_total)}</strong></div>`};
@@ -70,9 +81,9 @@ if(posSearchInput){
   });
   posSearchInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const q=posSearchInput.value.trim();if(numericBarcode(q)||(!q.includes(' ')&&q.length>=10&&(burstChars>=5||Date.now()-lastScannerBurstAt<1400))){lastScannerBurstAt=Date.now();autoScanPOS(q)}else searchPOS();}});
 }
-window.addEventListener('online',()=>{const s=$('#networkStatus');if(s)s.textContent='ONLINE'});window.addEventListener('offline',()=>{const s=$('#networkStatus');if(s)s.textContent='OFFLINE'});
+window.addEventListener('online',()=>{const s=$('#networkStatus');if(s)s.textContent='ONLINE';syncOfflineSales();warmOfflineCatalogue()});window.addEventListener('offline',()=>{const s=$('#networkStatus');if(s)s.textContent='OFFLINE'});
 setInterval(()=>{const c=$('#posSessionClock');if(c)c.textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})},30000);
-setupViews();renderCart();renderHeld();loadDaySummary();
+setupViews();renderCart();renderHeld();updateOfflineQueueCount();if(navigator.onLine){warmOfflineCatalogue();syncOfflineSales()}loadDaySummary();
 
 let posPaymentPoll=null, posPaymentPollBusy=false, posPaymentCreateBusy=false;
 function paymentFeedback(message, kind='') {const el=$('#posPaymentFeedback');if(el){el.textContent=message||'';el.className=`tiny-help pos-payment-feedback ${kind}`.trim()}}

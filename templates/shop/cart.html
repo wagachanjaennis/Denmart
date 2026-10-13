@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block content %}
+{% if not orders_enabled %}<div class="flash warning storefront-order-hold"><strong>Online delivery is preparing to launch.</strong><p>Browsing is open, but checkout is not enabled yet. Please check the announcement for the launch date.</p></div>{% endif %}
 <section class="catalogue-head"><div><span class="eyebrow">BASKET → PAY</span><h1>Your shopping basket</h1><p>Review your items, enter the M-PESA registered name and phone number, then continue to payment.</p></div><a class="text-btn" href="/shop">Continue shopping</a></section>
 <div class="cart-layout pay-cart-layout"><section class="cart-list" id="cartPage"></section><aside class="cart-summary"><div class="basket-total-label">TOTAL</div><div class="basket-total"><span>Basket total</span><strong>KES <span id="cartGrandTotal">0.00</span></strong></div>
 <form method="post" action="/pay/start" id="payStartForm" class="pay-start-form" onsubmit="return preparePayForm()">
@@ -6,7 +7,7 @@
 <label>Full M-PESA registered name<input required name="customer_name" autocomplete="name" placeholder="Exactly as registered on the phone"></label>
 <label>Phone number<input required name="customer_phone" inputmode="tel" autocomplete="tel" placeholder="07XXXXXXXX or +2547XXXXXXXX"></label>
 {% if payment_methods|length > 1 %}<label>How will you pay?<select name="payment_method" required>{% for method in payment_methods %}<option value="{{method}}">{{"M-PESA PayBill" if method == "PAYBILL" else "M-PESA Buy Goods"}}</option>{% endfor %}</select></label>{% elif payment_methods|length == 1 %}<input type="hidden" name="payment_method" value="{{payment_methods[0]}}">{% else %}<div class="pay-config-warning">Payment instructions are not configured yet.</div>{% endif %}
-<button class="primary-sale-button pay-continue-button" type="submit" {% if not payment_methods %}disabled{% endif %}>Continue to payment</button>
+<button class="primary-sale-button pay-continue-button" type="submit" {% if not payment_methods or not orders_enabled %}disabled{% endif %}>Continue to payment</button>
 <p class="small muted">Use the name that will appear on the M-PESA confirmation SMS. We compare the name, phone number and exact amount before automatic approval.</p>
 </form></aside></div>
 {% endblock %}{% block scripts %}<script>function preparePayForm(){const cart=JSON.parse(localStorage.getItem('denmart-cart-v14')||'[]');if(!cart.length){window.toast&&toast('Your basket is empty.');return false;}document.getElementById('cartJson').value=JSON.stringify(cart);return true;}</script>{% endblock %}

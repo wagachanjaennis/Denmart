@@ -81,6 +81,11 @@ def start_payment():
         flash("The selected store is not available. Please refresh your basket.", "error")
         return redirect("/cart")
 
+    launch_setting = SystemSetting.query.filter_by(business_id=store.business_id, key="storefront_orders_enabled").first()
+    if not launch_setting or launch_setting.value != "1":
+        flash("Online ordering is not open yet. Please check the store announcement for the launch date.", "error")
+        return redirect("/cart")
+
     customer_name = request.form.get("customer_name", "").strip()
     phone = request.form.get("customer_phone", "").strip()
     method = request.form.get("payment_method", "").strip().upper()
