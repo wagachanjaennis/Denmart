@@ -44,14 +44,20 @@ def pos_manifest():
 
 @bp.get("/merchant/sw.js")
 def pos_service_worker():
-    js="""const CACHE='denmart-agent-v20-static';
-const ASSETS=['/static/css/app.css','/static/js/pos.js','/merchant/manifest.webmanifest','/static/pwa/icon.svg','/static/pwa/pos-offline.html'];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).catch(()=>{}).then(()=>self.skipWaiting())));
-self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('denmart-agent-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
-self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.origin!==location.origin||e.request.method!=='GET')return;const staticAsset=u.pathname==='/static/css/app.css'||u.pathname==='/static/js/pos.js'||u.pathname==='/static/pwa/icon.svg'||u.pathname==='/static/pwa/pos-offline.html'||u.pathname==='/merchant/manifest.webmanifest';const merchantPage=u.pathname.startsWith('/merchant');if(!staticAsset&&!merchantPage)return;e.respondWith(fetch(e.request).then(r=>{if(staticAsset&&r.ok){const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));}return r;}).catch(async()=>{if(staticAsset){const hit=await caches.match(e.request,{ignoreSearch:true});if(hit)return hit;}if(e.request.mode==='navigate')return (await caches.match('/static/pwa/pos-offline.html'))||new Response('Till offline. Reconnect to sign in and sync queued sales.',{status:503,headers:{'Content-Type':'text/plain; charset=utf-8'}});return new Response('Till offline. Cached POS assets are available; approval and inventory sync need a connection.',{status:503,headers:{'Content-Type':'text/plain; charset=utf-8'}});}));});
+    js = r"""const CACHE='denmart-agent-offline-v3';
+const STATIC=CACHE+'-static', PAGES=CACHE+'-pages', IMAGES=CACHE+'-images', DB='denmart-device-v2', STORE='records';
+const ASSETS=['/static/css/app.css','/static/js/pos.js','/static/js/offline-core.js','/static/pwa/icon.svg','/static/pwa/pos-offline.html','/merchant/manifest.webmanifest','/merchant/offline-login'];
+async function openDB(){return new Promise((resolve,reject)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(STORE))r.result.createObjectStore(STORE,{keyPath:'key'});};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
+async function readLocal(key){try{const db=await openDB();return await new Promise((resolve,reject)=>{const r=db.transaction(STORE,'readonly').objectStore(STORE).get(key);r.onsuccess=()=>resolve(r.result?.value);r.onerror=()=>reject(r.error);});}catch(_){return null;}}
+async function writeLocal(key,value){try{const db=await openDB();await new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put({key,value,updatedAt:new Date().toISOString()});tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error);});}catch(_){}}
+async function allowedOffline(){const session=await readLocal('offline:session:pos');if(!session||!session.username||Date.now()-Number(session.lastActive||0)>30*60*1000)return false;const owner=await readLocal('offline:cache-owner:pos');const cred=await readLocal('offline:credential:pos:'+session.username);if(!owner||owner.username!==session.username||!cred||!cred.verified||Date.now()-Number(cred.activatedAt||0)>30*24*60*60*1000)return false;await writeLocal('offline:session:pos',{...session,lastActive:Date.now()});return true;}
+async function cachePage(request,response){try{if(!response.ok||response.redirected||new URL(response.url).pathname!==new URL(request.url).pathname)return;const body=await response.clone().text();if(!body.includes('<html')&&!body.includes('<!doctype'))return;if(!body.includes('name="offline-access-portal" content="pos"'))return;const match=body.match(/<meta name="offline-access-user" content="([^"]+)"/);if(!match||!match[1])return;const username=match[1].trim().toLocaleLowerCase();const cred=await readLocal('offline:credential:pos:'+username);const pending=await readLocal('offline:pending-credential:pos:'+username);if(!(cred&&cred.verified)&&!(pending&&pending.createdAt&&Date.now()-Number(pending.createdAt)<10*60*1000))return;const owner=await readLocal('offline:cache-owner:pos');const pageCache=await caches.open(PAGES);if(owner&&owner.username&&owner.username!==username){for(const key of await pageCache.keys())await pageCache.delete(key);}await pageCache.put(request,response.clone());}catch(_){}}
+async function offlinePage(request){const url=new URL(request.url),path=url.pathname;if(path==='/merchant/offline-login'||path==='/merchant')return (await caches.match('/merchant/offline-login'))||(await caches.match('/merchant'))||new Response('Offline. Sign in online once to enable offline till access.',{status:503});if(await allowedOffline()){const c=await caches.open(PAGES);const hit=await c.match(request)||await c.match(url.origin+path);if(hit)return hit;const home=await c.match('/merchant/on');if(home)return home;}return (await caches.match('/merchant/offline-login'))||(await caches.match('/static/pwa/pos-offline.html'))||new Response('Till offline. Sign in online once first.',{status:503,headers:{'Content-Type':'text/plain; charset=utf-8'}});}
+self.addEventListener('install',e=>e.waitUntil((async()=>{const c=await caches.open(STATIC);await Promise.all(ASSETS.map(async u=>{try{const r=await fetch(u,{cache:'no-store'});if(r.ok)await c.put(u,r);}catch(_){}}));await self.skipWaiting();})()));
+self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('denmart-agent-')&&k!==STATIC&&k!==PAGES&&k!==IMAGES).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
+self.addEventListener('fetch',e=>{const req=e.request,u=new URL(req.url);if(req.method!=='GET')return;if(req.destination==='image'){e.respondWith((async()=>{const c=await caches.open(IMAGES);const old=await c.match(req);const refresh=fetch(req).then(async r=>{if(r.ok||r.type==='opaque'){try{await c.put(req,r.clone());}catch(_){}}return r;}).catch(()=>null);if(old){e.waitUntil(refresh);return old;}return await refresh||new Response('',{status:504});})());return;}if(u.origin!==location.origin)return;const asset=req.destination==='style'||req.destination==='script'||req.destination==='font'||['/static/css/app.css','/static/js/pos.js','/static/js/offline-core.js','/static/pwa/icon.svg','/static/pwa/pos-offline.html','/merchant/manifest.webmanifest'].includes(u.pathname);if(asset){e.respondWith((async()=>{const c=await caches.open(STATIC);try{const r=await fetch(req);if(r.ok)c.put(req,r.clone());return r;}catch(_){return await c.match(req,{ignoreSearch:true})||new Response('',{status:503});}})());return;}if(u.pathname==='/merchant/offline-login'||u.pathname==='/merchant'||u.pathname==='/merchant/on'||u.pathname.startsWith('/merchant/')){if(u.pathname==='/merchant/sw.js')return;e.respondWith((async()=>{try{const r=await fetch(req);if(req.mode==='navigate')await cachePage(req,r);return r;}catch(_){if(req.mode==='navigate')return offlinePage(req);return new Response('Till action unavailable offline. Cash sales can be queued by the local POS workspace.',{status:503,headers:{'Content-Type':'text/plain; charset=utf-8'}});}})());}});
 """
-    return Response(js,mimetype="application/javascript",headers={"Service-Worker-Allowed":"/merchant"})
-
+    return Response(js, mimetype="application/javascript", headers={"Service-Worker-Allowed": "/merchant", "Cache-Control": "no-cache"})
 @bp.get("/merchant/receipt/<receipt_number>")
 @cashier_required
 def receipt(receipt_number):
@@ -64,19 +70,32 @@ def receipt(receipt_number):
 
 def _create_sale(data):
     items=data.get("items") or []
-    client_ref=(data.get("client_ref") or "").strip()[:80]
+    client_ref=(data.get("client_ref") or "").strip()[:60]
+    # Idempotency lookup must run before shift validation: the original request may
+    # have committed while its response was lost and the shift may since be closed.
+    if client_ref:
+        existing=Sale.query.filter_by(receipt_number=client_ref).first()
+        if existing:
+            if existing.store_id != current_user.store_id or existing.cashier_id != current_user.id:
+                return None,(jsonify(error="client_ref_conflict",message="This sale reference belongs to another till or cashier."),409)
+            return existing,(jsonify(ok=True,sale_id=existing.id,receipt_number=existing.receipt_number,total=str(existing.total),status=existing.status,approval_required=existing.status!="COMPLETED",duplicate=True),200)
     shift=Shift.query.filter_by(store_id=current_user.store_id,cashier_id=current_user.id,status="OPEN").first()
     if not shift: return None,(jsonify(error="shift_not_open"),409)
     if not items: return None,(jsonify(error="cart_empty"),400)
-    if client_ref:
-        existing=Sale.query.filter_by(receipt_number=client_ref).first()
-        if existing: return existing,(jsonify(ok=True,sale_id=existing.id,receipt_number=existing.receipt_number,total=str(existing.total),status=existing.status,approval_required=existing.status!="COMPLETED",duplicate=True),200)
     subtotal=Decimal("0"); prepared=[]
     for raw in items:
         sp=(StoreProduct.query.filter_by(id=raw.get("store_product_id"),store_id=current_user.store_id).with_for_update().first())
         try: qty=Decimal(str(raw.get("quantity",0)))
         except InvalidOperation:return None,(jsonify(error="invalid_quantity"),400)
         if not sp or not sp.available_pos or not sp.is_available or qty<=0:return None,(jsonify(error="invalid_item"),400)
+        # Offline transactions carry the price the cashier actually saw. Never
+        # silently recalculate at a changed price during reconnect/sync.
+        if raw.get("unit_price") is not None:
+            try: expected_price=Decimal(str(raw.get("unit_price"))).quantize(Decimal("0.01"))
+            except InvalidOperation:return None,(jsonify(error="invalid_price"),400)
+            current_price=Decimal(str(sp.selling_price)).quantize(Decimal("0.01"))
+            if expected_price != current_price:
+                return None,(jsonify(error="price_changed",product=sp.product.name,recorded_price=str(expected_price),current_price=str(current_price),message="The product price changed since this basket was saved. This sale was not submitted; review the basket and confirm the price with the customer."),409)
         available=Decimal(str(sp.stock_quantity or 0))-Decimal(str(sp.reserved_quantity or 0))
         if available<qty:return None,(jsonify(error="insufficient_stock",product=sp.product.name,available=str(available)),409)
         line=Decimal(str(sp.selling_price))*qty; subtotal+=line; prepared.append((sp,qty,line))

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from flask import Blueprint, flash, redirect, render_template, request, session
+from flask import Blueprint, flash, redirect, render_template, request, session, jsonify
 from flask_login import current_user, login_required, login_user, logout_user
 from extensions import db
 from models import User
@@ -83,3 +83,31 @@ def logout():
     logout_user()
     session.clear()
     return redirect("/control" if portal == "admin" else "/control2" if portal == "control2" else "/merchant" if portal == "pos" else "/")
+
+
+@bp.get("/api/offline/ping")
+def offline_ping():
+    """Tiny reachability check used before staging an offline-login credential."""
+    return jsonify(ok=True, server_time=datetime.now(timezone.utc).isoformat()), 200
+
+
+def _offline_login_page(target):
+    return render_template("auth/login.html", target=target,
+                           pwa_manifest=("/control/manifest.webmanifest" if target == "admin" else
+                                         "/control2/manifest.webmanifest" if target == "control2" else
+                                         "/merchant/manifest.webmanifest" if target == "pos" else None))
+
+
+@bp.get("/control/offline-login")
+def offline_admin_login_page():
+    return _offline_login_page("admin")
+
+
+@bp.get("/control2/offline-login")
+def offline_manager_login_page():
+    return _offline_login_page("control2")
+
+
+@bp.get("/merchant/offline-login")
+def offline_pos_login_page():
+    return _offline_login_page("pos")

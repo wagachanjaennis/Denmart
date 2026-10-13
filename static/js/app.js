@@ -1,7 +1,11 @@
 (function(){
   const KEY='denmart-cart-v14';
-  const read=()=>{try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]}};
-  const save=c=>localStorage.setItem(KEY,JSON.stringify(c));
+  let liveCart=null, cartWriteVersion=0;
+  const read=()=>{if(Array.isArray(liveCart))return liveCart.map(x=>({...x}));try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){return[]}};
+  const save=c=>{const snapshot=(c||[]).map(x=>({...x}));liveCart=snapshot;cartWriteVersion++;let localSaved=false;try{localStorage.setItem(KEY,JSON.stringify(snapshot));localSaved=true}catch(_e){}let persistPromise=window.DenmartOffline?.set(KEY,snapshot);Promise.resolve(persistPromise).then(ok=>{if(!ok&&!localSaved)window.DenmartOffline?.showNotice('The basket could not be confirmed in device storage. Keep this page open and reconnect before leaving.','warning',9000)}).catch(()=>{if(!localSaved)window.DenmartOffline?.showNotice('The basket could not be confirmed in device storage. Keep this page open and reconnect before leaving.','warning',9000)});};
+  async function hydrateCart(){const started=cartWriteVersion;try{const cached=await window.DenmartOffline?.get(KEY);if(cartWriteVersion!==started){await window.DenmartOffline?.set(KEY,read());return;}if(Array.isArray(cached)){liveCart=cached.map(x=>({...x}));try{localStorage.setItem(KEY,JSON.stringify(liveCart))}catch(_e){}}else{liveCart=read();await window.DenmartOffline?.set(KEY,liveCart);}}catch(_e){}updateCounts();renderCartPage();}
+  const publicCatalogueKey=(storeId='',storeCode='')=>`public:catalogue:${storeId||storeCode||'default'}`;
+  async function cacheRenderedProducts(){if(!window.DenmartOffline)return;try{const form=document.querySelector('.site-search');const key=publicCatalogueKey(form?.dataset.storeId||'',form?.dataset.storeCode||'');const items=[...document.querySelectorAll('.product-card[data-product-id]')].map(card=>({id:card.dataset.productId,name:card.dataset.productName||'',price:Number(card.dataset.productPrice||0),slug:card.dataset.productSlug||'',brand:card.dataset.productBrand||'',category:card.dataset.productCategory||'',image_url:card.dataset.productImage||''}));if(items.length)await window.DenmartOffline.mergeCatalogue(items,key,12000);}catch(_e){}}
   const money=n=>'KES '+Number(n||0).toFixed(2);
   const escapeHtml=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
   window.addToCart=function(id,name,price){const c=read();const i=c.find(x=>x.id===id);if(i)i.qty+=1;else c.push({id,name,price:Number(price),qty:1});save(c);updateCounts();toast(name+' added');};
@@ -78,9 +82,10 @@
         if(!response.ok)throw new Error('Search temporarily unavailable');
         const data=await response.json();if(id!==requestId)return;
         const items=Array.isArray(data.items)?data.items:[];
+        const catalogueKey=publicCatalogueKey(storeId,storeCode);try{await window.DenmartOffline?.mergeCatalogue(items.map(x=>({...x,price:Number(x.price||0)})),catalogueKey,12000)}catch(_e){}
         renderSuggestions(items);
         if(isShopForm){renderShopGrid(items);if(feedback)feedback.textContent=items.length?`${items.length} relevant match${items.length===1?'':'es'} for “${q}”`:`No matches for “${q}”. Try another name, brand or barcode.`;}
-      }catch(error){if(error.name==='AbortError')return;if(id!==requestId)return;hide();if(feedback)feedback.textContent='Search could not connect. Press Search to retry.';}
+      }catch(error){if(error.name==='AbortError')return;if(id!==requestId)return;try{const cached=await window.DenmartOffline?.searchCatalogue(q,publicCatalogueKey(storeId,storeCode),80)||[];const filtered=categoryId?cached.filter(x=>String(x.category||'')===String(categoryId)):cached;if(filtered.length){renderSuggestions(filtered);if(isShopForm)renderShopGrid(filtered);if(feedback)feedback.textContent='Offline results from this device’s saved catalogue. Prices and availability must be confirmed online.';return;}}catch(_e){}hide();if(feedback)feedback.textContent='Search could not connect. Opened products and your basket remain saved on this device.';}
     };
     input.addEventListener('input',()=>{clearTimeout(timer);requestId++;if(controller)controller.abort();timer=setTimeout(search,110)});
     input.addEventListener('focus',()=>{if(input.value.trim().length>=2){clearTimeout(timer);timer=setTimeout(search,30)}});
@@ -97,6 +102,6 @@
     });
     input.addEventListener('input',()=>{input.classList.remove('scanner-captured');input.dataset.lastBarcodeInput=String(Date.now())});
   });
-  updateCounts();renderCartPage(); if(!location.pathname.startsWith('/control')&&!location.pathname.startsWith('/merchant')&&'serviceWorker' in navigator)navigator.serviceWorker.register('/shop/sw.js',{scope:'/'}).catch(()=>{});
+  updateCounts();renderCartPage();cacheRenderedProducts();hydrateCart();if(!location.pathname.startsWith('/control')&&!location.pathname.startsWith('/merchant')&&'serviceWorker' in navigator)navigator.serviceWorker.register('/shop/sw.js',{scope:'/'}).catch(()=>{});
 })();
 function shareDenmartShop(){const data={title:'Denmart Online Shop',text:'Browse Denmart online',url:window.location.origin+'/shop'};if(navigator.share){navigator.share(data).catch(()=>{});return;}if(navigator.clipboard)navigator.clipboard.writeText(data.url).then(()=>alert('Denmart shop link copied.')).catch(()=>{});}

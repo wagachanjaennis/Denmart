@@ -308,47 +308,37 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = '''const CACHE_VERSION = "denmart-public-v24-storefront-visuals";
+    js = r'''const CACHE_VERSION = "denmart-public-v25-offline-persist";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
-const STATIC_ASSETS = ["/static/css/app.css","/static/js/app.js","/shop/manifest.webmanifest","/shop/app-icon/192.png","/shop/app-icon/512.png"];
-self.addEventListener("install", event => {
-  event.waitUntil(caches.open(STATIC_CACHE).then(cache => cache.addAll(STATIC_ASSETS)).then(() => self.skipWaiting()));
-});
-self.addEventListener("activate", event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => !k.startsWith(CACHE_VERSION)).map(k => caches.delete(k)))).then(() => self.clients.claim()));
-});
-function bypass(request, url) {
-  return request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/control") || url.pathname.startsWith("/merchant") || url.pathname.startsWith("/login") || url.pathname.startsWith("/logout");
-}
+const STATIC_ASSETS = ["/static/css/app.css","/static/js/app.js","/static/js/offline-core.js","/shop/manifest.webmanifest","/shop/app-icon/192.png","/shop/app-icon/512.png"];
+self.addEventListener("install", event => event.waitUntil((async()=>{const cache=await caches.open(STATIC_CACHE);await Promise.all(STATIC_ASSETS.map(async url=>{try{const r=await fetch(url,{cache:"no-store"});if(r.ok)await cache.put(url,r);}catch(_){}}));await self.skipWaiting();})()));
+self.addEventListener("activate", event => {event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith("denmart-public-") && !k.startsWith(CACHE_VERSION)).map(k => caches.delete(k)))).then(() => self.clients.claim()));});
+function isPrivatePortal(path){return path==="/control"||path.startsWith("/control/")||path==="/control/offline-login"||path==="/control2"||path.startsWith("/control2/")||path==="/control2/offline-login"||path==="/merchant"||path.startsWith("/merchant/")||path==="/merchant/offline-login";}
+function shouldCachePage(path){if(path==="/"||path==="/shop"||path.startsWith("/shop?")||path.startsWith("/product/")||path==="/cart"||path==="/locations"||path.startsWith("/locations/"))return true;if(["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return true;return false;}
+function forbiddenPublicCache(path){return path.startsWith("/api/")||path.startsWith("/pay/order/")||path.startsWith("/pay/approval/")||path.startsWith("/pay/api/")||path.startsWith("/control/pay/")||path.startsWith("/logout");}
 self.addEventListener("fetch", event => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (bypass(request, url)) return;
-
-  if (url.pathname.endsWith("manifest.webmanifest") || url.pathname.includes("/shop/app-icon/")) {
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok) caches.open(STATIC_CACHE).then(c => c.put(request, response.clone()));
-      return response;
-    }).catch(() => caches.match(request)));
-    return;
+  const request=event.request,url=new URL(request.url);
+  if(request.method!=="GET")return;
+  // Product photos may be served from a trusted external image host. Cache only image
+  // subresources here; never broaden this to cross-origin pages or API requests.
+  if(request.destination==="image"&&url.origin!==location.origin){
+    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{if(response.ok||response.type==="opaque"){try{await cache.put(request,response.clone());}catch(_){}}return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
   }
-  if (request.destination === "style" || request.destination === "script") {
-    event.respondWith(caches.match(request).then(cached => {
-      const update = fetch(request).then(response => {
-        if (response.ok) caches.open(STATIC_CACHE).then(c => c.put(request, response.clone()));
-        return response;
-      }).catch(() => cached);
-      return cached || update;
-    }));
-    return;
+  if(url.origin!==location.origin)return;
+  const path=url.pathname;
+  if(path.startsWith("/api/"))return;
+  if(request.destination==="style"||request.destination==="script"||path.endsWith("manifest.webmanifest")||path.includes("/shop/app-icon/")){
+    event.respondWith((async()=>{const cache=await caches.open(STATIC_CACHE);try{const response=await fetch(request);if(response.ok){try{await cache.put(request,response.clone());}catch(_){}}return response;}catch(_){return await cache.match(request,{ignoreSearch:true})||new Response("Offline asset unavailable",{status:503});}})());return;
   }
-  if (request.mode === "navigate") {
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok && (url.pathname === "/" || url.pathname.startsWith("/shop") || url.pathname.startsWith("/product/") || url.pathname === "/cart")) caches.open(PAGE_CACHE).then(c => c.put(request, response.clone()));
-      return response;
-    }).catch(() => caches.match(request).then(cached => cached || caches.match("/"))));
+  if(request.destination==="image" && !forbiddenPublicCache(path)){
+    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{if(response.ok||response.type==="opaque"){try{await cache.put(request,response.clone());}catch(_){}}return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
+  }
+  if(request.mode==="navigate"){
+    if(isPrivatePortal(path) && !["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return;
+    if(!shouldCachePage(path)||forbiddenPublicCache(path))return;
+    event.respondWith((async()=>{try{const response=await fetch(request);if(response.ok&&!response.redirected){try{await caches.open(PAGE_CACHE).then(c=>c.put(request,response.clone()));}catch(_){}}return response;}catch(_){const pages=await caches.open(PAGE_CACHE);const exact=await pages.match(request)||await pages.match(url.origin+path);if(exact)return exact;if(path.startsWith("/product/"))return new Response('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Product not saved offline</title><main style="font:16px system-ui;max-width:32rem;margin:3rem auto;padding:1rem"><h1>This product page is not saved on this device yet.</h1><p>Your basket is saved locally. Reconnect once to open this product and make it available offline.</p><a href="/shop">Return to the catalogue</a></main>',{status:503,headers:{"Content-Type":"text/html; charset=utf-8"}});if(path==="/shop"||path==="/cart")return await pages.match(url.origin+path)||await pages.match("/")||new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8"}});return await pages.match("/")||new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8"}});}})());
   }
 });
 '''
