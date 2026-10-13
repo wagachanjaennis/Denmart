@@ -1,17 +1,25 @@
 {% extends 'base.html' %}{% block content %}
-<div class="shop-home-layout">
-  <aside class="shop-home-sidebar" aria-label="Shop departments">
-    <div class="shop-sidebar-heading"><span class="eyebrow">BROWSE</span><strong>Shop by category</strong></div>
+<div class="shop-home-layout denmart-home-v2">
+  <div class="home-category-toolbar" aria-label="Shop categories">
+    <div class="home-priority-categories">
+      <button class="home-category-chip active" type="button" data-category-filter="all">All</button>
+      {% for c in categories[:6] %}<button class="home-category-chip" type="button" data-category-filter="{{c.id}}">{{c.name}}</button>{% endfor %}
+    </div>
+    <button class="home-more-categories" type="button" id="homeMoreCategories" aria-expanded="false" aria-controls="homeCategoryDrawer"><span aria-hidden="true">☰</span> More categories</button>
+  </div>
+  <div class="home-category-backdrop" id="homeCategoryBackdrop" hidden></div>
+  <aside class="shop-home-sidebar home-category-drawer" id="homeCategoryDrawer" aria-label="More shop departments" aria-hidden="true">
+    <div class="shop-sidebar-heading"><strong>More categories</strong><button type="button" id="homeCloseCategories" class="home-category-close" aria-label="Close categories">×</button></div>
     <div class="shop-sidebar-links">
-      <a class="shop-sidebar-link active" href="/shop"><span class="shop-sidebar-category-mark">✦</span><span>All products</span><b>›</b></a>
-      {% for c in categories %}<a class="shop-sidebar-link" href="/shop?category={{c.id}}"><span class="shop-sidebar-category-mark">{{c.name[:1]|upper}}</span><span>{{c.name}}</span><b>›</b></a>{% endfor %}
+      <button class="shop-sidebar-link active" type="button" data-category-filter="all"><span class="shop-sidebar-category-mark">✦</span><span>All products</span></button>
+      {% for c in categories %}<button class="shop-sidebar-link" type="button" data-category-filter="{{c.id}}"><span class="shop-sidebar-category-mark">{{c.name[:1]|upper}}</span><span>{{c.name}}</span></button>{% endfor %}
     </div>
     {% if sidebar_ad_title or sidebar_ad_body %}<a class="shop-sidebar-ad" href="{{sidebar_ad_link or '/shop'}}"><span class="eyebrow">FEATURED</span><strong>{{sidebar_ad_title or 'Discover more at ' ~ business_name}}</strong>{% if sidebar_ad_body %}<span>{{sidebar_ad_body}}</span>{% endif %}<b>Explore offer →</b></a>{% endif %}
   </aside>
   <div class="shop-home-main">
     <section class="denmart-hero denmart-hero-compact" aria-label="Shop online">
       <div class="hero-left">
-        <a class="hero-pill solid home-shop-now" href="/shop">Shop now <span aria-hidden="true">→</span></a>
+        <a class="hero-pill solid home-shop-now" href="#homeProductGrid">Shop now <span aria-hidden="true">→</span></a>
         <a class="shop-qr-chip shop-qr-feature home-qr-only" href="/app-qr.png" target="_blank" rel="noopener" aria-label="Open {{business_name}} shop QR code">
           <img src="/app-qr.png" alt="{{business_name}} online shop QR code" loading="eager">
         </a>
@@ -19,14 +27,26 @@
     </section>
     <section class="catalogue-section home-all-products" aria-labelledby="home-all-products-title">
       <div class="section-head home-all-products-head">
-        <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">All products</h2><p class="muted">Browse the full range below.</p></div>
-        <span class="home-product-count">{{total_products}} products</span>
+        <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">Everything in store</h2><p class="muted" id="homeCatalogueHint">All available products, ready to browse.</p></div>
+        <span class="home-product-count" id="homeProductCount">{{total_products}} products</span>
       </div>
       <div class="product-grid home-grid" id="homeProductGrid">
-        {% for item in products %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">New products will appear here when they are available for online ordering.</div>{% endfor %}
+        {% for item in products %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">Products will appear here when available for online ordering.</div>{% endfor %}
       </div>
       {% if products|length >= 2000 %}<p class="catalogue-limit-note">Showing the first 2,000 available products. Use search or categories to find more.</p>{% endif %}
     </section>
   </div>
 </div>
+<script>
+(function(){
+ const drawer=document.getElementById('homeCategoryDrawer'), opener=document.getElementById('homeMoreCategories'), closer=document.getElementById('homeCloseCategories'), backdrop=document.getElementById('homeCategoryBackdrop');
+ const cards=Array.from(document.querySelectorAll('#homeProductGrid .product-card')); const count=document.getElementById('homeProductCount'), hint=document.getElementById('homeCatalogueHint');
+ function closeDrawer(){drawer.classList.remove('open');drawer.setAttribute('aria-hidden','true');opener.setAttribute('aria-expanded','false');backdrop.hidden=true}
+ function openDrawer(){drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');opener.setAttribute('aria-expanded','true');backdrop.hidden=false}
+ opener.addEventListener('click',()=>drawer.classList.contains('open')?closeDrawer():openDrawer());closer.addEventListener('click',closeDrawer);backdrop.addEventListener('click',closeDrawer);
+ function filter(value,label){let visible=0;cards.forEach(card=>{const id=card.dataset.categoryId||'';const show=value==='all'||id===String(value);card.hidden=!show;if(show)visible++});document.querySelectorAll('[data-category-filter]').forEach(b=>b.classList.toggle('active',b.dataset.categoryFilter===String(value)));count.textContent=visible+' products';hint.textContent=value==='all'?'All available products, ready to browse.':'Showing '+label+'.';closeDrawer()}
+ document.querySelectorAll('[data-category-filter]').forEach(b=>b.addEventListener('click',()=>filter(b.dataset.categoryFilter,b.textContent.trim())));
+ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+})();
+</script>
 {% endblock %}

@@ -222,3 +222,25 @@ body:not(.admin-page):not(.pos-page){font-family:Aptos,"Segoe UI",Arial,system-u
 .site-header .site-actions a,.site-header .site-actions button{color:#153b28!important;font-weight:850!important}
 .site-header .site-actions a:hover,.site-header .site-actions button:hover{background:rgba(255,255,255,.42)!important}
 .site-header .site-search input{color:#20352a!important}
+
+/* Storefront category simplification: all products are immediately visible; extras live in a drawer. */
+.denmart-home-v2.shop-home-layout{display:block!important;position:relative!important;min-width:0!important}
+.denmart-home-v2 .home-category-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px;padding:8px 10px;background:#fff;border:1px solid #dcefe3;border-radius:14px;box-shadow:0 3px 12px rgba(20,90,50,.04)}
+.denmart-home-v2 .home-priority-categories{display:flex;align-items:center;gap:7px;min-width:0;overflow-x:auto;scrollbar-width:thin;padding:2px 1px}
+.denmart-home-v2 .home-category-chip,.denmart-home-v2 .home-more-categories{flex:0 0 auto;border:1px solid #d7eadf;border-radius:999px;padding:9px 13px;background:#f6fff8;color:#234d34;font:700 .82rem/1.1 Aptos,"Segoe UI",Arial,sans-serif;cursor:pointer;white-space:nowrap}
+.denmart-home-v2 .home-category-chip.active,.denmart-home-v2 .home-category-chip:hover{background:#25c66b;border-color:#25c66b;color:#fff}
+.denmart-home-v2 .home-more-categories{background:#fff4b9;border-color:#f3dd61;color:#4c420d}
+.denmart-home-v2 .shop-home-main{width:100%;min-width:0}
+.denmart-home-v2 .home-category-drawer{position:fixed!important;z-index:10020!important;top:0!important;right:0!important;bottom:0!important;width:min(350px,88vw)!important;max-height:none!important;overflow-y:auto!important;border-radius:18px 0 0 18px!important;padding:18px!important;background:#fff!important;box-shadow:-12px 0 45px rgba(14,51,29,.2)!important;transform:translateX(110%);visibility:hidden;transition:transform .22s ease,visibility .22s ease}
+.denmart-home-v2 .home-category-drawer.open{transform:translateX(0);visibility:visible}
+.denmart-home-v2 .home-category-drawer .shop-sidebar-heading{display:flex;align-items:center;justify-content:space-between;padding:4px 2px 14px}
+.denmart-home-v2 .home-category-close{border:0;border-radius:50%;width:36px;height:36px;background:#f0f8f2;color:#234d34;font-size:1.5rem;cursor:pointer}
+.denmart-home-v2 .home-category-drawer .shop-sidebar-links{display:grid;gap:5px}
+.denmart-home-v2 .home-category-drawer .shop-sidebar-link{display:flex;align-items:center;width:100%;text-align:left;border:0;background:transparent;cursor:pointer;font:700 .88rem Aptos,"Segoe UI",Arial,sans-serif}
+.denmart-home-v2 .home-category-drawer .shop-sidebar-link.active{background:#e8fff0;color:#087f5b}
+.denmart-home-v2 .home-category-backdrop:not([hidden]){position:fixed;inset:0;z-index:10019;background:rgba(13,34,22,.36)}
+.denmart-home-v2 .product-card[hidden]{display:none!important}
+.denmart-home-v2 .home-all-products{margin-top:8px!important}
+.denmart-home-v2 .home-all-products-head{margin-bottom:10px!important}
+@media(max-width:760px){.denmart-home-v2 .home-category-toolbar{padding:7px;gap:7px}.denmart-home-v2 .home-priority-categories{gap:5px}.denmart-home-v2 .home-category-chip{padding:8px 10px;font-size:.74rem}.denmart-home-v2 .home-more-categories{padding:8px 10px;font-size:.72rem}.denmart-home-v2 .home-category-drawer{padding:14px!important}.denmart-home-v2 .home-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
+@media(max-width:390px){.denmart-home-v2 .home-category-toolbar{align-items:flex-start;flex-direction:column}.denmart-home-v2 .home-more-categories{align-self:flex-end}.denmart-home-v2 .home-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
