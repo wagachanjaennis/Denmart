@@ -1,16 +1,121 @@
-{% extends "base.html" %}{% block content %}
-{% if not orders_enabled %}<div class="flash warning storefront-order-hold"><strong>Online delivery is preparing to launch.</strong><p>Browsing is open, but checkout is not enabled yet. Please check the announcement for the launch date.</p></div>{% endif %}
-<section class="catalogue-head"><div><span class="eyebrow">BASKET → PAY</span><h1>Your shopping basket</h1><p>Review your items, enter the M-PESA registered name and phone number, then continue to payment.</p></div><a class="text-btn" href="/shop">Continue shopping</a></section>
-<div class="cart-layout pay-cart-layout"><section class="cart-list" id="cartPage"></section><aside class="cart-summary"><div class="basket-total-label">TOTAL</div><div class="basket-total"><span>Basket total</span><strong>KES <span id="cartGrandTotal">0.00</span></strong></div>
-<form method="post" action="/pay/start" id="payStartForm" class="pay-start-form" onsubmit="return preparePayForm()">
-<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="cart_json" id="cartJson">
-<label>Full M-PESA registered name<input required name="customer_name" autocomplete="name" placeholder="Exactly as registered on the phone"></label>
-<label>Phone number<input required name="customer_phone" inputmode="tel" autocomplete="tel" placeholder="07XXXXXXXX, 01XXXXXXXX or +2547XXXXXXXX"></label>
-<label>Delivery location / pickup point<input required name="delivery_location" maxlength="500" autocomplete="street-address" placeholder="Estate, road, building or pickup point"></label>
-<label>Estimated distance (km)<input required name="delivery_distance_km" type="number" min="0" max="200" step="0.1" inputmode="decimal" placeholder="e.g. 4.5"></label>
-<p class="small muted">Denmart calculates the delivery charge from distance and product weights before showing the amount to pay. If a product has no recorded weight, the estimate may be lower than its actual packed weight.</p>
-{% if payment_methods|length > 1 %}<label>How will you pay?<select name="payment_method" required>{% for method in payment_methods %}<option value="{{method}}">{{"M-PESA PayBill" if method == "PAYBILL" else "M-PESA Buy Goods"}}</option>{% endfor %}</select></label>{% elif payment_methods|length == 1 %}<input type="hidden" name="payment_method" value="{{payment_methods[0]}}">{% else %}<div class="pay-config-warning">Payment instructions are not configured yet.</div>{% endif %}
-<button class="primary-sale-button pay-continue-button" type="submit" {% if not payment_methods or not orders_enabled %}disabled{% endif %}>Continue to payment</button>
-<p class="small muted">Use the name that will appear on the M-PESA confirmation SMS. We compare the name, phone number and exact amount before automatic approval.</p>
-</form></aside></div>
-{% endblock %}{% block scripts %}<script>function preparePayForm(){const cart=JSON.parse(localStorage.getItem('denmart-cart-v14')||'[]');if(!cart.length){window.toast&&toast('Your basket is empty.');return false;}const phone=document.querySelector('[name="customer_phone"]')?.value.trim()||'';const location=document.querySelector('[name="delivery_location"]')?.value.trim()||'';const distance=document.querySelector('[name="delivery_distance_km"]')?.value.trim()||'';if(!phone||!location||distance===''||Number(distance)<0||Number(distance)>200){window.toast&&toast('Enter your phone, delivery location and distance before continuing.');return false;}document.getElementById('cartJson').value=JSON.stringify(cart);return true;}</script>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<section class="catalogue-head">
+  <div>
+    <span class="eyebrow">BASKET → PAY</span>
+    <h1>Your shopping basket</h1>
+    <p>Review your items, enter the M-PESA registered name and phone number, then continue to payment.</p>
+  </div>
+  <a class="text-btn" href="/shop">Continue shopping</a>
+</section>
+<div class="cart-layout pay-cart-layout">
+  <section class="cart-list" id="cartPage"></section>
+  <aside class="cart-summary">
+    <div class="basket-total-label">TOTAL</div>
+    <div class="basket-total"><span>Basket total</span><strong>KES <span id="cartGrandTotal">0.00</span></strong></div>
+    <form method="post" action="/pay/start" id="payStartForm" class="pay-start-form" onsubmit="return preparePayForm()">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="cart_json" id="cartJson">
+      <label>Full M-PESA registered name<input required name="customer_name" autocomplete="name" placeholder="Exactly as registered on the phone"></label>
+      <label>Phone number<input required name="customer_phone" inputmode="tel" autocomplete="tel" placeholder="07XXXXXXXX, 01XXXXXXXX or +2547XXXXXXXX"></label>
+      <label>Delivery location / pickup point<input required name="delivery_location" maxlength="500" autocomplete="street-address" placeholder="Estate, road, building or pickup point"></label>
+      <label>Estimated distance (km)
+        <input name="delivery_distance_km" id="deliveryDistanceKm" type="number" min="0" max="200" step="0.1" inputmode="decimal" placeholder="Estimate automatically or leave for admin">
+      </label>
+      <div class="distance-estimate-controls">
+        <button class="secondary-action" type="button" id="estimateDistanceButton">Estimate from my location</button>
+        <p class="small muted" id="distanceEstimateStatus" role="status" aria-live="polite">Distance is optional. Tap “Estimate from my location” to request location access. If it cannot be calculated, you can still continue and Denmart admin can confirm the distance and final fee using the pickup point.</p>
+      </div>
+      <p class="small muted">Any automatic result is an approximate distance, not a guaranteed road route. Delivery fees and product weights are recalculated on the server; an administrator can revise the distance and final fee before payment is approved.</p>
+      {% if payment_methods|length > 1 %}
+      <label>How will you pay?<select name="payment_method" required>{% for method in payment_methods %}<option value="{{method}}">{{"M-PESA PayBill" if method == "PAYBILL" else "M-PESA Buy Goods"}}</option>{% endfor %}</select></label>
+      {% elif payment_methods|length == 1 %}
+      <input type="hidden" name="payment_method" value="{{payment_methods[0]}}">
+      {% else %}
+      <div class="pay-config-warning">Payment destination is unavailable. Please configure an M-PESA destination under Admin → PAY.</div>
+      {% endif %}
+      <button class="primary-sale-button pay-continue-button" type="submit">Continue to payment</button>
+      <p class="small muted">Use the name that will appear on the M-PESA confirmation SMS. Denmart checks the name, phone number and exact amount before automatic approval.</p>
+    </form>
+  </aside>
+</div>
+<div id="pickupCoordinates"
+     data-lat="{{ store.latitude if store and store.latitude is not none else '' }}"
+     data-lon="{{ store.longitude if store and store.longitude is not none else '' }}"
+     data-pickup="{{ store.name if store else 'Denmart pickup point' }}"
+     hidden></div>
+{% endblock %}
+{% block scripts %}
+<script>
+function preparePayForm(){
+  let cart=[];
+  try{cart=JSON.parse(localStorage.getItem('denmart-cart-v14')||'[]')}catch(_e){cart=[]}
+  if(!cart.length){window.toast&&toast('Your basket is empty.');return false;}
+  const phone=document.querySelector('[name="customer_phone"]')?.value.trim()||'';
+  const name=document.querySelector('[name="customer_name"]')?.value.trim()||'';
+  const location=document.querySelector('[name="delivery_location"]')?.value.trim()||'';
+  const distance=document.querySelector('[name="delivery_distance_km"]')?.value.trim()||'';
+  if(!name||name.length<2){window.toast&&toast('Enter your full M-PESA registered name.');return false;}
+  if(!phone){window.toast&&toast('Enter your phone number.');return false;}
+  if(!location){window.toast&&toast('Enter your delivery location or pickup point.');return false;}
+  if(distance!==''&&(!Number.isFinite(Number(distance))||Number(distance)<0||Number(distance)>200)){
+    window.toast&&toast('Distance must be between 0 and 200 km, or leave it blank for admin confirmation.');return false;
+  }
+  document.getElementById('cartJson').value=JSON.stringify(cart);
+  const button=document.querySelector('.pay-continue-button');
+  if(button){button.disabled=true;button.textContent='Starting payment…';}
+  return true;
+}
+(function(){
+  const button=document.getElementById('estimateDistanceButton');
+  const status=document.getElementById('distanceEstimateStatus');
+  const field=document.getElementById('deliveryDistanceKm');
+  const point=document.getElementById('pickupCoordinates');
+  if(!button||!status||!field||!point)return;
+  const latText=(point.dataset.lat||'').trim(),lonText=(point.dataset.lon||'').trim();
+  const pickupName=point.dataset.pickup||'the selected Denmart pickup point';
+  const pickupLat=latText===''?NaN:Number(latText),pickupLon=lonText===''?NaN:Number(lonText);
+  const hasPickupCoordinates=Number.isFinite(pickupLat)&&Number.isFinite(pickupLon)&&Math.abs(pickupLat)<=90&&Math.abs(pickupLon)<=180;
+  const radians=degrees=>degrees*Math.PI/180;
+  function distanceKm(lat1,lon1,lat2,lon2){
+    const dLat=radians(lat2-lat1),dLon=radians(lon2-lon1);
+    const a=Math.sin(dLat/2)**2+Math.cos(radians(lat1))*Math.cos(radians(lat2))*Math.sin(dLon/2)**2;
+    return 6371*2*Math.atan2(Math.sqrt(a),Math.sqrt(Math.max(0,1-a)));
+  }
+  button.addEventListener('click',()=>{
+    if(!hasPickupCoordinates){
+      status.textContent='Automatic calculation is not available because this mart’s pickup GPS coordinates have not been saved. You can continue now; Denmart admin can confirm the distance and final delivery fee from the pickup point.';
+      return;
+    }
+    if(!navigator.geolocation){
+      status.textContent='This browser cannot access device location. Turn on Location/use a supported browser, or leave distance blank and continue; Denmart admin can confirm the fee from the pickup point.';
+      return;
+    }
+    button.disabled=true;
+    button.textContent='Requesting location…';
+    status.textContent='Allow location access when your browser asks so Denmart can estimate distance from '+pickupName+'.';
+    navigator.geolocation.getCurrentPosition(position=>{
+      const straight=distanceKm(position.coords.latitude,position.coords.longitude,pickupLat,pickupLon);
+      const roadApprox=straight*1.25;
+      button.disabled=false;button.textContent='Estimate from my location';
+      if(!Number.isFinite(roadApprox)||roadApprox>200){
+        field.value='';
+        status.textContent='The distance could not be used as a checkout estimate (it may exceed 200 km). Leave it blank and continue; Denmart admin can confirm the distance and fee from the pickup point.';
+        return;
+      }
+      field.value=roadApprox.toFixed(1);
+      status.textContent='Estimated '+roadApprox.toFixed(1)+' km from '+pickupName+'. This is an approximate road-distance estimate; Denmart admin can confirm the final fee.';
+    },error=>{
+      button.disabled=false;button.textContent='Estimate from my location';
+      if(error&&error.code===1){
+        status.textContent='Location permission is off. Turn on Location for your device and allow this site to use it, then try again. You can still continue with distance blank; Denmart admin can confirm the fee from the pickup point.';
+      }else if(error&&error.code===2){
+        status.textContent='Your device location is unavailable. Turn on device Location and try again, or continue with distance blank so Denmart admin can confirm the fee from the pickup point.';
+      }else{
+        status.textContent='The location request timed out. Try once more, or leave distance blank and continue; Denmart admin can confirm the fee from the pickup point.';
+      }
+    },{enableHighAccuracy:false,timeout:12000,maximumAge:120000});
+  });
+})();
+</script>
+{% endblock %}

@@ -25,6 +25,7 @@
       <div class="pay-destination"><span>Buy Goods Till</span><strong>{{ order.payment_instructions.till_number }}</strong></div>
     {% endif %}
     <p class="pay-simple-help">{% if order.payment_status == 'PAID' %}Payment received. Your order is now moving into fulfilment.{% else %}Use the M-PESA name and phone you entered when you paid. We will confirm the payment automatically.{% endif %}</p>
+    {% if order.delivery_distance_km is none %}<p class="pay-simple-help">The distance could not be estimated automatically. Denmart can confirm the kilometres and revise the delivery fee from the pickup point; the amount shown here updates if an administrator saves a revised quote.</p>{% endif %}
   </section>
 
   <section class="pay-clean-card pay-progress-clean">

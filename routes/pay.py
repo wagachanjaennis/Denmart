@@ -83,11 +83,6 @@ def start_payment():
         flash("The selected store is not available. Please refresh your basket.", "error")
         return redirect("/cart")
 
-    launch_setting = SystemSetting.query.filter_by(business_id=store.business_id, key="storefront_orders_enabled").first()
-    if not launch_setting or launch_setting.value != "1":
-        flash("Online ordering is not open yet. Please check the store announcement for the launch date.", "error")
-        return redirect("/cart")
-
     customer_name = request.form.get("customer_name", "").strip()
     phone = request.form.get("customer_phone", "").strip()
     method = request.form.get("payment_method", "").strip().upper()
@@ -102,10 +97,6 @@ def start_payment():
     if not delivery_location:
         flash("Enter the estate, road, building or pickup point so delivery can be calculated.", "error")
         return redirect("/cart")
-    if not distance_raw:
-        flash("Enter the estimated distance in kilometres before continuing.", "error")
-        return redirect("/cart")
-
     try:
         # The server recalculates the total from current catalogue prices; client prices are never trusted.
         total = Decimal("0")
@@ -120,7 +111,11 @@ def start_payment():
                 raise ValueError("One of the basket items is no longer available.")
             total += (Decimal(str(sp.selling_price)) * qty).quantize(Decimal("0.01"))
             clean_items.append({"store_product_id": sp_id, "quantity": str(qty)})
-        quote = calculate_delivery_quote(store.business_id, store.id, clean_items, distance_raw)
+        # Distance is an estimate, not a checkout prerequisite. If the customer
+        # cannot grant location access or the mart has no saved coordinates,
+        # create a provisional quote using 0 km and let the administrator enter
+        # the distance/final fee from the pickup point before payment is approved.
+        quote = calculate_delivery_quote(store.business_id, store.id, clean_items, distance_raw or "0")
         total = (total + quote["delivery_fee"]).quantize(Decimal("0.01"))
         order = create_payment_order(
             business_id=store.business_id,
@@ -132,7 +127,7 @@ def start_payment():
             channel="ONLINE",
             payment_method=method or None,
             delivery_location=delivery_location,
-            delivery_distance_km=quote["distance_km"],
+            delivery_distance_km=quote["distance_km"] if distance_raw else None,
             estimated_weight_kg=quote["estimated_weight_kg"],
             packaging_weight_kg=quote["packaging_weight_kg"],
             delivery_fee=quote["delivery_fee"],
@@ -306,27 +301,38 @@ def save_packaging_quote(order_id):
     try:
         packed_weight = Decimal(str(request.form.get("packed_weight_kg", "")).strip())
         delivery_fee = Decimal(str(request.form.get("delivery_fee", "")).strip())
-        if not packed_weight.is_finite() or packed_weight < 0 or not delivery_fee.is_finite() or delivery_fee < 0:
+        distance_raw = str(request.form.get("delivery_distance_km", "")).strip()
+        distance = Decimal(distance_raw) if distance_raw else None
+        if (not packed_weight.is_finite() or packed_weight < 0 or
+                not delivery_fee.is_finite() or delivery_fee < 0 or
+                (distance is not None and (not distance.is_finite() or distance < 0 or distance > Decimal("200")))):
             raise ValueError
     except (InvalidOperation, ValueError, TypeError):
-        flash("Packed weight and delivery charge must be valid non-negative numbers.", "error")
+        flash("Packed weight and delivery charge must be valid non-negative numbers; distance must be between 0 and 200 km when entered.", "error")
         return redirect(url_for("pay.pay_detail", order_id=order.id))
     if packed_weight > Decimal("10000") or delivery_fee > Decimal("10000000"):
         flash("The packed weight or delivery charge is too high to save.", "error")
         return redirect(url_for("pay.pay_detail", order_id=order.id))
     items = PayOrderItem.query.filter_by(payment_order_id=order.id).all()
     goods_subtotal = sum((Decimal(str(item.line_total or 0)) for item in items), Decimal("0.00"))
-    old = {"weight_kg": str(order.estimated_weight_kg or 0), "delivery_fee": str(order.delivery_fee or 0), "expected_amount": str(order.expected_amount)}
+    old = {"weight_kg": str(order.estimated_weight_kg or 0), "delivery_fee": str(order.delivery_fee or 0),
+           "delivery_distance_km": str(order.delivery_distance_km) if order.delivery_distance_km is not None else None,
+           "expected_amount": str(order.expected_amount)}
     order.estimated_weight_kg = packed_weight.quantize(Decimal("0.001"))
+    if distance is not None:
+        order.delivery_distance_km = distance.quantize(Decimal("0.01"))
     order.delivery_fee = delivery_fee.quantize(Decimal("0.01"))
     order.expected_amount = (goods_subtotal + order.delivery_fee).quantize(Decimal("0.01"))
-    note = f"Packing quote updated: packed weight {order.estimated_weight_kg} kg; delivery KES {order.delivery_fee}; total KES {order.expected_amount}."
+    distance_note = f"distance {order.delivery_distance_km} km; " if order.delivery_distance_km is not None else "distance not recorded; "
+    note = f"Packing quote updated: packed weight {order.estimated_weight_kg} kg; {distance_note}delivery KES {order.delivery_fee}; total KES {order.expected_amount}."
     order.last_match_note = note
     db.session.add(PayEvent(payment_order_id=order.id, event_type="PACKING_QUOTE_UPDATED", source="ADMIN", actor_user_id=current_user.id, note=note))
     from models import AuditLog
     db.session.add(AuditLog(business_id=order.business_id, user_id=current_user.id, action="ONLINE_PACKING_QUOTE_UPDATED",
         entity_type="PayOrder", entity_id=order.id, old_values=old,
-        new_values={"weight_kg": str(order.estimated_weight_kg), "delivery_fee": str(order.delivery_fee), "expected_amount": str(order.expected_amount)},
+        new_values={"weight_kg": str(order.estimated_weight_kg),
+                    "delivery_distance_km": str(order.delivery_distance_km) if order.delivery_distance_km is not None else None,
+                    "delivery_fee": str(order.delivery_fee), "expected_amount": str(order.expected_amount)},
         ip_address=(request.headers.get("X-Forwarded-For", request.remote_addr) or "")[:80],
         user_agent=(request.user_agent.string or "")[:1000]))
     db.session.commit()

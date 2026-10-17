@@ -1670,7 +1670,6 @@ def settings():
     sidebar_ad_body_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_body").first()
     sidebar_ad_link_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_link").first()
     control2_approval_setting=SystemSetting.query.filter_by(business_id=business_id,key="control2_can_approve_payments").first()
-    storefront_orders_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_orders_enabled").first()
     if request.method=="POST":
         name=(request.form.get("business_name") or "").strip()[:200]
         brand_name=(request.form.get("brand_name") or "").strip()[:100]
@@ -1679,7 +1678,6 @@ def settings():
         sidebar_ad_body=(request.form.get("sidebar_ad_body") or "").strip()[:300]
         sidebar_ad_link=(request.form.get("sidebar_ad_link") or "").strip()[:300]
         control2_can_approve = "1" if request.form.get("control2_can_approve_payments") == "1" else "0"
-        storefront_orders_enabled = "1" if request.form.get("storefront_orders_enabled") == "1" else "0"
         if sidebar_ad_link and not (sidebar_ad_link.startswith("/") or sidebar_ad_link.startswith("https://")):
             sidebar_ad_link = ""
         footer=(request.form.get("footer_text") or "").strip()[:500]
@@ -1696,8 +1694,6 @@ def settings():
         sidebar_ad_link_setting.value=sidebar_ad_link
         control2_approval_setting=control2_approval_setting or SystemSetting(business_id=business_id,key="control2_can_approve_payments")
         control2_approval_setting.value=control2_can_approve
-        storefront_orders_setting=storefront_orders_setting or SystemSetting(business_id=business_id,key="storefront_orders_enabled")
-        storefront_orders_setting.value=storefront_orders_enabled
         footer_setting=footer_setting or SystemSetting(business_id=business_id,key="footer_text")
         footer_setting.value=footer
         try: lp=max(0,int(request.form.get("loyalty_points_per_100","1") or "1"))
@@ -1719,7 +1715,6 @@ def settings():
                            sidebar_ad_body=brand_display_copy(sidebar_ad_body_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if sidebar_ad_body_setting else "",
                            sidebar_ad_link=sidebar_ad_link_setting.value if sidebar_ad_link_setting else "",
                            control2_can_approve_payments=(control2_approval_setting.value if control2_approval_setting else "0") == "1",
-                           storefront_orders_enabled=(storefront_orders_setting.value if storefront_orders_setting else "0") == "1",
                            loyalty_points_per_100=loyalty_setting.value if loyalty_setting else "1")
 
 def _reports_payload(days):

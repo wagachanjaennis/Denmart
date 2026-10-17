@@ -167,9 +167,9 @@ def cart():
         from services.payment_engine import get_pay_settings, enabled_methods
         settings = get_pay_settings(store.business_id)
         methods = enabled_methods(settings)
-    launch_setting = SystemSetting.query.filter_by(business_id=(store.business_id if store else None), key="storefront_orders_enabled").first() if store else None
-    orders_enabled = bool(launch_setting and launch_setting.value == "1")
-    return render_template("shop/cart.html", store=store, payment_methods=methods, pay_settings=settings, orders_enabled=orders_enabled)
+    # The checkout button must not depend on a separately toggled launch flag.
+    # Payment destination defaults are established by get_pay_settings above.
+    return render_template("shop/cart.html", store=store, payment_methods=methods, pay_settings=settings, orders_enabled=True)
 
 
 @bp.get("/favicon.ico")
