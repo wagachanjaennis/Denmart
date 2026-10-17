@@ -17,7 +17,7 @@
     </div>
     <div class="pay-amount-hero">
       <span>Amount to pay</span>
-      <strong>KES {{ '%.2f'|format(order.expected_amount|float) }}</strong>
+      <strong id="amountToPay">KES {{ '%.2f'|format(order.expected_amount|float) }}</strong>
     </div>
     {% if order.payment_method == 'PAYBILL' %}
       <div class="pay-destination"><span>PayBill</span><strong>{{ order.payment_instructions.paybill_number }}</strong>{% if order.payment_instructions.account_name %}<small>Account: {{ order.payment_instructions.account_name }}</small>{% endif %}</div>
@@ -35,6 +35,11 @@
   <section class="pay-clean-card pay-order-summary">
     <div class="pay-summary-head"><span class="eyebrow">ORDER</span><span>{{ order.reference }}</span></div>
     {% for item in items %}<div class="pay-item"><span>{{ item.product_name_snapshot }} × {{ item.quantity }}</span><strong>KES {{ '%.2f'|format(item.line_total|float) }}</strong></div>{% endfor %}
+    <div class="pay-item"><span>Estimated packed weight</span><strong id="packedWeight">{{ '%.3f'|format((order.estimated_weight_kg or 0)|float) }} kg</strong></div>
+    {% if order.delivery_location %}<div class="pay-item"><span>Delivery location</span><strong>{{ order.delivery_location }}</strong></div>{% endif %}
+    {% if order.delivery_distance_km is not none %}<div class="pay-item"><span>Distance</span><strong>{{ '%.2f'|format(order.delivery_distance_km|float) }} km</strong></div>{% endif %}
+    <div class="pay-item"><span>Delivery charge</span><strong id="deliveryCharge">KES {{ '%.2f'|format((order.delivery_fee or 0)|float) }}</strong></div>
+    <div class="pay-item"><span>Total to pay</span><strong id="summaryTotal">KES {{ '%.2f'|format(order.expected_amount|float) }}</strong></div>
   </section>
 </section>
 {% endblock %}
@@ -47,8 +52,17 @@
   const msg=document.getElementById('paymentMessage');
   const pay=document.getElementById('payStage');
   const ful=document.getElementById('fulfilmentStage');
+  const amount=document.getElementById('amountToPay');
+  const weight=document.getElementById('packedWeight');
+  const delivery=document.getElementById('deliveryCharge');
+  const summaryTotal=document.getElementById('summaryTotal');
+  const money=x=>'KES '+(Number(x||0)).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2});
   const nice=x=>String(x||'').replaceAll('_',' ');
   function apply(d){
+    if(amount) amount.textContent=money(d.expected_amount);
+    if(summaryTotal) summaryTotal.textContent=money(d.expected_amount);
+    if(delivery) delivery.textContent=money(d.delivery_fee);
+    if(weight) weight.textContent=(Number(d.estimated_weight_kg||0)).toFixed(3)+' kg';
     const paid=d.payment_status==='PAID';
     status.textContent=nice(d.payment_status);
     status.className='pay-status-badge pay-status-'+String(d.payment_status||'').toLowerCase();
@@ -65,7 +79,7 @@
       msg.textContent='Please return to the shop and start a new payment.';
     }else{
       head.textContent='Waiting for payment';
-      msg.textContent='Send the exact amount to the Till above, then keep this page open while we confirm it.';
+      msg.textContent='Send the exact current amount shown above, including delivery, then keep this page open while we confirm it.';
     }
   }
   async function poll(){try{const r=await fetch('/pay/api/'+encodeURIComponent(token),{cache:'no-store'});if(r.ok)apply(await r.json())}catch(_e){}}
