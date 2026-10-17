@@ -40,18 +40,28 @@ def _ensure_gateway_secret():
 
 
 def _ensure_payment_columns():
-    """Add non-destructive columns needed by the independent POS payment flow."""
+    """Add columns to existing deployments without replacing their live database."""
     from sqlalchemy import inspect, text
     inspector = inspect(db.engine)
     if "pay_orders" not in inspector.get_table_names():
         return
     columns = {c["name"] for c in inspector.get_columns("pay_orders")}
-    if "pos_cashier_id" in columns:
-        return
-    if db.engine.url.get_backend_name() == "postgresql":
-        db.session.execute(text('ALTER TABLE pay_orders ADD COLUMN IF NOT EXISTS pos_cashier_id VARCHAR(36) REFERENCES users(id)'))
-    else:
-        db.session.execute(text('ALTER TABLE pay_orders ADD COLUMN pos_cashier_id VARCHAR(36)'))
+    additions = {
+        "pos_cashier_id": "VARCHAR(36)",
+        "delivery_location": "VARCHAR(500)",
+        "delivery_distance_km": "NUMERIC(10,2)",
+        "estimated_weight_kg": "NUMERIC(14,3)",
+        "packaging_weight_kg": "NUMERIC(14,3) DEFAULT 0",
+        "delivery_fee": "NUMERIC(14,2) NOT NULL DEFAULT 0",
+    }
+    dialect = db.engine.url.get_backend_name()
+    for column, sql_type in additions.items():
+        if column not in columns:
+            # The values are fixed developer-authored column names/types above.
+            if dialect == "postgresql":
+                db.session.execute(text(f'ALTER TABLE pay_orders ADD COLUMN IF NOT EXISTS "{column}" {sql_type}'))
+            else:
+                db.session.execute(text(f'ALTER TABLE pay_orders ADD COLUMN "{column}" {sql_type}'))
     db.session.commit()
 
 def bootstrap_database():

@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import timezone
 import json
 from functools import wraps
@@ -18,6 +18,7 @@ from services.payment_engine import (
     normalize_phone,
     get_pos_sale_for_order,
 )
+from services.shipping import calculate_delivery_quote
 
 bp = Blueprint("pay", __name__)
 
@@ -90,6 +91,20 @@ def start_payment():
     customer_name = request.form.get("customer_name", "").strip()
     phone = request.form.get("customer_phone", "").strip()
     method = request.form.get("payment_method", "").strip().upper()
+    delivery_location = request.form.get("delivery_location", "").strip()[:500]
+    distance_raw = request.form.get("delivery_distance_km", "").strip()
+    if len(customer_name) < 2:
+        flash("Enter the full name registered to the M-PESA number.", "error")
+        return redirect("/cart")
+    if not normalize_phone(phone):
+        flash("Enter a valid Kenyan mobile number, for example 0712345678, 0112345678 or +254712345678.", "error")
+        return redirect("/cart")
+    if not delivery_location:
+        flash("Enter the estate, road, building or pickup point so delivery can be calculated.", "error")
+        return redirect("/cart")
+    if not distance_raw:
+        flash("Enter the estimated distance in kilometres before continuing.", "error")
+        return redirect("/cart")
 
     try:
         # The server recalculates the total from current catalogue prices; client prices are never trusted.
@@ -105,6 +120,8 @@ def start_payment():
                 raise ValueError("One of the basket items is no longer available.")
             total += (Decimal(str(sp.selling_price)) * qty).quantize(Decimal("0.01"))
             clean_items.append({"store_product_id": sp_id, "quantity": str(qty)})
+        quote = calculate_delivery_quote(store.business_id, store.id, clean_items, distance_raw)
+        total = (total + quote["delivery_fee"]).quantize(Decimal("0.01"))
         order = create_payment_order(
             business_id=store.business_id,
             store_id=store.id,
@@ -114,6 +131,11 @@ def start_payment():
             items=clean_items,
             channel="ONLINE",
             payment_method=method or None,
+            delivery_location=delivery_location,
+            delivery_distance_km=quote["distance_km"],
+            estimated_weight_kg=quote["estimated_weight_kg"],
+            packaging_weight_kg=quote["packaging_weight_kg"],
+            delivery_fee=quote["delivery_fee"],
         )
     except ValueError as exc:
         flash(str(exc), "error")
@@ -143,6 +165,10 @@ def approval_api(token):
         payment_status=order.payment_status,
         fulfillment_status=order.fulfillment_status,
         expected_amount=str(order.expected_amount),
+        delivery_location=order.delivery_location or "",
+        delivery_distance_km=str(order.delivery_distance_km) if order.delivery_distance_km is not None else None,
+        estimated_weight_kg=str(order.estimated_weight_kg or 0),
+        delivery_fee=str(order.delivery_fee or 0),
         paid_amount=str(order.paid_amount) if order.paid_amount is not None else None,
         paid_at=order.paid_at.isoformat() if order.paid_at else None,
         transaction_code=order.mpesa_transaction_code,
@@ -166,9 +192,11 @@ def admin_pay():
     settings = get_pay_settings(business_id)
     saved = {row.key: row.value for row in SystemSetting.query.filter_by(business_id=business_id).all()
              if row.key in {"bank_account_name", "bank_account_number", "bank_payment_instructions"}}
+    from services.shipping import shipping_settings
+    ship = shipping_settings(business_id)
     recent_receipts = PayReceipt.query.filter_by(business_id=business_id).order_by(PayReceipt.created_at.desc()).limit(80).all()
     return render_template("admin/pay.html", rows=rows, settings=settings, methods=enabled_methods(settings),
-                           recent_receipts=recent_receipts, bank_settings=saved)
+                           recent_receipts=recent_receipts, bank_settings=saved, shipping=ship)
 
 
 @bp.post("/control/pay/settings")
@@ -199,8 +227,34 @@ def save_pay_settings():
             row.updated_at = now()
         else:
             db.session.add(SystemSetting(business_id=current_user.business_id, key=key, value=value, updated_at=now()))
+    shipping_values = {
+        "shipping_delivery_enabled": "1" if request.form.get("shipping_delivery_enabled") == "1" else "0",
+        "shipping_base_fee": request.form.get("shipping_base_fee", "50").strip()[:30],
+        "shipping_per_km_fee": request.form.get("shipping_per_km_fee", "20").strip()[:30],
+        "shipping_weight_limit_kg": request.form.get("shipping_weight_limit_kg", "10").strip()[:30],
+        "shipping_overweight_fee": request.form.get("shipping_overweight_fee", "100").strip()[:30],
+        "shipping_packaging_weight_kg": request.form.get("shipping_packaging_weight_kg", "0.25").strip()[:30],
+        "shipping_include_packaging_weight": "1" if request.form.get("shipping_include_packaging_weight") == "1" else "0",
+        "shipping_charge_overweight": "1" if request.form.get("shipping_charge_overweight") == "1" else "0",
+    }
+    from decimal import InvalidOperation
+    for key, value in shipping_values.items():
+        if key.endswith(("base_fee", "per_km_fee", "weight_limit_kg", "overweight_fee", "packaging_weight_kg")):
+            try:
+                numeric = Decimal(value)
+                if not numeric.is_finite() or numeric < 0:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                db.session.rollback()
+                flash("Shipping fees and weights must be valid non-negative numbers.", "error")
+                return redirect(url_for("pay.admin_pay"))
+        row = SystemSetting.query.filter_by(business_id=current_user.business_id, key=key).first()
+        if row:
+            row.value = value; row.updated_at = now()
+        else:
+            db.session.add(SystemSetting(business_id=current_user.business_id, key=key, value=value, updated_at=now()))
     db.session.commit()
-    flash("PAY and bank-transfer settings saved.", "success")
+    flash("PAY, bank-transfer and delivery-pricing settings saved.", "success")
     return redirect(url_for("pay.admin_pay"))
 
 
@@ -235,6 +289,49 @@ def fulfillment(order_id):
         db.session.rollback()
         flash("Fulfillment update failed safely; no change was saved.", "error")
     return redirect(url_for("pay.admin_pay"))
+
+
+@bp.post("/control/pay/<order_id>/packaging")
+@_admin_required
+def save_packaging_quote(order_id):
+    """Let staff record the actual packed weight and final delivery price before payment."""
+    order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).with_for_update().first_or_404()
+    _expire(order)
+    if (order.channel or "").upper() != "ONLINE":
+        flash("Packing adjustments are only available for online orders.", "error")
+        return redirect(url_for("pay.pay_detail", order_id=order.id))
+    if order.payment_status != "PENDING" or order.fulfillment_status != "AWAITING_PAYMENT":
+        flash("The packing quote is locked once payment is under review or approved. Do not change a customer's amount after payment.", "error")
+        return redirect(url_for("pay.pay_detail", order_id=order.id))
+    try:
+        packed_weight = Decimal(str(request.form.get("packed_weight_kg", "")).strip())
+        delivery_fee = Decimal(str(request.form.get("delivery_fee", "")).strip())
+        if not packed_weight.is_finite() or packed_weight < 0 or not delivery_fee.is_finite() or delivery_fee < 0:
+            raise ValueError
+    except (InvalidOperation, ValueError, TypeError):
+        flash("Packed weight and delivery charge must be valid non-negative numbers.", "error")
+        return redirect(url_for("pay.pay_detail", order_id=order.id))
+    if packed_weight > Decimal("10000") or delivery_fee > Decimal("10000000"):
+        flash("The packed weight or delivery charge is too high to save.", "error")
+        return redirect(url_for("pay.pay_detail", order_id=order.id))
+    items = PayOrderItem.query.filter_by(payment_order_id=order.id).all()
+    goods_subtotal = sum((Decimal(str(item.line_total or 0)) for item in items), Decimal("0.00"))
+    old = {"weight_kg": str(order.estimated_weight_kg or 0), "delivery_fee": str(order.delivery_fee or 0), "expected_amount": str(order.expected_amount)}
+    order.estimated_weight_kg = packed_weight.quantize(Decimal("0.001"))
+    order.delivery_fee = delivery_fee.quantize(Decimal("0.01"))
+    order.expected_amount = (goods_subtotal + order.delivery_fee).quantize(Decimal("0.01"))
+    note = f"Packing quote updated: packed weight {order.estimated_weight_kg} kg; delivery KES {order.delivery_fee}; total KES {order.expected_amount}."
+    order.last_match_note = note
+    db.session.add(PayEvent(payment_order_id=order.id, event_type="PACKING_QUOTE_UPDATED", source="ADMIN", actor_user_id=current_user.id, note=note))
+    from models import AuditLog
+    db.session.add(AuditLog(business_id=order.business_id, user_id=current_user.id, action="ONLINE_PACKING_QUOTE_UPDATED",
+        entity_type="PayOrder", entity_id=order.id, old_values=old,
+        new_values={"weight_kg": str(order.estimated_weight_kg), "delivery_fee": str(order.delivery_fee), "expected_amount": str(order.expected_amount)},
+        ip_address=(request.headers.get("X-Forwarded-For", request.remote_addr) or "")[:80],
+        user_agent=(request.user_agent.string or "")[:1000]))
+    db.session.commit()
+    flash("Packed weight and final delivery charge saved. The payment page now shows the revised amount.", "success")
+    return redirect(url_for("pay.pay_detail", order_id=order.id))
 
 
 @bp.get("/control/pay/<order_id>")

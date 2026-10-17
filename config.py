@@ -34,6 +34,10 @@ class Config:
     BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Denmart")
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+    # Restricted service controls. Configure these only in the hosting provider's
+    # environment panel; never commit their values into source control.
+    DEV_NAME = os.getenv("DEV_NAME", "")
+    DEV_PASS = os.getenv("DEV_PASS", "")
     # Fixed merchant destination for the current deployment. Keep this server-side; never bake it into the Android APK.
     # Optional stable public URL, e.g. https://denmart.onrender.com. When set,
     # the Android gateway link is generated from this value instead of depending

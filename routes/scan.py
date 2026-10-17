@@ -54,6 +54,33 @@ def _normalize_barcode(value):
     return re.sub(r"\s+", "", str(value or "")).strip()
 
 
+def _is_seed_placeholder_barcode(value):
+    # seed.py generated these internal IDs as 290 + nine hash digits. They are not
+    # supplier barcodes; replace one in-place when the same product gets scanned.
+    return bool(re.fullmatch(r"290\d{9}", _normalize_barcode(value)))
+
+
+def _find_placeholder_by_identity(name, brand=None):
+    folded = re.sub(r"\s+", " ", str(name or "")).strip().casefold()
+    if not folded:
+        return None
+    candidates = (Product.query.join(StoreProduct, StoreProduct.product_id == Product.id)
+                  .join(Store, Store.id == StoreProduct.store_id)
+                  .filter(Store.business_id == current_user.business_id,
+                          Product.barcode.like("290%"), Product.status == "ACTIVE")
+                  .distinct().all())
+    for candidate in candidates:
+        if not _is_seed_placeholder_barcode(candidate.barcode):
+            continue
+        other = re.sub(r"\s+", " ", str(candidate.name or "")).strip().casefold()
+        if other != folded:
+            continue
+        if brand and candidate.brand and re.sub(r"\s+", " ", candidate.brand).strip().casefold() != re.sub(r"\s+", " ", brand).strip().casefold():
+            continue
+        return candidate
+    return None
+
+
 def _slug_base(name, barcode):
     base = re.sub(r"[^a-z0-9]+", "-", str(name or "product").lower()).strip("-") or "product"
     code = re.sub(r"[^a-z0-9]+", "", str(barcode or "").lower())
@@ -141,6 +168,7 @@ def lookup():
             "category_id": product.category_id or "",
             "unit": product.unit or "unit",
             "pack_size": product.pack_size or "",
+            "weight_kg": str(product.weight) if product.weight is not None else "",
             "image_url": product.image_url or "",
             "stock": str(selected_sp.stock_quantity if selected_sp else 0),
             "reserved": str(selected_sp.reserved_quantity if selected_sp else 0),
@@ -207,6 +235,7 @@ def save():
     pack_size = str(data.get("pack_size") or "").strip()[:80] or unit
     raw_price = str(data.get("selling_price") or "").strip()
     raw_cost = str(data.get("cost_price") or "").strip()
+    raw_weight = str(data.get("weight_kg") or "").strip()
     store = _valid_store(str(data.get("store_id") or "")) or _default_store(_business_stores())
     if not store:
         return jsonify(ok=False, error="store_required", message="Choose the mart where this stock belongs."), 400
@@ -229,8 +258,11 @@ def save():
     try:
         price = Decimal(raw_price) if raw_price else None
         cost = Decimal(raw_cost) if raw_cost else None
+        weight = Decimal(raw_weight) if raw_weight else None
     except InvalidOperation:
-        return jsonify(ok=False, error="invalid_price", message="Enter valid selling and cost prices."), 400
+        return jsonify(ok=False, error="invalid_price", message="Enter valid price, cost and weight values."), 400
+    if weight is not None and (not weight.is_finite() or weight < 0):
+        return jsonify(ok=False, error="invalid_weight", message="Weight must be a non-negative number in kilograms."), 400
     for value in (price, cost):
         if value is not None and (not value.is_finite() or value < 0):
             return jsonify(ok=False, error="invalid_price", message="Prices must be finite and cannot be negative."), 400
@@ -259,7 +291,10 @@ def save():
             if len(candidates) > 1:
                 return jsonify(ok=False, error="ambiguous_barcode", message="This barcode belongs to more than one product. Choose the correct product first."), 409
             product = candidates[0][0] if candidates else None
-
+            if product is None:
+                product = _find_placeholder_by_identity(name, brand)
+                if product and not _is_seed_placeholder_barcode(product.barcode):
+                    product = None
         created = False
         renamed = False
         if not product:
@@ -271,13 +306,18 @@ def save():
                 brand=brand,
                 unit=unit,
                 pack_size=pack_size,
+                weight=weight,
                 status="ACTIVE",
+                search_keywords=" ".join(x for x in [name.lower(), (brand or "").lower()] if x),
             )
             db.session.add(product)
             db.session.flush()
             created = True
         else:
             if _normalize_barcode(product.barcode or "") != barcode:
+                conflicting = Product.query.filter(Product.barcode == barcode, Product.id != product.id).first()
+                if conflicting:
+                    return jsonify(ok=False, error="barcode_in_use", message="This barcode is already assigned to a different product. Nothing was changed."), 409
                 product.barcode = barcode
             if product.name.strip() != name:
                 product.name = name
@@ -286,6 +326,8 @@ def save():
             if brand and not product.brand: product.brand = brand
             if unit and not product.unit: product.unit = unit
             if pack_size and not product.pack_size: product.pack_size = pack_size
+            if weight is not None: product.weight = weight
+            product.search_keywords = " ".join(x for x in [product.name.lower(), (product.brand or "").lower()] if x)
 
         sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
         if not sp:
@@ -319,6 +361,9 @@ def save():
         if quantity > 0:
             sp.stock_quantity = before + quantity
 
+        from models import ProductAlias
+        if not ProductAlias.query.filter_by(product_id=product.id, alias=product.name).first():
+            db.session.add(ProductAlias(product_id=product.id, alias=product.name, alias_type="SEARCH"))
         db.session.add(InventoryTransaction(
             store_id=store.id,
             product_id=product.id,

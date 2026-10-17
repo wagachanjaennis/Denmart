@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from flask import Flask, Blueprint, jsonify, redirect, url_for, request, render_template, current_app
+from flask import Flask, Blueprint, jsonify, redirect, url_for, request, render_template, current_app, session
 from flask_login import current_user
 from config import Config
 from extensions import db, migrate, login_manager, csrf
@@ -34,6 +34,7 @@ def create_app():
     from routes.scan import bp as scan_bp
     from routes.pay import bp as pay_bp
     from routes.control2 import bp as control2_bp
+    from routes.dev_admin import bp as developer_admin_bp
     app.register_blueprint(auth_bp)
     app.register_blueprint(shop_bp)
     app.register_blueprint(pos_bp)
@@ -42,6 +43,53 @@ def create_app():
     app.register_blueprint(scan_bp)
     app.register_blueprint(pay_bp)
     app.register_blueprint(control2_bp)
+    app.register_blueprint(developer_admin_bp)
+
+    @app.get("/robots.txt")
+    def robots_txt():
+        # Discourage indexing of private control routes; this is not a substitute for auth.
+        return "User-agent: *\nDisallow: /qaz\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600"}
+
+    # Service gates are owner-controlled and deliberately leave /qaz available.
+    @app.before_request
+    def enforce_service_controls():
+        if request.path.startswith("/qaz") or request.path.startswith("/static/") or request.path in {"/healthz", "/favicon.ico", "/pulse_receiver", "/robots.txt"}:
+            return None
+        try:
+            business = Business.query.order_by(Business.created_at).first()
+            if not business:
+                return None
+            flags = {row.key: row.value for row in SystemSetting.query.filter_by(business_id=business.id).all()
+                     if row.key in {"dev_site_mode", "dev_storefront_enabled", "dev_admin_enabled", "dev_pos_enabled"}}
+            path = request.path
+            site_off = flags.get("dev_site_mode", "0") == "1"
+            admin_off = flags.get("dev_admin_enabled", "1") != "1"
+            pos_off = flags.get("dev_pos_enabled", "1") != "1"
+            storefront_off = flags.get("dev_storefront_enabled", "1") != "1"
+            if site_off:
+                # Allow sign-in itself. Authenticated owner will land on the reminder
+                # page in place of the dashboard; all customer/operations requests pause.
+                if path == "/control" and request.method in {"GET", "POST"} and not current_user.is_authenticated:
+                    return None
+                if path in {"/merchant", "/control2"} and request.method in {"GET", "POST"} and not current_user.is_authenticated:
+                    return None
+                if current_user.is_authenticated and session.get("portal") == "admin" and path in {"/control", "/control/"}:
+                    return render_template("dev_admin/maintenance.html", reason="Subscription reminder: this Denmart service is paused. Please renew the monthly subscription to restore operations."), 503
+                # A quiet maintenance page is safer than letting cached data-changing requests run.
+                return render_template("dev_admin/maintenance.html", reason="Sorry for the inconvenience. This service is temporarily unavailable. Please contact support."), 503
+            if admin_off and (path == "/control" or path.startswith("/control/")):
+                # Leave the login form reachable while the dashboard is paused;
+                # after a successful sign-in the owner sees the subscription reminder.
+                if path == "/control" and request.method in {"GET", "POST"} and not current_user.is_authenticated:
+                    return None
+                return render_template("dev_admin/maintenance.html", reason="Admin dashboard is temporarily unavailable. Please contact the service provider."), 503
+            if pos_off and (path == "/merchant" or path.startswith("/merchant/") or path.startswith("/api/pos/")):
+                return render_template("dev_admin/maintenance.html", reason="The till is temporarily unavailable. Sorry for the inconvenience; please try again later."), 503
+            if storefront_off and (path in {"/", "/shop", "/cart", "/pay"} or path.startswith("/product/") or path.startswith("/locations") or path.startswith("/pay/")):
+                return render_template("dev_admin/maintenance.html", reason="Online shopping is temporarily unavailable. Sorry for the inconvenience; please try again later."), 503
+        except Exception:
+            current_app.logger.exception("Service availability gate could not read its settings")
+        return None
 
     # Render services sometimes start with `gunicorn app:app` and skip
     # the explicit init_db.py command. Ensure a fresh database cannot

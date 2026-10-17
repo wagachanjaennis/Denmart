@@ -11,6 +11,9 @@ def test_normalization():
     assert normalize_ke_phone("0732154678") == "254732154678"
     assert normalize_ke_phone("+254732154678") == "254732154678"
     assert normalize_ke_phone("254732154678") == "254732154678"
+    assert normalize_ke_phone("0112345678") == "254112345678"
+    assert normalize_ke_phone("112345678") == "254112345678"
+    assert normalize_ke_phone("00254732154678") == "254732154678"
     assert normalize_amount("Ksh 1,000.00") == normalize_amount("1000") == normalize_amount("1000.00")
     assert normalize_person_name(" Jean   Promise ") == "JEAN PROMISE"
 

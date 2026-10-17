@@ -5,6 +5,8 @@ import re
 def normalize_ke_phone(value):
     """Return a canonical Kenyan mobile number as 2547XXXXXXXX/2541XXXXXXXX."""
     digits = re.sub(r"\D", "", str(value or ""))
+    if digits.startswith("00"):
+        digits = digits[2:]
     if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
         return digits
     if digits.startswith("0") and len(digits) == 10 and digits[1] in "17":

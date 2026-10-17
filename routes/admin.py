@@ -685,6 +685,7 @@ def quick_create_product():
     pack_size = str(data.get("pack_size") or "").strip()[:80] or unit
     sku = str(data.get("sku") or "").strip()[:80] or None
     description = str(data.get("description") or "").strip()[:1200] or None
+    raw_weight = str(data.get("weight_kg") or "").strip()
     if not name:
         return jsonify(ok=False, error="name_required", message="Enter a product name. Barcode-only capture is allowed after adding a name."), 400
     store = Store.query.filter_by(id=store_id, business_id=current_user.business_id, is_active=True).first() if store_id else Store.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Store.name).first()
@@ -699,11 +700,12 @@ def quick_create_product():
         price = Decimal(raw_price) if raw_price else None
         cost = Decimal(raw_cost) if raw_cost else None
         quantity = Decimal(raw_stock) if raw_stock else Decimal("0")
+        weight = Decimal(raw_weight) if raw_weight else None
     except (InvalidOperation, ValueError, TypeError):
-        return jsonify(ok=False, error="invalid_number", message="Check selling price, cost price and quantity."), 400
-    vals = [x for x in (price, cost, quantity) if x is not None]
-    if not all(x.is_finite() for x in vals) or quantity < 0 or (price is not None and price < 0) or (cost is not None and cost < 0):
-        return jsonify(ok=False, error="invalid_number", message="Prices and stock must be finite non-negative numbers."), 400
+        return jsonify(ok=False, error="invalid_number", message="Check selling price, cost, weight and quantity."), 400
+    vals = [x for x in (price, cost, quantity, weight) if x is not None]
+    if not all(x.is_finite() for x in vals) or quantity < 0 or (price is not None and price < 0) or (cost is not None and cost < 0) or (weight is not None and weight < 0):
+        return jsonify(ok=False, error="invalid_number", message="Prices, weight and stock must be finite non-negative numbers."), 400
     if price is not None and price > 0 and cost is not None and price < cost:
         return jsonify(ok=False, error="selling_below_cost", message=f"Selling price (KES {price:.2f}) is below cost price (KES {cost:.2f})."), 400
     if price is not None and price == 0 and cost is not None and cost > 0:
@@ -715,6 +717,24 @@ def quick_create_product():
     try:
         product = Product.query.filter_by(barcode=barcode).first() if barcode else None
         created = False
+        replaced_placeholder = False
+        if product is None and barcode:
+            # seed.py's synthetic 290 + nine-digit IDs are placeholders. If the
+            # operator now scans the real code and the name matches exactly, keep
+            # the same product row (and its images/sales links) and swap its barcode.
+            normalized_name = re.sub(r"\s+", " ", name).strip().casefold()
+            normalized_brand = re.sub(r"\s+", " ", brand or "").strip().casefold()
+            placeholder_candidates = (Product.query.join(StoreProduct, StoreProduct.product_id == Product.id)
+                .join(Store, Store.id == StoreProduct.store_id)
+                .filter(Store.business_id == current_user.business_id,
+                        Product.barcode.like("290%"), Product.status == "ACTIVE")
+                .distinct().all())
+            for candidate in placeholder_candidates:
+                candidate_brand = re.sub(r"\s+", " ", str(candidate.brand or "")).strip().casefold()
+                same_name = re.sub(r"\s+", " ", str(candidate.name or "")).strip().casefold() == normalized_name
+                same_brand = not (normalized_brand and candidate_brand and normalized_brand != candidate_brand)
+                if same_name and same_brand and re.fullmatch(r"290\d{9}", re.sub(r"\s+", "", str(candidate.barcode or ""))):
+                    product = candidate; replaced_placeholder = True; break
         if product is None:
             from seed import slugify
             base_slug = slugify(name) or "product"
@@ -722,17 +742,24 @@ def quick_create_product():
             while Product.query.filter_by(slug=slug).first():
                 slug = f"{base_slug}-{number}"; number += 1
             product = Product(name=name, slug=slug, barcode=barcode, brand=brand, category_id=category_id,
-                              unit=unit, pack_size=pack_size, sku=sku, description=description, status="ACTIVE",
+                              unit=unit, pack_size=pack_size, sku=sku, description=description, weight=weight, status="ACTIVE",
                               search_keywords=" ".join(x for x in [name.lower(), (brand or "").lower(), (description or "").lower()] if x))
             db.session.add(product); db.session.flush(); created = True
             db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
         else:
+            # A real scanned barcode replaces only an identified generated placeholder.
+            if replaced_placeholder and barcode:
+                conflict = Product.query.filter(Product.barcode == barcode, Product.id != product.id).first()
+                if conflict:
+                    return jsonify(ok=False, error="barcode_in_use", message="This barcode is already assigned to another product."), 409
+                product.barcode = barcode
             # Shared catalogue names should not be overwritten by another store's scan.
             if not product.name.strip(): product.name = name
             if not product.category_id and category_id: product.category_id = category_id
             if not product.brand and brand: product.brand = brand
             if not product.unit: product.unit = unit
             if not product.pack_size: product.pack_size = pack_size
+            if weight is not None: product.weight = weight
         sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
         if sp is None:
             sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost or Decimal("0"),
@@ -761,7 +788,7 @@ def quick_create_product():
         audit("PRODUCT_QUICK_SAVED", "Product", product.id, new_values={"name": product.name, "barcode": barcode,
               "store_id": store.id, "selling_price": str(sp.selling_price), "cost_price": str(sp.cost_price),
               "quantity_added": str(quantity), "created": created})
-        return jsonify(ok=True, created=created, message=(f"{product.name} saved. Add the next product." if sp.selling_price and sp.selling_price > 0 else f"{product.name} captured. Add prices before enabling it for sale."),
+        return jsonify(ok=True, created=created, replaced_placeholder=replaced_placeholder, message=(f"{product.name} saved with its scanned barcode. Add the next product." if replaced_placeholder else f"{product.name} saved. Add the next product." if sp.selling_price and sp.selling_price > 0 else f"{product.name} captured. Add prices before enabling it for sale."),
                        product={"id": product.id, "name": product.name, "barcode": product.barcode or "", "store": store.name,
                                 "selling_price": str(sp.selling_price), "cost_price": str(sp.cost_price), "stock": str(sp.stock_quantity),
                                 "available": bool(sp.is_available)})
@@ -903,7 +930,21 @@ def save_product(product_id):
     product.unit = request.form.get("unit", "unit").strip() or "unit"
     product.pack_size = request.form.get("pack_size", "").strip() or product.unit
     product.sku = request.form.get("sku", "").strip() or None
-    product.barcode = request.form.get("barcode", "").strip() or None
+    new_barcode = re.sub(r"\s+", "", request.form.get("barcode", "")).strip() or None
+    if new_barcode:
+        conflict = Product.query.filter(Product.barcode == new_barcode, Product.id != product.id).first()
+        if conflict:
+            db.session.rollback(); flash("That barcode already belongs to another product.", "error")
+            return redirect(url_for("admin.product_edit", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
+    product.barcode = new_barcode
+    raw_weight = request.form.get("weight_kg", "").strip()
+    try:
+        product.weight = Decimal(raw_weight) if raw_weight else None
+        if product.weight is not None and (not product.weight.is_finite() or product.weight < 0):
+            raise InvalidOperation
+    except (InvalidOperation, ValueError, TypeError):
+        db.session.rollback(); flash("Weight must be a valid non-negative value in kilograms.", "error")
+        return redirect(url_for("admin.product_edit", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
     product.description = request.form.get("description", "").strip() or None
     submitted_image_url = request.form.get("image_url", "").strip()
     try:

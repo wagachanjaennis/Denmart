@@ -12,7 +12,10 @@ TWOPLACES = Decimal("0.01")
 
 
 def normalize_phone(value):
+    """Canonicalize Kenyan mobile numbers entered as 07…, 01…, 7…, 1…, +254… or 00254…."""
     raw = re.sub(r"\D", "", str(value or "").strip())
+    if raw.startswith("00"):
+        raw = raw[2:]
     if raw.startswith("254") and len(raw) == 12 and raw[3] in "17":
         return raw
     if raw.startswith("0") and len(raw) == 10 and raw[1] in "17":
@@ -122,7 +125,7 @@ def enabled_methods(settings):
     return out
 
 
-def create_payment_order(*, business_id, store_id, customer_name, phone, amount, items=None, channel="ONLINE", payment_method=None, pos_cashier_id=None):
+def create_payment_order(*, business_id, store_id, customer_name, phone, amount, items=None, channel="ONLINE", payment_method=None, pos_cashier_id=None, delivery_location=None, delivery_distance_km=None, estimated_weight_kg=None, packaging_weight_kg=0, delivery_fee=0):
     channel_name = (channel or "ONLINE").upper()
     is_pos = channel_name == "POS"
     name = str(customer_name or "").strip()[:160]
@@ -138,6 +141,11 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
         raise ValueError("Enter a valid Kenyan phone number.")
     if total is None or total <= 0:
         raise ValueError("Payment amount must be greater than zero.")
+    delivery_charge = normalize_amount(delivery_fee or 0)
+    if delivery_charge is None or delivery_charge < 0:
+        raise ValueError("Delivery charge must be a valid non-negative amount.")
+    if not is_pos and delivery_charge > 0 and not str(delivery_location or "").strip():
+        raise ValueError("Enter the delivery location before continuing to payment.")
     if is_pos:
         name = name or ""
         name_norm = name_norm or ""
@@ -190,8 +198,9 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
             line = (unit_price * qty).quantize(TWOPLACES)
             calculated += line
             prepared.append((sp, qty, unit_price, line))
-        if calculated.quantize(TWOPLACES) != total:
-            total = calculated.quantize(TWOPLACES)
+        # Always derive the goods subtotal from current server prices, then add the
+        # separately calculated delivery charge. Never trust the browser's total.
+        total = (calculated + delivery_charge).quantize(TWOPLACES)
     snapshot = instructions
     reference = make_reference()
     order = PayOrder(
@@ -205,6 +214,11 @@ def create_payment_order(*, business_id, store_id, customer_name, phone, amount,
         customer_name_normalized=name_norm,
         customer_phone=phone_norm,
         expected_amount=total,
+        delivery_location=(str(delivery_location or "").strip()[:500] or None),
+        delivery_distance_km=normalize_amount(delivery_distance_km) if delivery_distance_km not in (None, "") else None,
+        estimated_weight_kg=Decimal(str(estimated_weight_kg or 0)).quantize(Decimal("0.001")),
+        packaging_weight_kg=Decimal(str(packaging_weight_kg or 0)).quantize(Decimal("0.001")),
+        delivery_fee=delivery_charge,
         payment_method=method,
         payment_instructions=snapshot,
         payment_status="PENDING",

@@ -22,6 +22,7 @@
   const brandInput = document.getElementById('brandInput');
   const unitInput = document.getElementById('unitInput');
   const packSizeInput = document.getElementById('packSizeInput');
+  const weightInput = document.getElementById('weightInput');
   const currentStock = document.getElementById('currentStock');
   const afterStock = document.getElementById('afterStock');
   const saveButton = document.getElementById('saveButton');
@@ -89,7 +90,8 @@
     if (categoryInput && product?.category_id) categoryInput.value = product.category_id;
     if (brandInput) brandInput.value = product?.brand || '';
     if (unitInput) unitInput.value = product?.unit || 'unit';
-    if (packSizeInput) packSizeInput.value = product?.pack_size || ''; 
+    if (packSizeInput) packSizeInput.value = product?.pack_size || '';
+    if (weightInput) weightInput.value = product?.weight_kg || '';
     currentStock.dataset.value = String(product?.stock || 0);
     currentStock.textContent = fmtNumber(product?.stock || 0);
     itemMode.textContent = product ? 'Existing product' : 'New product';
@@ -295,6 +297,7 @@
         brand: brandInput?.value || '',
         unit: unitInput?.value || 'unit',
         pack_size: packSizeInput?.value || '',
+        weight_kg: weightInput?.value || '',
         store_id: storeSelect.value,
       };
       const response = await fetch('/scan/api/save', {
@@ -328,6 +331,7 @@
       if (brandInput) brandInput.value = '';
       if (unitInput) unitInput.value = 'unit';
       if (packSizeInput) packSizeInput.value = '';
+      if (weightInput) weightInput.value = '';
       updateSaveAvailability();
       if (scanning) setStatus('Scanning…', 'ok');
       barcodeInput.focus({ preventScroll: true });

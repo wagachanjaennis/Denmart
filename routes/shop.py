@@ -122,7 +122,7 @@ def location_detail(store_code):
 @bp.get("/robots.txt")
 def robots_txt():
     base = request.url_root.rstrip("/")
-    body = f"User-agent: *\nAllow: /\nDisallow: /control\nDisallow: /merchant\nDisallow: /api\nSitemap: {base}/sitemap.xml\n"
+    body = f"User-agent: *\nAllow: /\nDisallow: /control\nDisallow: /merchant\nDisallow: /api\nDisallow: /qaz\nSitemap: {base}/sitemap.xml\n"
     return Response(body, mimetype="text/plain", headers={"Cache-Control":"public, max-age=3600"})
 
 
