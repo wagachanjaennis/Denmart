@@ -109,7 +109,12 @@ def panel():
     business = _business()
     if not business:
         return "No business database is configured.", 503
-    flags = {key: _get_setting(business.id, setting_key, "1" if key != "site" else "0") for key, (setting_key, label) in FEATURES.items()}
+    # The UI consistently represents availability: 1 means ENABLED/green.
+    # Internally dev_site_mode is a pause flag, so invert it only for the UI.
+    flags = {}
+    for key, (setting_key, label) in FEATURES.items():
+        stored = _get_setting(business.id, setting_key, "0" if key == "site" else "1")
+        flags[key] = ("0" if stored == "1" else "1") if key == "site" else ("1" if stored == "1" else "0")
     return render_template("dev_admin/panel.html", flags=flags, features=FEATURES, csrf_token_value=session.get("developer_admin_csrf", ""))
 
 @bp.post("/qaz/panel/features")
@@ -125,10 +130,14 @@ def save_features():
     old = {}
     new = {}
     for key, (setting_key, label) in FEATURES.items():
-        value = "1" if request.form.get(key) == "1" else "0"
-        old[key] = _get_setting(business.id, setting_key, "1" if key != "site" else "0")
-        new[key] = value
-        _put_setting(business.id, setting_key, value)
+        # Form values always mean enabled=1 / disabled=0. The site gate stores
+        # the opposite (dev_site_mode=1 means paused), so translate explicitly.
+        enabled = "1" if request.form.get(key) == "1" else "0"
+        stored_old = _get_setting(business.id, setting_key, "0" if key == "site" else "1")
+        old[key] = ("0" if stored_old == "1" else "1") if key == "site" else ("1" if stored_old == "1" else "0")
+        stored_new = ("0" if enabled == "1" else "1") if key == "site" else enabled
+        new[key] = enabled
+        _put_setting(business.id, setting_key, stored_new)
     _audit("DEV_FEATURE_FLAGS_UPDATED", business.id, {"before": old, "after": new})
     db.session.commit()
     flash("Service controls updated. Changes apply to new requests immediately.", "success")
