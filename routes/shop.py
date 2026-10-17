@@ -54,7 +54,7 @@ def _attach_saved_product_images(rows):
     return rows
 
 
-def catalogue_query(store=None, q="", category=""):
+def catalogue_query(store=None, q="", category="", max_rows=2000):
     query = (StoreProduct.query.join(Product)
              .filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True),
                      StoreProduct.stock_quantity > StoreProduct.reserved_quantity, Product.status == "ACTIVE"))
@@ -62,7 +62,9 @@ def catalogue_query(store=None, q="", category=""):
         query = query.filter(StoreProduct.store_id == store.id)
     if category:
         query = query.filter(Product.category_id == category)
-    rows = query.order_by(Product.name).limit(2000).all()
+    # Keep storefront requests bounded: rendering thousands of product cards makes
+    # the first page slow, especially on mobile connections and free hosting.
+    rows = query.order_by(Product.name).limit(max(1, min(int(max_rows), 2000))).all()
     rows = _attach_saved_product_images(rows)
     if not q:
         return sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))
@@ -83,7 +85,7 @@ def home():
                   .order_by(Category.sort_order, Category.name).all()) if store else []
     # Render the entire available online range on the landing page. Images are lazy-loaded
     # by the product card so customers can scroll the catalogue without a second click.
-    products = catalogue_query(store) if store else []
+    products = catalogue_query(store, max_rows=60) if store else []
     return render_template(
         "shop/home.html",
         stores=active_stores(),
@@ -98,7 +100,9 @@ def shop():
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
     store = selected_store()
-    products = catalogue_query(store, q=q, category=category)[:1000]
+    # Browsing pages show a manageable first batch; searches scan the broader
+    # catalogue so an item is less likely to be missed.
+    products = catalogue_query(store, q=q, category=category, max_rows=120 if not q else 2000)[:120 if not q else 300]
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
     return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE", StoreProduct.store_id == store.id).count() if store else 0)

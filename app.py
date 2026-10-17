@@ -119,12 +119,21 @@ def create_app():
     def inject_globals():
         business = (current_user.business if current_user.is_authenticated and getattr(current_user, "business", None)
                     else Business.query.first())
-        footer_setting = (SystemSetting.query.filter_by(business_id=business.id, key="footer_text").first() if business else None)
-        brand_setting = (SystemSetting.query.filter_by(business_id=business.id, key="brand_name").first() if business else None)
-        announcement_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_announcement").first() if business else None)
-        sidebar_ad_title_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_title").first() if business else None)
-        sidebar_ad_body_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_body").first() if business else None)
-        sidebar_ad_link_setting = (SystemSetting.query.filter_by(business_id=business.id, key="storefront_sidebar_ad_link").first() if business else None)
+        # Fetch all storefront branding settings in one query instead of six
+        # separate database round trips on every rendered page.
+        setting_keys = {"footer_text", "brand_name", "storefront_announcement",
+                        "storefront_sidebar_ad_title", "storefront_sidebar_ad_body",
+                        "storefront_sidebar_ad_link"}
+        setting_rows = (SystemSetting.query.filter(
+            SystemSetting.business_id == business.id, SystemSetting.key.in_(setting_keys)
+        ).all() if business else [])
+        settings = {row.key: row for row in setting_rows}
+        footer_setting = settings.get("footer_text")
+        brand_setting = settings.get("brand_name")
+        announcement_setting = settings.get("storefront_announcement")
+        sidebar_ad_title_setting = settings.get("storefront_sidebar_ad_title")
+        sidebar_ad_body_setting = settings.get("storefront_sidebar_ad_body")
+        sidebar_ad_link_setting = settings.get("storefront_sidebar_ad_link")
         display_name = brand_display_name(brand_setting.value if brand_setting else "")
         footer = brand_display_copy(footer_setting.value, display_name) if footer_setting else f"All rights reserved · {display_name} Merchants"
         pending_pos_approvals = pending_pay_approvals = 0
