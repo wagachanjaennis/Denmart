@@ -6,6 +6,7 @@ supported. Unknown products intentionally show a neutral unavailable-image state
 """
 
 import base64
+from functools import lru_cache
 
 
 REAL_PRODUCT_IMAGES = {
@@ -151,6 +152,7 @@ REAL_PRODUCT_IMAGES = {
 
 _NORMALIZED_REAL_IMAGES = {" ".join(k.split()).casefold(): v for k, v in REAL_PRODUCT_IMAGES.items()}
 
+
 def normalize_product_name(value: str) -> str:
     return " ".join(str(value or "").split()).strip().casefold()
 
@@ -171,7 +173,7 @@ def _local_static_image(raw: str) -> bool:
     from urllib.parse import unquote
 
     value = str(raw or "").strip()
-    if not value.startswith("/static/") or ".." in value.split("?")[0].split("/"):
+    if not value.startswith("/static/") or ".." in value.split("?", 1)[0].split("/"):
         return False
     relative = unquote(value.split("?", 1)[0]).removeprefix("/static/")
     root = Path(__file__).resolve().parents[1] / "static"
@@ -183,54 +185,149 @@ def _local_static_image(raw: str) -> bool:
     return candidate.is_file() and candidate.stat().st_size > 0
 
 
-def public_product_image(product) -> str:
-    """Resolve an image without losing saved URLs after a database restore.
+@lru_cache(maxsize=1)
+def _read_photo_manifest() -> dict:
+    """Load the bundled image manifest once per worker, not once per product card."""
+    import json
+    from pathlib import Path
+    manifest = Path(__file__).resolve().parents[1] / "catalogue" / "catalogue-image-manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data.get("products", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    An online feeder overlay is authoritative when explicitly attached to a product
-    for this request. An empty feeder image is intentionally empty: it must not
-    silently fall back to the merchant's old image while API mode is selected.
 
-    Prefer a real bundled barcode-keyed file, then an administrator-saved URL,
-    then the curated exact-name map. Remote URLs are accepted only for HTTP(S);
-    arbitrary schemes and stale local paths are rejected. The older implementation
-    ignored most saved HTTP URLs, which made images disappear after importing a DB
-    whose product names were not an exact key in the curated map.
+
+
+@lru_cache(maxsize=1)
+def _explicit_real_photo_ids() -> set[str]:
+    """IDs of real bundled photos shipped with this patch, independent of old manifests."""
+    from pathlib import Path
+    import json
+    explicit_file = Path(__file__).resolve().parents[1] / "static" / "catalogue" / "real-product-photos.json"
+    try:
+        payload = json.loads(explicit_file.read_text(encoding="utf-8"))
+        return {str(value) for value in payload.get("product_ids", [])}
+    except Exception:
+        return set()
+
+
+def _is_verified_bundled_photo_id(product_id: str) -> bool:
+    product_id = str(product_id or "").strip()
+    item = _read_photo_manifest().get(product_id, {})
+    return (isinstance(item, dict) and item.get("type") == "photo") or product_id in _explicit_real_photo_ids()
+
+def _manifest_photo_url(product) -> str:
+    """Use a bundled product image only when the source manifest marks it as a photo.
+
+    Older catalogue builds bundled real WEBP files outside Flask's static directory,
+    while the manifest still said that the corresponding product was a placeholder.
+    Never promote those neutral illustration placeholders into product advertising.
     """
-    if bool(getattr(product, "_denmart_online_feeder_active", False)):
-        feeder_image = str(getattr(product, "_denmart_online_image_url", "") or "").strip()
-        if is_data_image_url(feeder_image):
-            return feeder_image
-        if feeder_image.startswith(("https://", "http://")):
-            return feeder_image
+    from pathlib import Path
+    product_id = str(getattr(product, "id", "") or "").strip()
+    if not product_id:
         return ""
+    # Only positively identified real product photos count. Generic placeholder
+    # illustrations in older catalogue trees must never be shown as a product photo.
+    if not _is_verified_bundled_photo_id(product_id):
+        return ""
+    candidate = f"/static/catalogue/products/{product_id}.webp"
+    return candidate if _local_static_image(candidate) else ""
+
+
+def product_image_sources(product) -> list[str]:
+    """Return distinct real image candidates, ordered by authority and offline reliability.
+
+    API data is first when it supplies an image; a missing API image is not a reason to
+    hide the stored photo. Local bundled assets come before remote URLs so the shop and
+    advert studio still have a usable image when the supplier API or CDN is unreachable.
+    """
+    values: list[str] = []
+
+    def add(raw):
+        value = str(raw or "").strip()
+        if not value:
+            return
+        if is_data_image_url(value):
+            if value not in values:
+                values.append(value)
+            return
+        if value.startswith("/static/"):
+            # Reject UUID product-card artwork unless a manifest positively identifies
+            # that file as an actual product photo. Uploaded assets and barcode-photo
+            # paths are not treated as the old UUID placeholder family.
+            product_prefix = "/static/catalogue/products/"
+            if value.startswith(product_prefix) and value.lower().endswith(".webp"):
+                leaf = value[len(product_prefix):].split("?", 1)[0]
+                if "/" not in leaf and not _is_verified_bundled_photo_id(leaf[:-5]):
+                    return
+            if _local_static_image(value) and value not in values:
+                values.append(value)
+            return
+        if value.startswith(("https://", "http://")) and value not in values:
+            values.append(value)
+
+    if bool(getattr(product, "_denmart_online_feeder_active", False)):
+        add(getattr(product, "_denmart_online_image_url", ""))
 
     barcode = str(getattr(product, "barcode", "") or "").strip()
     if barcode and barcode.isdigit():
         stable = f"/static/catalogue/products/by-barcode/{barcode}.webp"
-        if _local_static_image(stable):
-            return stable
+        add(stable)
 
-    raw = str(getattr(product, "image_url", "") or "").strip()
-    if is_data_image_url(raw):
-        return raw
-    if raw.startswith(("https://", "http://")):
-        return raw
-    if _local_static_image(raw):
-        return raw
+    # Locally bundled, positively identified photos are strongest for offline use.
+    add(_manifest_photo_url(product))
 
-    exact = real_product_image_url(getattr(product, "name", ""))
-    if exact.startswith(("https://", "http://")):
-        return exact
-    return ""
+    # ProductImage records have historically held photos that were not copied to the
+    # Product.image_url column. User-selected gallery records and photos successfully
+    # cached from remote sources must both remain addressable without the supplier API.
+    add(getattr(product, "_denmart_saved_image_url", ""))
+    for saved in (getattr(product, "_denmart_gallery_image_urls", None) or []):
+        add(saved)
+    for saved in (getattr(product, "_denmart_durable_image_urls", None) or []):
+        add(saved)
+    add(getattr(product, "image_url", ""))
+
+    # Curated catalogue sources are exact name matches, never generic/generated art.
+    add(real_product_image_url(getattr(product, "name", "")))
+    return values
+
+
+def product_image_source(product, index: int = 0) -> str:
+    """Pick a raw source URL (or a validated local/data URL) for the requested gallery index."""
+    values = product_image_sources(product)
+    try:
+        return values[max(0, int(index))]
+    except (IndexError, TypeError, ValueError):
+        return ""
+
+
+def public_product_image(product) -> str:
+    """Return a durable image URL for public pages and APIs.
+
+    Same-origin /product-photo URLs proxy saved/API/curated photos. That makes image
+    loads cacheable by Denmart's service worker and avoids canvas CORS failures in ads.
+    Missing photos remain missing; the product row itself is never suppressed.
+    """
+    source = product_image_source(product, 0)
+    if not source:
+        return ""
+    if source.startswith("/static/"):
+        return source
+    product_id = str(getattr(product, "id", "") or "").strip()
+    if product_id:
+        return f"/product-photo/{product_id}.jpg"
+    return source
 
 
 def has_public_product_image(product) -> bool:
-    return bool(public_product_image(product))
+    return bool(product_image_source(product, 0))
 
 
 def image_is_real(product) -> bool:
     return has_public_product_image(product)
-
 
 
 def data_url_to_bytes(url: str):
@@ -239,8 +336,10 @@ def data_url_to_bytes(url: str):
         return None
     header, encoded = raw.split(",", 1)
     try:
-        binary = base64.b64decode(encoded)
+        binary = base64.b64decode(encoded, validate=True)
     except Exception:
         return None
     mime = header.split(";", 1)[0].replace("data:", "").strip().lower() or "image/png"
+    if not mime.startswith("image/") or not binary:
+        return None
     return binary, mime

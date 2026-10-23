@@ -1,7 +1,13 @@
 from io import BytesIO
 import base64
 import mimetypes
+import re
+from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
+import ipaddress
+import socket
+import requests
 
 from PIL import Image, ImageDraw, ImageFont
 from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app, jsonify
@@ -9,7 +15,7 @@ from extensions import db
 from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business, SystemSetting
 from services.search import forgiving_rank
 from services.branding import brand_display_name
-from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url
+from services.product_images import public_product_image, has_public_product_image, data_url_to_bytes, is_data_image_url, product_image_source, product_image_sources
 
 bp = Blueprint("shop", __name__)
 
@@ -45,19 +51,32 @@ def _attach_saved_product_images(rows):
         current_app.logger.exception("Could not load saved catalogue images")
         return rows
     primary_by_product = {}
+    gallery_by_product = {}
+    durable_by_product = {}
     for image_row in image_rows:
-        primary_by_product.setdefault(str(image_row.product_id), str(image_row.image_url or "").strip())
+        key = str(image_row.product_id)
+        url = str(image_row.image_url or "").strip()
+        if not url:
+            continue
+        if getattr(image_row, "source_type", "") == "denmart-offline-cache":
+            durable_by_product.setdefault(key, []).append(url)
+            continue
+        primary_by_product.setdefault(key, url)
+        gallery_by_product.setdefault(key, []).append(url)
     for row in rows:
-        saved = primary_by_product.get(str(row.product_id), "")
+        key = str(row.product_id)
+        saved = primary_by_product.get(key, "")
         if saved:
             row.product._denmart_saved_image_url = saved
+        row.product._denmart_gallery_image_urls = gallery_by_product.get(key, [])
+        row.product._denmart_durable_image_urls = durable_by_product.get(key, [])
     return rows
 
 
 def catalogue_query(store=None, q="", category="", max_rows=2000):
     query = (StoreProduct.query.join(Product)
              .filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True),
-                     StoreProduct.stock_quantity > StoreProduct.reserved_quantity, Product.status == "ACTIVE"))
+                     Product.status == "ACTIVE"))
     if store:
         query = query.filter(StoreProduct.store_id == store.id)
     if category:
@@ -89,7 +108,7 @@ def home():
                   .order_by(Category.sort_order, Category.name).all()) if store else []
     # Render the entire available online range on the landing page. Images are lazy-loaded
     # by the product card so customers can scroll the catalogue without a second click.
-    products = catalogue_query(store, max_rows=60) if store else []
+    products = catalogue_query(store, max_rows=2000)[:60] if store else []
     return render_template(
         "shop/home.html",
         stores=active_stores(),
@@ -106,7 +125,7 @@ def shop():
     store = selected_store()
     # Browsing pages show a manageable first batch; searches scan the broader
     # catalogue so an item is less likely to be missed.
-    products = catalogue_query(store, q=q, category=category, max_rows=120 if not q else 2000)[:120 if not q else 300]
+    products = catalogue_query(store, q=q, category=category, max_rows=2000)[:120 if not q else 300]
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
     return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE", StoreProduct.store_id == store.id).count() if store else 0)
@@ -198,50 +217,203 @@ def app_qr():
 
 
 
-def _serve_data_product_photo(product):
-    raw = str(product.image_url or "").strip()
-    parsed = data_url_to_bytes(raw)
-    if not parsed:
+def _public_image_url(raw: str) -> bool:
+    """Reject local, credential-bearing and private-address image URLs before proxying."""
+    try:
+        parsed = urlparse(str(raw or "").strip())
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password:
+            return False
+        host = parsed.hostname.rstrip(".").lower()
+        if host in {"localhost", "localhost.localdomain"} or host.endswith((".local", ".internal", ".test")):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global:
+                return False
+        except ValueError:
+            # Resolve hostnames to reject private/local DNS targets too. If DNS is
+            # temporarily unavailable, the subsequent bounded fetch will fail closed.
+            try:
+                for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM):
+                    resolved = ipaddress.ip_address(item[4][0])
+                    if not resolved.is_global:
+                        return False
+            except OSError:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _product_for_image(product_id):
+    product = db.session.get(Product, product_id)
+    if not product or product.status != "ACTIVE":
         return None
-    binary, mime = parsed
-    response = send_file(BytesIO(binary), mimetype=mime, max_age=31536000)
-    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    response.headers["X-Denmart-Image"] = "database-upload"
-    return response
+    try:
+        image_rows = (ProductImage.query.filter_by(product_id=product.id)
+                      .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all())
+        durable = [str(row.image_url or "").strip() for row in image_rows if str(row.image_url or "").strip() and getattr(row, "source_type", "") == "denmart-offline-cache"]
+        gallery = [str(row.image_url or "").strip() for row in image_rows if str(row.image_url or "").strip() and getattr(row, "source_type", "") != "denmart-offline-cache"]
+        product._denmart_durable_image_urls = durable
+        if gallery:
+            product._denmart_saved_image_url = gallery[0]
+            product._denmart_gallery_image_urls = gallery
+    except Exception:
+        current_app.logger.exception("Could not load product image gallery")
+    # API images may enrich the photo choices, but an empty/unavailable API image
+    # never suppresses the saved local image or the curated exact-product source.
+    try:
+        rows = StoreProduct.query.filter_by(product_id=product.id).all()
+        if rows:
+            business_id = getattr(getattr(rows[0], "store", None), "business_id", None)
+            from services.catalogue_feeder import apply_online_feeder_overlay
+            apply_online_feeder_overlay(rows, business_id)
+    except Exception:
+        current_app.logger.exception("Could not apply product image feeder overlay")
+    return product
+
+
+def _serve_product_image_source(source: str, cache_seconds=604800, product=None, gallery_index=0):
+    """Serve a local/data image or proxy a bounded public image URL as compressed WEBP."""
+    source = str(source or "").strip()
+    if not source:
+        return ("", 404)
+    if source.startswith("/static/"):
+        from services.product_images import _local_static_image
+        if not _local_static_image(source):
+            return ("", 404)
+        file_path = (Path(current_app.root_path) / source.lstrip("/")).resolve()
+        response = send_file(file_path, conditional=True, max_age=cache_seconds)
+        response.headers["Cache-Control"] = f"public, max-age={cache_seconds}, stale-while-revalidate=604800"
+        response.headers["X-Denmart-Image"] = "bundled-product-photo"
+        return response
+    parsed_data = data_url_to_bytes(source)
+    if parsed_data:
+        binary, mime = parsed_data
+        if len(binary) > 5_000_000:
+            return ("", 413)
+        response = send_file(BytesIO(binary), mimetype=mime, max_age=cache_seconds)
+        response.headers["Cache-Control"] = f"public, max-age={cache_seconds}, stale-while-revalidate=604800"
+        response.headers["X-Denmart-Image"] = "saved-product-upload"
+        return response
+    if not _public_image_url(source):
+        return ("", 404)
+    try:
+        upstream = requests.get(source, headers={"User-Agent": "DenmartProductImage/1.0 (+https://denmart.co.ke)"},
+                                timeout=(1.5, 3.5), allow_redirects=True, stream=True)
+        if not upstream.ok or not str(upstream.headers.get("Content-Type", "")).lower().startswith("image/"):
+            upstream.close()
+            return ("", 404)
+        if not _public_image_url(upstream.url):
+            upstream.close()
+            return ("", 404)
+        chunks, length = [], 0
+        for chunk in upstream.iter_content(64 * 1024):
+            if not chunk:
+                continue
+            length += len(chunk)
+            if length > 5_000_000:
+                upstream.close()
+                return ("", 413)
+            chunks.append(chunk)
+        upstream.close()
+        raw = b"".join(chunks)
+        if not raw:
+            return ("", 404)
+        # Normalize big supplier files to a light, same-origin WEBP. Same-origin
+        # images can be cached offline and safely rendered into the MP4 canvas.
+        try:
+            from PIL import Image, ImageOps
+            im = Image.open(BytesIO(raw))
+            im = ImageOps.exif_transpose(im)
+            if getattr(im, "is_animated", False):
+                im.seek(0)
+            if im.mode not in {"RGB", "RGBA"}:
+                im = im.convert("RGBA" if "transparency" in im.info else "RGB")
+            im.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            out = BytesIO()
+            im.save(out, format="WEBP", quality=76, method=4, optimize=True)
+            webp_bytes = out.getvalue()
+            if product is not None and webp_bytes and len(webp_bytes) <= 450_000:
+                try:
+                    existing = ProductImage.query.filter_by(product_id=product.id, source_type="denmart-offline-cache", license_info=source).first()
+                    if existing is None:
+                        cached_url = "data:image/webp;base64," + base64.b64encode(webp_bytes).decode("ascii")
+                        db.session.add(ProductImage(product_id=product.id, image_url=cached_url, alt_text=(str(product.name or "Product")[:180] + " · offline photo cache"), source_type="denmart-offline-cache", license_info=source[:2000], sort_order=1000 + max(0, min(7, int(gallery_index or 0))), is_primary=False))
+                        db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                    current_app.logger.info("Could not persist a product photo for offline use", exc_info=True)
+            out.seek(0)
+            response = send_file(out, mimetype="image/webp", max_age=cache_seconds)
+        except Exception:
+            # Fall back to the validated original bytes if this image decoder does
+            # not support the provider's format; still expose only image MIME types.
+            mime = str(upstream.headers.get("Content-Type", "image/jpeg")).split(";", 1)[0]
+            response = send_file(BytesIO(raw), mimetype=mime, max_age=cache_seconds)
+        response.headers["Cache-Control"] = f"public, max-age={cache_seconds}, stale-while-revalidate=604800, immutable"
+        response.headers["X-Denmart-Image"] = "proxied-real-product-photo"
+        return response
+    except requests.RequestException:
+        current_app.logger.info("A product image source is currently unavailable", exc_info=True)
+        return ("", 504)
+    except Exception:
+        current_app.logger.exception("Could not serve a product image")
+        return ("", 404)
+
+
+@lru_cache(maxsize=512)
+def _lookup_open_food_facts_image(barcode):
+    barcode = re.sub(r"\D", "", str(barcode or ""))
+    if not 8 <= len(barcode) <= 14:
+        return ""
+    try:
+        endpoint = "https://world.openfoodfacts.org/api/v2/product/" + barcode + ".json"
+        response = requests.get(endpoint, params={"fields": "code,product_name,image_front_url,image_url"}, headers={"User-Agent": "DenmartOnline/1.0 (product-photo fallback)"}, timeout=(1.5, 3.0))
+        if not response.ok:
+            return ""
+        payload = response.json()
+        item = payload.get("product") if payload.get("status") == 1 else None
+        actual_code = re.sub(r"\D", "", str((item or {}).get("code") or ""))
+        if not item or actual_code != barcode:
+            return ""
+        photo = str(item.get("image_front_url") or item.get("image_url") or "").strip()
+        return photo if _public_image_url(photo) else ""
+    except Exception:
+        current_app.logger.debug("Exact-barcode public image lookup unavailable", exc_info=True)
+        return ""
+
+
+def _try_product_image_sources(product, sources, cache_seconds=604800):
+    for index, source in enumerate(sources):
+        response = _serve_product_image_source(source, cache_seconds=cache_seconds, product=product, gallery_index=index)
+        if isinstance(response, tuple):
+            continue
+        if getattr(response, "status_code", 200) >= 400:
+            continue
+        return response
+    # Exact barcode verification is a last-resort source; it never borrows a photo
+    # from a similarly named but differently coded product.
+    barcode = getattr(product, "barcode", "") or getattr(product, "_denmart_online_barcode", "")
+    if str(barcode or "").strip():
+        photo = _lookup_open_food_facts_image(barcode)
+        if photo:
+            response = _serve_product_image_source(photo, cache_seconds=cache_seconds, product=product, gallery_index=len(sources))
+            if not isinstance(response, tuple) and getattr(response, "status_code", 200) < 400:
+                return response
+    return ("", 404)
 
 
 @bp.get("/product-photo/<product_id>.jpg")
 def product_photo(product_id):
-    product = db.session.get(Product, product_id)
-    if not product or product.status != "ACTIVE":
+    product = _product_for_image(product_id)
+    if not product:
         return ("", 404)
-
-    # Older uploads may be stored in ProductImage instead of Product.image_url.
-    # Resolve one product here too so direct photo links work outside catalogue pages.
-    raw_image = str(product.image_url or "").strip()
-    if not raw_image.startswith(("https://", "http://", "data:image/")):
-        try:
-            saved_image = (ProductImage.query.filter_by(product_id=product.id)
-                           .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).first())
-            if saved_image and str(saved_image.image_url or "").strip():
-                product._denmart_saved_image_url = str(saved_image.image_url).strip()
-        except Exception:
-            current_app.logger.exception("Could not load saved product photo")
-
-    # Exact curated photo: return a redirect so legacy callers can still resolve it.
-    exact = public_product_image(product)
-    if exact and not is_data_image_url(exact):
-        response = redirect(exact, code=302)
-        response.headers["Cache-Control"] = "public, max-age=86400"
-        response.headers["X-Denmart-Image"] = "curated-remote"
-        return response
-
-    uploaded = _serve_data_product_photo(product)
-    if uploaded is not None:
-        return uploaded
-
-    # Deliberately no generated illustration and no generic product substitute.
-    return ("", 404)
+    sources = product_image_sources(product)[:8]
+    result = _try_product_image_sources(product, sources, cache_seconds=604800)
+    if not isinstance(result, tuple) and getattr(result, "status_code", 200) < 400:
+        return result
+    return _try_product_image_sources(product, list(getattr(product, "_denmart_durable_image_urls", []) or [])[:8], cache_seconds=604800)
 
 
 @bp.get("/shop/manifest.webmanifest")
@@ -318,13 +490,14 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = r'''const CACHE_VERSION = "denmart-public-v25-offline-persist";
+    js = r'''const CACHE_VERSION = "denmart-public-v26-image-keep";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
 const STATIC_ASSETS = ["/static/css/app.css","/static/js/app.js","/static/js/offline-core.js","/shop/manifest.webmanifest","/shop/app-icon/192.png","/shop/app-icon/512.png"];
 self.addEventListener("install", event => event.waitUntil((async()=>{const cache=await caches.open(STATIC_CACHE);await Promise.all(STATIC_ASSETS.map(async url=>{try{const r=await fetch(url,{cache:"no-store"});if(r.ok)await cache.put(url,r);}catch(_){}}));await self.skipWaiting();})()));
-self.addEventListener("activate", event => {event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith("denmart-public-") && !k.startsWith(CACHE_VERSION)).map(k => caches.delete(k)))).then(() => self.clients.claim()));});
+self.addEventListener("activate", event => {event.waitUntil((async()=>{const keys=await caches.keys();const fresh=await caches.open(IMAGE_CACHE);for(const key of keys){if(!key.startsWith("denmart-public-")||key.startsWith(CACHE_VERSION)||!key.endsWith("-images"))continue;try{const old=await caches.open(key);for(const req of await old.keys()){if(!await fresh.match(req)){const res=await old.match(req);if(res)await fresh.put(req,res);}}}catch(_){}}for(const key of keys){if(key.startsWith("denmart-public-")&&!key.startsWith(CACHE_VERSION)&&!key.endsWith("-images"))await caches.delete(key);}await self.clients.claim();})());});
+async function cacheImage(cache, request, response){if(!(response&&(response.ok||response.type==="opaque")))return;try{await cache.put(request,response.clone());const keys=await cache.keys();if(keys.length>420){for(const key of keys.slice(0,keys.length-420))await cache.delete(key);}}catch(_){}}
 function isPrivatePortal(path){return path==="/control"||path.startsWith("/control/")||path==="/control/offline-login"||path==="/control2"||path.startsWith("/control2/")||path==="/control2/offline-login"||path==="/merchant"||path.startsWith("/merchant/")||path==="/merchant/offline-login";}
 function shouldCachePage(path){if(path==="/"||path==="/shop"||path.startsWith("/shop?")||path.startsWith("/product/")||path==="/cart"||path==="/locations"||path.startsWith("/locations/"))return true;if(["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return true;return false;}
 function forbiddenPublicCache(path){return path.startsWith("/api/")||path.startsWith("/pay/order/")||path.startsWith("/pay/approval/")||path.startsWith("/pay/api/")||path.startsWith("/control/pay/")||path.startsWith("/logout");}
@@ -334,7 +507,7 @@ self.addEventListener("fetch", event => {
   // Product photos may be served from a trusted external image host. Cache only image
   // subresources here; never broaden this to cross-origin pages or API requests.
   if(request.destination==="image"&&url.origin!==location.origin){
-    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{if(response.ok||response.type==="opaque"){try{await cache.put(request,response.clone());}catch(_){}}return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
+    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{await cacheImage(cache,request,response);return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
   }
   if(url.origin!==location.origin)return;
   const path=url.pathname;
@@ -343,7 +516,7 @@ self.addEventListener("fetch", event => {
     event.respondWith((async()=>{const cache=await caches.open(STATIC_CACHE);try{const response=await fetch(request);if(response.ok){try{await cache.put(request,response.clone());}catch(_){}}return response;}catch(_){return await cache.match(request,{ignoreSearch:true})||new Response("Offline asset unavailable",{status:503});}})());return;
   }
   if(request.destination==="image" && !forbiddenPublicCache(path)){
-    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{if(response.ok||response.type==="opaque"){try{await cache.put(request,response.clone());}catch(_){}}return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
+    event.respondWith((async()=>{const cache=await caches.open(IMAGE_CACHE);const existing=await cache.match(request);const refresh=fetch(request).then(async response=>{await cacheImage(cache,request,response);return response;}).catch(()=>null);if(existing){event.waitUntil(refresh);return existing;}return await refresh||new Response("",{status:504});})());return;
   }
   if(request.mode==="navigate"){
     if(isPrivatePortal(path) && !["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return;

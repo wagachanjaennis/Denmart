@@ -17,6 +17,8 @@ def safe_product_payload(r, include_stock=False):
     from services.catalogue_feeder import online_barcode
     data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "brand": r.product.brand, "barcode": online_barcode(r.product),
             "sku": r.product.sku, "price": str(r.selling_price), "image_url": public_product_image(r.product), "slug": r.product.slug, "category_id": r.product.category_id}
+    in_stock = float(r.stock_quantity or 0) > float(r.reserved_quantity or 0)
+    data["in_stock"] = bool(in_stock)
     if include_stock:
         data["stock"] = str(r.stock_quantity)
     return data
@@ -183,7 +185,9 @@ def product_search():
         if store_code:
             selected = Store.query.filter_by(code=store_code, is_active=True).first()
             store_id = selected.id if selected else None
-    query = StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), StoreProduct.stock_quantity > StoreProduct.reserved_quantity, Product.status == "ACTIVE")
+    # Online browsing must show real saved catalogue rows even when stock is zero;
+    # the UI marks those items out of stock and disables purchase instead of hiding them.
+    query = StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE")
     if store_id: query = query.filter(StoreProduct.store_id == store_id)
     category_id = request.args.get("category_id", "").strip()
     if category_id: query = query.filter(Product.category_id == category_id)

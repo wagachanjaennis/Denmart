@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#071b16"><meta name="robots" content="noindex,nofollow,noarchive"><title>Denmart · Advertisement</title>
-<link rel="stylesheet" href="{{url_for('static',filename='css/advert-player.css')}}?v=20261023-studio-v1">
+<link rel="stylesheet" href="{{url_for('static',filename='css/advert-player.css')}}?v=20261023-studio-v3">
 </head>
 <body class="ad-screen-body">
-<main class="ad-screen" aria-label="Denmart advertisement screen"><canvas id="adCanvas" width="1920" height="1080" aria-label="Denmart advertisement"></canvas><div class="ad-screen-hint" id="adScreenHint">Denmart · advertisement screen</div></main>
+<main class="ad-screen" aria-label="Denmart advertisement screen"><canvas id="adCanvas" width="1920" height="1080" aria-label="Denmart advertisement"></canvas><video id="adUploadedVideo" playsinline muted loop hidden></video><div class="ad-video-overlay" id="adVideoOverlay" hidden><div id="adVideoFlow"></div></div><div class="ad-screen-hint" id="adScreenHint">Denmart · advertisement screen</div></main>
 <script id="adCampaign" type="application/json">{{campaign|tojson}}</script>
-<script src="{{url_for('static',filename='js/advert-player.js')}}?v=20261023-studio-v1"></script>
+<script src="{{url_for('static',filename='js/advert-player.js')}}?v=20261023-studio-v3"></script>
 </body></html>

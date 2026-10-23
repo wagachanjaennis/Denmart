@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "source": "verified image files explicitly bundled by the Denmart update patch",
+  "product_ids": [
+    "0c88f407-d022-40a1-9328-ae6da20ad8cd",
+    "0e958bdb-ba37-46eb-8e5b-994a72c86ded",
+    "1a54816f-9b63-4925-ad16-6a964ee8e94b",
+    "1e6be269-6e6a-414d-acf6-bd7ca904b289",
+    "1eedf08d-2a2d-4fd4-b506-e40f367b8472",
+    "1efad870-52c7-43c4-847d-a409995586d2",
+    "1fd54cb2-83e5-4a52-b709-b029bed6e34c",
+    "1fff433f-5d17-477e-8fa9-ff8b4082955a",
+    "2d280c07-fede-448b-8e84-0bce75d1dd2e"
+  ]
+}

@@ -6,19 +6,26 @@ stay inside the database-backed campaign for reliable redeploys and backups.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import secrets
+import subprocess
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 from functools import wraps
 from io import BytesIO
+from urllib.parse import quote
 
 import qrcode
 from flask import Blueprint, current_app, jsonify, redirect, render_template, request, send_file, url_for
 
 from extensions import db
 from flask_login import current_user
-from models import SystemSetting, now
+from models import SystemSetting, Product, ProductImage, StoreProduct, now
+from services.product_images import product_image_sources, product_image_source, data_url_to_bytes, is_data_image_url, _local_static_image, real_product_image_url
 from routes.dev_admin import _dev_ok, _business, _audit
 
 bp = Blueprint("advertising", __name__)
@@ -40,10 +47,21 @@ def default_campaign():
         "schedule_enabled": False,
         "start_date": "",
         "end_date": "",
+        "daily_start_time": "",
+        "daily_end_time": "",
+        "schedule_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        "priority": 0,
+        "darken_screen": False,
+        "overlay_opacity": 0.52,
+        "flow_text_enabled": False,
+        "flow_text": "",
+        "media_asset_id": "",
+        "media_name": "",
+        "media_mime": "",
         "slides": [
-            {"headline": "WELCOME TO DENMART ONLINE", "body": "Everyday essentials. A simpler way to shop.", "cta": "VISIT DENMART.CO.KE", "image_url": "", "show_qr": True, "duration": 6},
-            {"headline": "THE THINGS YOUR HOME NEEDS", "body": "Discover groceries, laundry care, bathing essentials and everyday favourites in one convenient place.", "cta": "YOUR EVERYDAY STORE, ONLINE", "image_url": "", "show_qr": False, "duration": 6},
-            {"headline": "WE'RE GETTING READY FOR YOU", "body": "Online ordering opens 5 November 2026.", "cta": "SAVE THE DATE  •  DENMART.CO.KE", "image_url": "", "show_qr": True, "duration": 7},
+            {"headline": "WELCOME TO DENMART ONLINE", "body": "Everyday essentials. A simpler way to shop.", "cta": "VISIT DENMART.CO.KE", "image_url": "", "image_urls": [], "show_qr": True, "duration": 6},
+            {"headline": "THE THINGS YOUR HOME NEEDS", "body": "Discover groceries, laundry care, bathing essentials and everyday favourites in one convenient place.", "cta": "YOUR EVERYDAY STORE, ONLINE", "image_url": "", "image_urls": [], "show_qr": False, "duration": 6},
+            {"headline": "WE'RE GETTING READY FOR YOU", "body": "Online ordering opens 5 November 2026.", "cta": "SAVE THE DATE  •  DENMART.CO.KE", "image_url": "", "image_urls": [], "show_qr": True, "duration": 7},
         ],
         "updated_at": "built-in-welcome-v1",
     }
@@ -110,32 +128,83 @@ def _valid_campaign(raw):
     if len(slides_in) > 8:
         raise ValueError("A campaign can contain up to 8 scenes.")
     slides = []
+    def allowed_image(value):
+        value = str(value or "").strip()
+        return (not value or value.startswith(("data:image/", "https://", "http://", "/static/", "/product-photo/", "/advertisement/product-photo/")))
     for item in slides_in:
         if not isinstance(item, dict):
             continue
         image_url = str(item.get("image_url") or "").strip()
-        if image_url and not (image_url.startswith("data:image/") or image_url.startswith("https://") or image_url.startswith("http://")):
+        image_urls_in = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
+        image_urls = []
+        for candidate in image_urls_in[:8]:
+            candidate = str(candidate or "").strip()
+            if not allowed_image(candidate):
+                raise ValueError("Scene images must be real product photos, uploaded images, or HTTP(S) image URLs.")
+            if candidate and candidate not in image_urls:
+                image_urls.append(candidate[:620_000])
+        if image_url and not allowed_image(image_url):
             raise ValueError("Scene images must be uploaded images or HTTP(S) URLs.")
         if image_url.startswith("data:image/") and len(image_url) > 600_000:
             raise ValueError("Each uploaded image must be compressed to 450 KB or smaller.")
+        if image_url and image_url not in image_urls:
+            image_urls.insert(0, image_url[:620_000])
+        image_urls = image_urls[:8]
         slides.append({
             "headline": re.sub(r"\s+", " ", str(item.get("headline") or "Your everyday essentials")).strip()[:120],
             "body": re.sub(r"\s+", " ", str(item.get("body") or "")).strip()[:280],
             "cta": re.sub(r"\s+", " ", str(item.get("cta") or "SHOP ONLINE")).strip()[:100],
-            "image_url": image_url[:620_000],
+            "image_url": image_urls[0] if image_urls else image_url[:620_000],
+            "image_urls": image_urls,
+            "product_id": re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("product_id") or ""))[:100],
+            "product_name": re.sub(r"\s+", " ", str(item.get("product_name") or "")).strip()[:180],
             "show_qr": bool(item.get("show_qr", False)),
             "duration": max(3, min(15, int(item.get("duration") or 6))),
         })
     if not slides:
         raise ValueError("The campaign must contain at least one valid scene.")
     campaign_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("id") or ""))[:80] or secrets.token_urlsafe(10).replace("-", "").replace("_", "")
-    campaign = {"id": campaign_id, "name": title or "Denmart advert", "theme": theme, "ticker": ticker,
-                "website": website or "denmart.co.ke", "show_qr": bool(raw.get("show_qr", True)),
-                "duration": max(3, min(15, int(raw.get("duration") or 6))),
-                "schedule_enabled": bool(raw.get("schedule_enabled", False)),
-                "start_date": str(raw.get("start_date") or "")[:10],
-                "end_date": str(raw.get("end_date") or "")[:10], "slides": slides,
-                "updated_at": datetime.now(timezone.utc).isoformat()}
+    daily_start_time = str(raw.get("daily_start_time") or "").strip()[:5]
+    daily_end_time = str(raw.get("daily_end_time") or "").strip()[:5]
+    for value in (daily_start_time, daily_end_time):
+        if value:
+            try:
+                datetime.strptime(value, "%H:%M")
+            except ValueError as exc:
+                raise ValueError("Daily schedule times must use 24-hour HH:MM time.") from exc
+    if bool(daily_start_time) != bool(daily_end_time):
+        raise ValueError("Choose both a daily start time and end time, or leave both blank for all day.")
+    valid_days = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    schedule_days = [str(day).lower()[:3] for day in raw.get("schedule_days", list(valid_days)) if str(day).lower()[:3] in valid_days] if isinstance(raw.get("schedule_days", list(valid_days)), list) else list(valid_days)
+    if not schedule_days:
+        raise ValueError("Select at least one day for the campaign schedule.")
+    try:
+        priority = max(-1000, min(1000, int(raw.get("priority") or 0)))
+    except (TypeError, ValueError):
+        priority = 0
+    try:
+        overlay_opacity = max(0.15, min(0.85, float(raw.get("overlay_opacity", 0.52))))
+    except (TypeError, ValueError):
+        overlay_opacity = 0.52
+    media_asset_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("media_asset_id") or ""))[:80]
+    campaign = {
+        "id": campaign_id, "name": title or "Denmart advert", "theme": theme, "ticker": ticker,
+        "website": website or "denmart.co.ke", "show_qr": bool(raw.get("show_qr", True)),
+        "duration": max(3, min(15, int(raw.get("duration") or 6))),
+        "schedule_enabled": bool(raw.get("schedule_enabled", False)),
+        "start_date": str(raw.get("start_date") or "")[:10],
+        "end_date": str(raw.get("end_date") or "")[:10],
+        "daily_start_time": daily_start_time, "daily_end_time": daily_end_time,
+        "schedule_days": list(dict.fromkeys(schedule_days)), "priority": priority,
+        "darken_screen": bool(raw.get("darken_screen", False)),
+        "overlay_opacity": overlay_opacity,
+        "flow_text_enabled": bool(raw.get("flow_text_enabled", False)),
+        "flow_text": re.sub(r"\s+", " ", str(raw.get("flow_text") or "")).strip()[:220],
+        "media_asset_id": media_asset_id,
+        "media_name": re.sub(r"[\\/\x00-\x1f]", "", str(raw.get("media_name") or ""))[:160],
+        "media_mime": "video/mp4" if media_asset_id else "",
+        "slides": slides, "updated_at": datetime.now(timezone.utc).isoformat()
+    }
     for date_key in ("start_date", "end_date"):
         if campaign[date_key]:
             try:
@@ -180,6 +249,195 @@ def load_campaign(campaign_id):
     return jsonify(ok=True, campaign=campaign)
 
 
+@bp.get("/advertcontrol/api/products")
+@_require_developer
+def search_ad_products():
+    """Search the real Denmart product database for the advertising studio."""
+    query_text = " ".join(str(request.args.get("q") or "").split())[:120]
+    query = Product.query.filter(Product.status == "ACTIVE")
+    if query_text:
+        pattern = "%" + query_text.replace("%", "\\%").replace("_", "\\_") + "%"
+        query = query.filter(db.or_(Product.name.ilike(pattern), Product.brand.ilike(pattern), Product.barcode.ilike(pattern), Product.sku.ilike(pattern)))
+    products = query.order_by(Product.name.asc()).limit(60).all()
+    if not products and query_text:
+        # Partial-token fallback still searches saved products only; it never invents
+        # product names or package artwork.
+        words = [word for word in query_text.split() if len(word) > 1][:3]
+        if words:
+            query = Product.query.filter(Product.status == "ACTIVE")
+            for word in words:
+                like = "%" + word + "%"
+                query = query.filter(db.or_(Product.name.ilike(like), Product.brand.ilike(like)))
+            products = query.order_by(Product.name.asc()).limit(40).all()
+    product_ids = [p.id for p in products]
+    gallery_rows = (ProductImage.query.filter(ProductImage.product_id.in_(product_ids))
+                    .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all()) if product_ids else []
+    gallery = {}
+    durable = {}
+    for row in gallery_rows:
+        if not row.image_url:
+            continue
+        target = durable if getattr(row, "source_type", "") == "denmart-offline-cache" else gallery
+        target.setdefault(str(row.product_id), []).append(str(row.image_url).strip())
+    # Let the saved feeder enrich selected product images when active. The saved local
+    # product remains the source of names, SKUs, stock and price.
+    store_rows = StoreProduct.query.filter(StoreProduct.product_id.in_(product_ids)).all() if product_ids else []
+    if store_rows:
+        business_id = getattr(getattr(store_rows[0], "store", None), "business_id", None)
+        try:
+            from services.catalogue_feeder import apply_online_feeder_overlay
+            apply_online_feeder_overlay(store_rows, business_id)
+        except Exception:
+            current_app.logger.exception("Could not resolve product photos from the feeder for advert search")
+    result = []
+    for product in products:
+        product._denmart_gallery_image_urls = gallery.get(str(product.id), [])
+        product._denmart_durable_image_urls = durable.get(str(product.id), [])
+        candidates = product_image_sources(product)
+        image_urls = [f"/advertisement/product-photo/{quote(str(product.id), safe='')}/{i}.webp" for i in range(min(8, len(candidates)))]
+        if not image_urls and str(product.barcode or "").strip():
+            # The endpoint performs an exact-barcode image lookup on demand; do not
+            # call an external API for every item on the search-results page.
+            image_urls = [f"/advertisement/product-photo/{quote(str(product.id), safe='')}/0.webp"]
+        result.append({"id": str(product.id), "name": product.name, "brand": product.brand or "",
+                       "barcode": product.barcode or "", "sku": product.sku or "",
+                       "image_urls": image_urls, "image_count": len(candidates),
+                       "image_url": image_urls[0] if image_urls else ""})
+    return jsonify(ok=True, items=result, count=len(result))
+
+
+@bp.get("/advertisement/product-photo/<product_id>/<int:image_index>.webp")
+def advertisement_product_photo(product_id, image_index):
+    if image_index < 0 or image_index > 7:
+        return ("", 404)
+    product = _ad_product_with_gallery(product_id)
+    if not product:
+        return ("", 404)
+    sources = product_image_sources(product)
+    chosen = [sources[image_index]] if image_index < len(sources) else []
+    from routes.shop import _try_product_image_sources
+    response = _try_product_image_sources(product, chosen, cache_seconds=2592000)
+    if not isinstance(response, tuple) and getattr(response, "status_code", 200) < 400:
+        return response
+    return _try_product_image_sources(product, list(getattr(product, "_denmart_durable_image_urls", []) or [])[:8], cache_seconds=2592000)
+
+
+def _ad_product_with_gallery(product_id):
+    product = db.session.get(Product, product_id)
+    if not product or product.status != "ACTIVE":
+        return None
+    try:
+        rows = ProductImage.query.filter_by(product_id=product.id).order_by(
+            ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all()
+        product._denmart_durable_image_urls = [str(row.image_url or "").strip() for row in rows if str(row.image_url or "").strip() and getattr(row, "source_type", "") == "denmart-offline-cache"]
+        gallery = [str(row.image_url or "").strip() for row in rows if str(row.image_url or "").strip() and getattr(row, "source_type", "") != "denmart-offline-cache"]
+        if gallery:
+            product._denmart_saved_image_url = gallery[0]
+            product._denmart_gallery_image_urls = gallery
+    except Exception:
+        current_app.logger.exception("Could not read product gallery for advertising")
+    try:
+        store_rows = StoreProduct.query.filter_by(product_id=product.id).all()
+        if store_rows:
+            from services.catalogue_feeder import apply_online_feeder_overlay
+            business_id = getattr(getattr(store_rows[0], "store", None), "business_id", None)
+            apply_online_feeder_overlay(store_rows, business_id)
+    except Exception:
+        current_app.logger.exception("Could not add supplier image to advertising gallery")
+    return product
+
+
+@bp.post("/advertcontrol/api/upload-video")
+@_require_developer
+def upload_ad_video():
+    business = _business()
+    if not business:
+        return jsonify(ok=False, error="No Denmart database is configured."), 503
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify(ok=False, error="Choose an MP4 video file first."), 400
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "", Path(upload.filename).name).strip()[:150] or "denmart-ad.mp4"
+    if not filename.lower().endswith(".mp4"):
+        return jsonify(ok=False, error="Upload a real MP4 video. The original file is preserved without re-encoding."), 400
+    binary = upload.stream.read(20 * 1024 * 1024 + 1)
+    if len(binary) > 20 * 1024 * 1024:
+        return jsonify(ok=False, error="Keep the uploaded MP4 at 20 MB or smaller so publishing stays lightweight."), 413
+    if len(binary) < 12 or binary[4:8] != b"ftyp":
+        return jsonify(ok=False, error="This file does not look like a valid MP4. Choose an exported .mp4 video."), 400
+    asset_id = secrets.token_urlsafe(18).replace("-", "").replace("_", "")[:32]
+    value = json.dumps({"mime": "video/mp4", "filename": filename, "data": base64.b64encode(binary).decode("ascii")}, separators=(",", ":"))
+    _put_setting(business.id, "advert_asset_" + asset_id, value)
+    db.session.commit()
+    return jsonify(ok=True, asset_id=asset_id, media_name=filename,
+                   media_mime="video/mp4", media_url=f"/advertisement/media/{asset_id}",
+                   message="MP4 uploaded. Denmart will play and download the original bytes without changing the video.")
+
+
+@bp.get("/advertisement/media/<asset_id>")
+def advertisement_media(asset_id):
+    business = _business()
+    asset_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(asset_id or ""))[:80]
+    raw = _setting(business.id, "advert_asset_" + asset_id, "") if business and asset_id else ""
+    try:
+        asset = json.loads(raw) if raw else {}
+        binary = base64.b64decode(asset.get("data") or "", validate=True)
+    except Exception:
+        return ("", 404)
+    if not binary or asset.get("mime") != "video/mp4":
+        return ("", 404)
+    download = request.args.get("download") == "1"
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "", Path(str(asset.get("filename") or "denmart-ad.mp4")).name)[:150] or "denmart-ad.mp4"
+    response = send_file(BytesIO(binary), mimetype="video/mp4", as_attachment=download,
+                         download_name=filename if download else None, conditional=True, max_age=31536000)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
+@bp.post("/advertcontrol/api/export-mp4")
+@_require_developer
+def export_ad_mp4():
+    upload = request.files.get("file")
+    if not upload:
+        return jsonify(ok=False, error="The recorded animation did not reach the MP4 exporter."), 400
+    data = upload.stream.read(35 * 1024 * 1024 + 1)
+    if len(data) > 35 * 1024 * 1024:
+        return jsonify(ok=False, error="This recording is too large. Shorten the advert or use fewer/lighter images."), 413
+    if not data:
+        return jsonify(ok=False, error="The browser returned an empty video recording."), 400
+    temp = tempfile.TemporaryDirectory(prefix="denmart-ad-mp4-")
+    try:
+        source = Path(temp.name) / "recording.webm"
+        output = Path(temp.name) / "denmart-advert.mp4"
+        source.write_bytes(data)
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            temp.cleanup()
+            return jsonify(ok=False, error="The MP4 conversion component is not installed on this deployment. Redeploy the update so the MP4 exporter dependency is installed."), 503
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source), "-an",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+               "-movflags", "+faststart", "-threads", "2", str(output)]
+        done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100, check=False)
+        if done.returncode != 0 or not output.exists() or output.stat().st_size < 1024:
+            temp.cleanup()
+            current_app.logger.warning("MP4 video export failed: %s", done.stderr.decode("utf-8", "replace")[-1000:])
+            return jsonify(ok=False, error="MP4 conversion failed. The ad preview is unchanged; shorten the campaign or upload an already-exported MP4."), 422
+        response = send_file(str(output), mimetype="video/mp4", as_attachment=True,
+                             download_name="denmart-advert.mp4", conditional=True, max_age=0)
+        response.call_on_close(temp.cleanup)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except subprocess.TimeoutExpired:
+        temp.cleanup()
+        return jsonify(ok=False, error="MP4 export exceeded the server's safe conversion limit. Shorten the ad and retry."), 408
+    except Exception:
+        temp.cleanup()
+        current_app.logger.exception("Could not export Denmart advert as MP4")
+        return jsonify(ok=False, error="The MP4 exporter could not finish. The campaign itself is still saved."), 500
+
+
 @bp.post("/advertcontrol/api/save")
 @_require_developer
 def save_campaign():
@@ -189,6 +447,8 @@ def save_campaign():
     payload = request.get_json(silent=True) or {}
     try:
         campaign = _valid_campaign(payload.get("campaign"))
+        if campaign.get("media_asset_id") and not _setting(business.id, "advert_asset_" + campaign["media_asset_id"], ""):
+            raise ValueError("The uploaded MP4 is no longer available. Upload it again before saving this campaign.")
         publish = bool(payload.get("publish"))
         live_campaign = _published_campaign(business.id) if publish and campaign.get("schedule_enabled") else None
         same_as_live = bool(live_campaign and str(campaign.get("id")) == str(live_campaign.get("id")))
@@ -282,21 +542,49 @@ def delete_campaign():
     return jsonify(ok=True, campaigns=campaigns)
 
 
-def _local_today():
+def _local_now():
     try:
         from zoneinfo import ZoneInfo
         timezone_name = current_app.config.get("TIMEZONE", "Africa/Nairobi")
-        return datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+        return datetime.now(ZoneInfo(timezone_name))
     except Exception:
-        return datetime.now(timezone.utc).date().isoformat()
+        return datetime.now(timezone.utc)
 
 
-def _within_schedule(item, today):
+def _local_today():
+    return _local_now().date().isoformat()
+
+
+def _within_schedule(item, today, current_time=None, weekday=None):
     if not isinstance(item, dict) or not item.get("schedule_enabled"):
         return False
     start_date = str(item.get("start_date") or "")
     end_date = str(item.get("end_date") or "")
-    return not (start_date and today < start_date) and not (end_date and today > end_date)
+    if (start_date and today < start_date) or (end_date and today > end_date):
+        return False
+    # Legacy date-only checks used by the publish/cancel flow remain date-only.
+    if current_time is None:
+        return True
+    day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    allowed_days = item.get("schedule_days")
+    if isinstance(allowed_days, list) and allowed_days and weekday is not None:
+        if day_names[weekday % 7] not in {str(day).lower()[:3] for day in allowed_days}:
+            return False
+    start_time = str(item.get("daily_start_time") or "").strip()
+    end_time = str(item.get("daily_end_time") or "").strip()
+    if not start_time or not end_time:
+        return True
+    try:
+        from datetime import time as clock_time
+        start = clock_time.fromisoformat(start_time)
+        end = clock_time.fromisoformat(end_time)
+        now_time = current_time
+        if start <= end:
+            return start <= now_time < end
+        # Support campaigns crossing midnight, e.g. 22:00–02:00.
+        return now_time >= start or now_time < end
+    except ValueError:
+        return False
 
 
 def _scheduled_campaigns(business_id):
@@ -341,16 +629,16 @@ def _campaign_for_public():
     # The immediately published campaign is the fallback, including before/after
     # a scheduled campaign's window. A scheduled ad can never blank the screen.
     fallback = _published_campaign(business.id)
-    today = _local_today()
+    local_now = _local_now()
+    today = local_now.date().isoformat()
 
     active = []
     for item in _scheduled_campaigns(business.id):
-        if _within_schedule(item, today):
+        if _within_schedule(item, today, local_now.time(), local_now.weekday()):
             active.append(item)
     if active:
-        # When schedules overlap, the most recently saved campaign wins so the
-        # operator can intentionally supersede a previous schedule.
-        active.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        # Higher priority wins for overlapping time windows; recency breaks ties.
+        active.sort(key=lambda item: (int(item.get("priority") or 0), str(item.get("updated_at") or "")), reverse=True)
         return active[0]
     return fallback
 

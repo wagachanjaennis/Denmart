@@ -27,7 +27,7 @@
     </section>
     <section class="catalogue-section home-all-products" aria-labelledby="home-all-products-title">
       <div class="section-head home-all-products-head">
-        <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">Everything in store</h2><p class="muted" id="homeCatalogueHint">All available products, ready to browse.</p></div>
+        <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">Everything in store</h2><p class="muted" id="homeCatalogueHint">All products in the catalogue, with products that are out of stock clearly marked.</p></div>
         <span class="home-product-count" id="homeProductCount">{{total_products}} products</span>
       </div>
       <div class="product-grid home-grid" id="homeProductGrid">
@@ -44,7 +44,7 @@
  function closeDrawer(){drawer.classList.remove('open');drawer.setAttribute('aria-hidden','true');opener.setAttribute('aria-expanded','false');backdrop.hidden=true}
  function openDrawer(){drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');opener.setAttribute('aria-expanded','true');backdrop.hidden=false}
  opener.addEventListener('click',()=>drawer.classList.contains('open')?closeDrawer():openDrawer());closer.addEventListener('click',closeDrawer);backdrop.addEventListener('click',closeDrawer);
- function filter(value,label){let visible=0;cards.forEach(card=>{const id=card.dataset.categoryId||'';const show=value==='all'||id===String(value);card.hidden=!show;if(show)visible++});document.querySelectorAll('[data-category-filter]').forEach(b=>b.classList.toggle('active',b.dataset.categoryFilter===String(value)));count.textContent=visible+' products';hint.textContent=value==='all'?'All available products, ready to browse.':'Showing '+label+'.';closeDrawer()}
+ function filter(value,label){let visible=0;cards.forEach(card=>{const id=card.dataset.categoryId||'';const show=value==='all'||id===String(value);card.hidden=!show;if(show)visible++});if(value!=='all'&&visible===0){const target=new URL('/shop',location.origin);target.searchParams.set('category',String(value));const store='{{store.code if store else ''}}';if(store)target.searchParams.set('store',store);location.href=target.pathname+target.search;return;}document.querySelectorAll('[data-category-filter]').forEach(b=>b.classList.toggle('active',b.dataset.categoryFilter===String(value)));count.textContent=visible+' products';hint.textContent=value==='all'?'All products in the catalogue, with products that are out of stock clearly marked.':'Showing '+label+'.';closeDrawer()}
  document.querySelectorAll('[data-category-filter]').forEach(b=>b.addEventListener('click',()=>filter(b.dataset.categoryFilter,b.textContent.trim())));
  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
 })();
