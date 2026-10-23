@@ -39,6 +39,27 @@
   const status=$('studioStatus');
   const token=document.querySelector('meta[name="csrf-token"]')?.content||'';
   const themeSet=['emerald','midnight','sunrise','christmas','school','ocean','plum'];
+  let exportAudioContext=null, exportMediaElementSource=null, exportAudioDestination=null;
+  async function attachOriginalVideoAudio(stream){
+    const video=$('adUploadedVideo');
+    if(!stream||!video||!state.media_asset_id)return;
+    try{
+      const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+      if(!AudioContextClass)return;
+      if(!exportAudioContext){
+        exportAudioContext=new AudioContextClass();
+        exportMediaElementSource=exportAudioContext.createMediaElementSource(video);
+        exportAudioDestination=exportAudioContext.createMediaStreamDestination();
+        // Do not connect this path to the speakers: it feeds only the recorded ad.
+        exportMediaElementSource.connect(exportAudioDestination);
+      }
+      video.muted=false;
+      await exportAudioContext.resume();
+      exportAudioDestination.stream.getAudioTracks().forEach(track=>{
+        try{stream.addTrack(track.clone());}catch(_){}
+      });
+    }catch(err){console.debug("Could not include source video audio in this export.",err);}
+  }
   function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function notify(message,kind){if(status){status.textContent=message;status.className='studio-status '+(kind||'');}}
   function freshId(){try{return 'ad-'+crypto.randomUUID();}catch(_){return 'ad-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);}}
@@ -49,12 +70,13 @@
     const mediaName=$('adUploadedVideoName');const mediaState=$('adUploadedVideoState');const download=$('downloadOriginalVideo');
     if(state.media_asset_id){mediaState.hidden=false;mediaName.textContent=state.media_name||'Uploaded MP4';download.href='/advertisement/media/'+encodeURIComponent(state.media_asset_id)+'?download=1';download.hidden=false;}else{mediaState.hidden=true;download.hidden=true;download.href='#';}
     renderScenes();updatePreview();updateScheduleButton();
+    window.dispatchEvent(new CustomEvent('denmart:statechange'));
   }
   function readControls(){
     state.name=$('campaignName').value.trim().slice(0,120)||'Denmart advert';state.theme=$('campaignTheme').value;$('campaignWebsite').value=$('campaignWebsite').value.trim();state.website=$('campaignWebsite').value||'denmart.co.ke';state.ticker=$('campaignTicker').value.trim();state.show_qr=$('campaignQr').checked;state.schedule_enabled=$('campaignSchedule').checked;state.start_date=$('campaignStart').value;state.end_date=$('campaignEnd').value;
     state.daily_start_time=$('campaignDailyStart').value;state.daily_end_time=$('campaignDailyEnd').value;state.priority=Number($('campaignPriority').value||0);state.schedule_days=[...document.querySelectorAll('[data-schedule-day]:checked')].map(el=>el.dataset.scheduleDay);state.darken_screen=$('campaignDarken').checked;state.overlay_opacity=Math.max(.15,Math.min(.85,Number($('campaignOpacity').value||52)/100));state.flow_text_enabled=$('campaignFlowEnabled').checked;state.flow_text=$('campaignFlowText').value.trim().slice(0,220);
     const cards=[...document.querySelectorAll('.scene-editor-card')];
-    state.slides=cards.map((card,i)=>{const prior=state.slides[i]||{};const imageUrls=Array.isArray(prior.image_urls)?prior.image_urls.slice(0,8):[];const image=prior.image_url||imageUrls[0]||'';if(image&&!imageUrls.includes(image))imageUrls.unshift(image);return {headline:card.querySelector('[data-field="headline"]').value,body:card.querySelector('[data-field="body"]').value,cta:card.querySelector('[data-field="cta"]').value,image_url:imageUrls[0]||image,image_urls:imageUrls.slice(0,8),product_id:prior.product_id||'',product_name:prior.product_name||'',show_qr:card.querySelector('[data-field="show_qr"]').checked,duration:Number(card.querySelector('[data-field="duration"]').value)||6};});
+    state.slides=cards.map((card,i)=>{const prior=state.slides[i]||{};const imageUrls=Array.isArray(prior.image_urls)?prior.image_urls.slice(0,8):[];const image=prior.image_url||imageUrls[0]||'';if(image&&!imageUrls.includes(image))imageUrls.unshift(image);return {headline:card.querySelector('[data-field="headline"]').value,body:card.querySelector('[data-field="body"]').value,cta:card.querySelector('[data-field="cta"]').value,image_url:imageUrls[0]||image,image_urls:imageUrls.slice(0,8),product_id:prior.product_id||'',product_name:prior.product_name||'',design:prior.design||{enabled:false,elements:[]},show_qr:card.querySelector('[data-field="show_qr"]').checked,duration:Number(card.querySelector('[data-field="duration"]').value)||6};});
     return state;
   }
   function renderScenes(){
@@ -114,14 +136,35 @@
   $('exportVideo').addEventListener('click',async()=>{
     const c=clone(readControls());c.id=currentId;const button=$('exportVideo');const progress=$('exportProgress');const bar=$('exportProgressBar');const link=$('exportDownload');link.hidden=true;
     const safeName=(c.name||'denmart-advert').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'denmart-advert';
-    if(c.media_asset_id){link.href='/advertisement/media/'+encodeURIComponent(c.media_asset_id)+'?download=1';link.download=(c.media_name||safeName+'.mp4').replace(/[^A-Za-z0-9._ -]/g,'')||safeName+'.mp4';link.hidden=false;link.textContent='Download original uploaded MP4 (unchanged)';link.click();notify('The exact uploaded MP4 is available; Denmart does not re-encode uploaded advertisements.','success');return;}
+    if(c.media_asset_id&&!c.slides.some(s=>s.design&&s.design.enabled)){link.href='/advertisement/media/'+encodeURIComponent(c.media_asset_id)+'?download=1';link.download=(c.media_name||safeName+'.mp4').replace(/[^A-Za-z0-9._ -]/g,'')||safeName+'.mp4';link.hidden=false;link.textContent='Download original uploaded MP4 (unchanged)';link.click();notify('The exact uploaded MP4 is available; Denmart does not re-encode uploaded advertisements.','success');return;}
     if(!window.MediaRecorder||!canvas.captureStream){notify('This browser cannot record the animated canvas. Open this studio in current Chrome or Edge, or upload an existing MP4.','error');return;}
-    let stream,recorder;try{if(window.DenmartAdPlayer)window.DenmartAdPlayer.setCampaign(c);stream=canvas.captureStream(30);const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(x=>MediaRecorder.isTypeSupported(x));recorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}catch(err){notify('The browser could not record this preview. Use same-origin product images or upload an MP4.','error');return;}
+    let stream,recorder;try{if(window.DenmartAdPlayer)window.DenmartAdPlayer.setCampaign(c);stream=canvas.captureStream(30);await attachOriginalVideoAudio(stream);const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(x=>MediaRecorder.isTypeSupported(x));recorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}catch(err){notify('The browser could not record this preview. Use same-origin product images or upload an MP4.','error');return;}
     const seconds=Math.min(120,c.slides.reduce((n,s)=>n+Math.max(3,Math.min(15,Number(s.duration||6))),0));const chunks=[];button.disabled=true;progress.hidden=false;bar.style.width='0%';notify(`Recording ${seconds} seconds of your animated campaign… keep this tab open.`);
     recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
     recorder.onerror=()=>{stream.getTracks().forEach(t=>t.stop());button.disabled=false;progress.hidden=true;notify('Browser recording failed. Try lighter images or upload an MP4.','error');};
     recorder.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());progress.hidden=false;bar.style.width='100%';const webm=new Blob(chunks,{type:recorder.mimeType||'video/webm'});try{notify('Converting the animated recording to a genuine H.264 MP4…');const form=new FormData();form.append('file',webm,'denmart-recording.webm');const r=await fetch('/advertcontrol/api/export-mp4',{method:'POST',headers:{'X-CSRFToken':token},body:form});if(!r.ok){let msg='Server MP4 export failed.';try{const d=await r.clone().json();msg=d.error||msg;}catch(_){}throw new Error(msg);}const blob=await r.blob();if(!blob.size||(!blob.type.includes('video/mp4')&&blob.type!=='application/octet-stream'))throw new Error('The export service did not return an MP4 file.');const url=URL.createObjectURL(blob);link.href=url;link.download=safeName+'.mp4';link.hidden=false;link.textContent=`Download MP4 (${(blob.size/1024/1024).toFixed(1)} MB)`;link.click();notify('Your animated campaign was converted to MP4. Download it below; uploaded originals are never re-encoded.','success');}catch(err){notify(err.message||'MP4 export could not finish. Upload an already exported MP4 as an alternative.','error');}finally{button.disabled=false;setTimeout(()=>{progress.hidden=true;},500);if(window.DenmartAdPlayer)window.DenmartAdPlayer.setCampaign(readControls());}};
     const started=performance.now();recorder.start(500);const trackProgress=()=>{if(recorder.state!=='recording')return;const elapsed=(performance.now()-started)/1000;bar.style.width=Math.min(100,elapsed/seconds*100)+'%';if(elapsed>=seconds)recorder.stop();else requestAnimationFrame(trackProgress);};requestAnimationFrame(trackProgress);
   });
+  // Public bridge for the visual canvas editor; campaign state remains in this
+  // existing module so the visual layers save with the current campaign record.
+  window.DenmartStudioAPI={
+    getState(){return state;},
+    getCurrentId(){return currentId;},
+    getCsrf(){return token;},
+    refresh(){renderScenes();updatePreview();window.dispatchEvent(new CustomEvent('denmart:statechange'));},
+    setDesign(index,design){if(!state.slides[index])return;state.slides[index].design=design;updatePreview();window.dispatchEvent(new CustomEvent('denmart:statechange'));},
+    ensureDesign(index){if(!state.slides[index])return null;const slide=state.slides[index];if(!slide.design||!Array.isArray(slide.design.elements)||(!slide.design.enabled&&slide.design.elements.length===0)){const headline=slide.headline||'Your headline';const body=slide.body||'Your supporting message';const cta=slide.cta||'SHOP ONLINE';const design={enabled:true,background:'#10243a',background2:'#45264f',gradient:true,video_tint:'#10243a',video_tint_opacity:0,elements:[
+      {id:freshId(),type:'text',text:headline,x:100,y:245,w:880,h:220,font_size:78,weight:900,color:'#ffffff',fill:'#e63854',stroke:'#10243a',align:'left',opacity:1,effect:'fade',motion_duration:1.2,delay:0,shadow:false},
+      {id:freshId(),type:'text',text:body,x:108,y:500,w:780,h:160,font_size:32,weight:500,color:'#e9f3ff',fill:'#e63854',stroke:'#10243a',align:'left',opacity:1,effect:'rise',motion_duration:1.1,delay:.2,shadow:false},
+      {id:freshId(),type:'rect',text:'',x:100,y:720,w:440,h:84,font_size:24,weight:800,color:'#10243a',fill:'#c6f36b',stroke:'#ffffff',stroke_width:0,radius:42,align:'center',opacity:1,effect:'melt',motion_duration:1.1,delay:.3,shadow:false},
+      {id:freshId(),type:'text',text:cta,x:132,y:738,w:600,h:50,font_size:23,weight:900,color:'#10243a',fill:'#c6f36b',stroke:'#10243a',align:'left',opacity:1,effect:'fade',motion_duration:.7,delay:.5,shadow:false}
+      ]};if(slide.image_url||slide.image_urls?.length)design.elements.push({id:freshId(),type:'image',text:'',image_url:slide.image_url||slide.image_urls[0],x:1120,y:200,w:520,h:520,font_size:48,weight:700,color:'#ffffff',fill:'#ffffff',stroke:'#ffffff',fit:'contain',opacity:1,effect:'zoom',motion_duration:1.2,delay:.2,shadow:true});slide.design=design;}else slide.design.enabled=true;updatePreview();return slide.design;},
+    updateDesign(index,design){this.setDesign(index,design);},
+    notify(message,kind){notify(message,kind);},
+    save(publish){return saveCampaign(!!publish);},
+    chooseTemplate(key){useTemplate(key||$('templateChoice').value,false);},
+    addScene(){ $('addScene').click(); setTimeout(()=>window.dispatchEvent(new CustomEvent('denmart:statechange')),0); },
+    selectScene(index){if(window.DenmartAdPlayer)window.DenmartAdPlayer.setEditorScene(index,true);}
+  };
   applyObjectToControls();
 })();

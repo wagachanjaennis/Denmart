@@ -150,7 +150,7 @@ def _valid_campaign(raw):
         if image_url and image_url not in image_urls:
             image_urls.insert(0, image_url[:620_000])
         image_urls = image_urls[:8]
-        slides.append({
+        slide_out = {
             "headline": re.sub(r"\s+", " ", str(item.get("headline") or "Your everyday essentials")).strip()[:120],
             "body": re.sub(r"\s+", " ", str(item.get("body") or "")).strip()[:280],
             "cta": re.sub(r"\s+", " ", str(item.get("cta") or "SHOP ONLINE")).strip()[:100],
@@ -160,7 +160,74 @@ def _valid_campaign(raw):
             "product_name": re.sub(r"\s+", " ", str(item.get("product_name") or "")).strip()[:180],
             "show_qr": bool(item.get("show_qr", False)),
             "duration": max(3, min(15, int(item.get("duration") or 6))),
-        })
+        }
+        # The visual editor stores layers inside the existing campaign JSON setting.
+        # No new database table or migration is required.
+        design_in = item.get("design")
+        if isinstance(design_in, dict):
+            def colour(value, fallback):
+                value = str(value or fallback).strip().lower()
+                return value if re.fullmatch(r"#[0-9a-f]{3}(?:[0-9a-f]{3})?", value) else fallback
+            elements = []
+            supported_types = {"text", "number", "image", "rect", "circle", "line", "sticker", "badge", "qr"}
+            supported_effects = {"none", "fade", "slide-left", "slide-right", "rise", "zoom", "bounce", "melt", "typewriter", "float", "rotate", "wipe", "blur", "pulse", "shake", "flip", "pop", "drop", "glow"}
+            for layer in (design_in.get("elements") if isinstance(design_in.get("elements"), list) else [])[:32]:
+                if not isinstance(layer, dict):
+                    continue
+                layer_type = str(layer.get("type") or "text").lower()
+                if layer_type not in supported_types:
+                    continue
+                image_url = str(layer.get("image_url") or "").strip()
+                if image_url and not allowed_image(image_url):
+                    image_url = ""
+                if image_url.startswith("data:image/") and len(image_url) > 460_000:
+                    raise ValueError("Canvas images must be compressed before saving. Choose a smaller image or compress it first.")
+                try: x = max(-500, min(1920, float(layer.get("x", 100))))
+                except (TypeError, ValueError): x = 100
+                try: y = max(-300, min(1080, float(layer.get("y", 100))))
+                except (TypeError, ValueError): y = 100
+                try: width = max(8, min(1920, float(layer.get("w", 500))))
+                except (TypeError, ValueError): width = 500
+                try: height = max(8, min(1080, float(layer.get("h", 100))))
+                except (TypeError, ValueError): height = 100
+                try: font_size = max(12, min(220, int(layer.get("font_size", 56))))
+                except (TypeError, ValueError): font_size = 56
+                try: opacity = max(0.0, min(1.0, float(layer.get("opacity", 1))))
+                except (TypeError, ValueError): opacity = 1.0
+                try: rotation = max(-360, min(360, float(layer.get("rotation", 0))))
+                except (TypeError, ValueError): rotation = 0
+                try: weight = max(300, min(900, int(layer.get("weight", 700))))
+                except (TypeError, ValueError): weight = 700
+                try: delay = max(0.0, min(8.0, float(layer.get("delay", 0))))
+                except (TypeError, ValueError): delay = 0.0
+                try: motion_duration = max(0.2, min(10.0, float(layer.get("motion_duration", 1.2))))
+                except (TypeError, ValueError): motion_duration = 1.2
+                effect = str(layer.get("effect") or "fade").lower()
+                elements.append({
+                    "id": re.sub(r"[^A-Za-z0-9_-]", "", str(layer.get("id") or secrets.token_hex(5)))[:48],
+                    "type": layer_type, "text": str(layer.get("text") or "")[:240],
+                    "image_url": image_url[:460_000], "x": x, "y": y, "w": width, "h": height,
+                    "font_size": font_size, "font_family": str(layer.get("font_family") or "Inter, system-ui, sans-serif")[:100],
+                    "weight": weight, "align": str(layer.get("align") or "left") if str(layer.get("align") or "left") in {"left", "center", "right"} else "left",
+                    "color": colour(layer.get("color"), "#ffffff"), "fill": colour(layer.get("fill"), "#e63854"),
+                    "stroke": colour(layer.get("stroke"), "#ffffff"), "stroke_width": max(0, min(18, int(layer.get("stroke_width", 0) or 0))),
+                    "radius": max(0, min(120, int(layer.get("radius", 20) or 0))), "opacity": opacity,
+                    "rotation": rotation, "delay": delay, "motion_duration": motion_duration,
+                    "effect": effect if effect in supported_effects else "fade",
+                    "shadow": bool(layer.get("shadow", False)), "fit": str(layer.get("fit") or "contain") if str(layer.get("fit") or "contain") in {"contain", "cover", "stretch"} else "contain",
+                })
+            try: tint_opacity = max(0.0, min(0.75, float(design_in.get("video_tint_opacity", 0))))
+            except (TypeError, ValueError): tint_opacity = 0.0
+            slide_out["design"] = {
+                "enabled": bool(design_in.get("enabled", False)),
+                "background": colour(design_in.get("background"), "#10243a"),
+                "background2": colour(design_in.get("background2"), "#45264f"),
+                "gradient": bool(design_in.get("gradient", True)),
+                "video_tint": colour(design_in.get("video_tint"), "#10243a"),
+                "video_tint_opacity": tint_opacity,
+                "elements": elements,
+            }
+        slides.append(slide_out)
     if not slides:
         raise ValueError("The campaign must contain at least one valid scene.")
     campaign_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("id") or ""))[:80] or secrets.token_urlsafe(10).replace("-", "").replace("_", "")
@@ -416,8 +483,8 @@ def export_ad_mp4():
         except Exception:
             temp.cleanup()
             return jsonify(ok=False, error="The MP4 conversion component is not installed on this deployment. Redeploy the update so the MP4 exporter dependency is installed."), 503
-        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source), "-an",
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
+               "-c:v", "libx264", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
                "-movflags", "+faststart", "-threads", "2", str(output)]
         done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100, check=False)
         if done.returncode != 0 or not output.exists() or output.stat().st_size < 1024:

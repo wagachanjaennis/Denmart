@@ -218,6 +218,23 @@ def _is_verified_bundled_photo_id(product_id: str) -> bool:
     item = _read_photo_manifest().get(product_id, {})
     return (isinstance(item, dict) and item.get("type") == "photo") or product_id in _explicit_real_photo_ids()
 
+def _manifest_source_url(product) -> str:
+    """Return an exact product's verified image source from the bundled manifest.
+
+    The photo pass records source URLs for more products than were bundled locally.
+    Using those URLs here lets the existing same-origin image proxy cache the real
+    source on demand instead of silently ignoring those catalogue records.
+    """
+    product_id = str(getattr(product, "id", "") or "").strip()
+    if not product_id:
+        return ""
+    item = _read_photo_manifest().get(product_id, {})
+    if not isinstance(item, dict) or item.get("type") != "photo":
+        return ""
+    source = str(item.get("source_url") or "").strip()
+    return source if source.startswith(("https://", "http://")) else ""
+
+
 def _manifest_photo_url(product) -> str:
     """Use a bundled product image only when the source manifest marks it as a photo.
 
@@ -277,8 +294,10 @@ def product_image_sources(product) -> list[str]:
         stable = f"/static/catalogue/products/by-barcode/{barcode}.webp"
         add(stable)
 
-    # Locally bundled, positively identified photos are strongest for offline use.
+    # Locally bundled photos are strongest for offline use. Also use exact real
+    # source URLs in the same manifest when their files have not yet been bundled.
     add(_manifest_photo_url(product))
+    add(_manifest_source_url(product))
 
     # ProductImage records have historically held photos that were not copied to the
     # Product.image_url column. User-selected gallery records and photos successfully
@@ -312,12 +331,12 @@ def public_product_image(product) -> str:
     Missing photos remain missing; the product row itself is never suppressed.
     """
     source = product_image_source(product, 0)
-    if not source:
-        return ""
     if source.startswith("/static/"):
         return source
     product_id = str(getattr(product, "id", "") or "").strip()
-    if product_id:
+    # Try the exact barcode lookup for every barcoded item. It will only display a
+    # photo returned for the same barcode; it never substitutes a similar product.
+    if product_id and (source or str(getattr(product, "barcode", "") or "").strip()):
         return f"/product-photo/{product_id}.jpg"
     return source
 

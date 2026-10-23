@@ -10,7 +10,8 @@ import socket
 import requests
 
 from PIL import Image, ImageDraw, ImageFont
-from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app, jsonify
+from flask import Blueprint, render_template, request, session, send_file, Response, redirect, current_app, jsonify, url_for
+from sqlalchemy import or_
 from extensions import db
 from models import Product, Store, StoreProduct, Category, ProductAlias, ProductImage, Business, SystemSetting
 from services.search import forgiving_rank
@@ -80,7 +81,7 @@ def catalogue_query(store=None, q="", category="", max_rows=2000):
     if store:
         query = query.filter(StoreProduct.store_id == store.id)
     if category:
-        query = query.filter(Product.category_id == category)
+        query = query.filter(or_(Product.category_id == category, Product.subcategory_id == category))
     # Keep storefront requests bounded: rendering thousands of product cards makes
     # the first page slow, especially on mobile connections and free hosting.
     rows = query.order_by(Product.name).limit(max(1, min(int(max_rows), 2000))).all()
@@ -101,21 +102,143 @@ def catalogue_query(store=None, q="", category="", max_rows=2000):
     return ranked
 
 
+def _product_family(row):
+    """A light display-only family key used to keep similar items apart in browse order."""
+    product = row.product
+    name = str(getattr(product, "name", "") or "").casefold()
+    rules = (
+        ("milk", ("milk",)), ("yoghurt", ("yoghurt", "yogurt")),
+        ("soft-drinks", ("soft drink", "soda", "cola", "fanta", "sprite", "7 up", "pepsi", "tonic")),
+        ("juice", ("juice", "nectar")), ("water", ("water", "mineral water")),
+        ("bread", ("bread", "loaf", "buns", "mandazi")), ("eggs", ("egg",)),
+        ("flour", ("flour",)), ("rice", ("rice",)), ("oil", ("cooking oil", "vegetable oil", "sunflower oil")),
+        ("toothpaste", ("toothpaste", "tooth paste", "colgate", "closeup")),
+        ("laundry", ("detergent", "washing powder", "fabric softener", "comfort", "omo", "ariel")),
+        ("tissue", ("tissue", "toilet paper", "serviettes", "napkin")),
+        ("snacks", ("crisps", "chips", "biscuits", "cookies", "chocolate", "sweets", "lollipop")),
+        ("soap", ("soap", "body wash", "shower gel")), ("shampoo", ("shampoo", "conditioner")),
+        ("sugar", ("sugar",)), ("tea-coffee", ("tea", "coffee", "milo", "cocoa")),
+        ("fresh-produce", ("banana", "potato", "tomato", "onion", "avocado", "mango", "apple", "orange")),
+    )
+    for family, terms in rules:
+        if any(term in name for term in terms):
+            return family
+    # Use the scalar FK rather than lazy-loading category rows per product.
+    category_id = str(getattr(product, "subcategory_id", "") or getattr(product, "category_id", "") or "").strip()
+    if category_id:
+        return "category:" + category_id
+    # A few random-UUID-ordered generic groups are better than long alphabetical brand runs.
+    return "misc:" + (str(getattr(product, "brand", "") or "").casefold()[:24] or name.split(" ", 1)[0])
+
+
+def _interleave_catalogue(rows):
+    """Round-robin product families to avoid long runs of the same item type."""
+    buckets = {}
+    order = []
+    for row in rows:
+        family = _product_family(row)
+        if family not in buckets:
+            buckets[family] = []
+            order.append(family)
+        buckets[family].append(row)
+    # Rotate group start so the same family is not always the first card on each page.
+    if len(order) > 1:
+        order = order[1:] + order[:1]
+    mixed = []
+    while order:
+        next_order = []
+        for family in order:
+            if buckets[family]:
+                mixed.append(buckets[family].pop(0))
+            if buckets[family]:
+                next_order.append(family)
+        order = next_order
+    return mixed
+
+
+def catalogue_page(store=None, q="", category="", page=1, page_size=60):
+    """Fetch one bounded storefront batch instead of loading the full catalogue."""
+    query = (StoreProduct.query.join(Product)
+             .filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True),
+                     Product.status == "ACTIVE"))
+    if store:
+        query = query.filter(StoreProduct.store_id == store.id)
+    if category:
+        query = query.filter(or_(Product.category_id == category, Product.subcategory_id == category))
+    if q:
+        needle = f"%{q[:100]}%"
+        alias_ids = db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(needle))
+        query = query.filter(or_(Product.name.ilike(needle), Product.brand.ilike(needle),
+                                 Product.barcode.ilike(needle), Product.sku.ilike(needle), Product.id.in_(alias_ids)))
+    page = max(1, min(int(page or 1), 10000))
+    page_size = max(12, min(int(page_size or 60), 72))
+    total = query.count()
+    rows = (query.order_by(Product.id, StoreProduct.id)
+            .offset((page - 1) * page_size).limit(page_size).all())
+    rows = _attach_saved_product_images(rows)
+    from services.catalogue_feeder import apply_online_feeder_overlay
+    rows = apply_online_feeder_overlay(rows, store.business_id if store else None)
+    return _interleave_catalogue(rows), total
+
+
+@bp.get("/shop/api/products")
+def shop_products_api():
+    """Paginated real product records; keeps database barcodes and stock/prices authoritative."""
+    store = selected_store()
+    if not store:
+        return jsonify(ok=True, items=[], page=1, has_more=False, total=0)
+    q = request.args.get("q", "").strip()[:100]
+    category = request.args.get("category", "").strip()
+    page = request.args.get("page", default=1, type=int) or 1
+    items, total = catalogue_page(store, q=q, category=category, page=page, page_size=60)
+    results = []
+    # Resolve category names in one query; never trigger one lazy SQL query per card.
+    category_ids = {str(value) for row in items for value in
+                    (getattr(row.product, "category_id", None), getattr(row.product, "subcategory_id", None)) if value}
+    category_names = {}
+    if category_ids:
+        try:
+            category_rows = Category.query.filter(Category.id.in_(category_ids)).all()
+            category_names = {str(category.id): str(category.name or "") for category in category_rows}
+        except Exception:
+            current_app.logger.exception("Could not load category labels for shop pagination")
+    for row in items:
+        product = row.product
+        image = public_product_image(product)
+        # Barcode lookup uses a same-origin endpoint and verifies the exact barcode.
+        if not image and str(product.barcode or "").strip():
+            image = f"/product-photo/{product.id}.jpg"
+        category_name = category_names.get(str(product.subcategory_id or product.category_id or ""), "")
+        price = float(row.selling_price or 0)
+        available = float(row.stock_quantity or 0) > float(row.reserved_quantity or 0)
+        results.append({
+            "id": str(row.id), "product_id": str(product.id), "name": product.name or "Product",
+            "brand": product.brand or "Everyday essentials", "barcode": str(product.barcode or ""),
+            "sku": str(product.sku or ""), "unit": str(product.unit or ""),
+            "pack_size": str(product.pack_size or ""), "category_id": str(product.subcategory_id or product.category_id or ""),
+            "category": category_name, "slug": str(product.slug or ""),
+            "url": url_for("shop.product", slug=product.slug) + "?store=" + store.code,
+            "image": image, "price": price, "in_stock": available,
+        })
+    return jsonify(ok=True, items=results, page=max(1, page), page_size=60,
+                   total=total, has_more=max(1, page) * 60 < total)
+
+
 @bp.get("/")
 def home():
     store = selected_store()
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
-    # Render the entire available online range on the landing page. Images are lazy-loaded
-    # by the product card so customers can scroll the catalogue without a second click.
-    products = catalogue_query(store, max_rows=2000)[:60] if store else []
+    # First paint is intentionally bounded for mobile/free hosting; infinite scrolling
+    # continues through the current database-backed catalogue without a giant query.
+    products, total_products = catalogue_page(store, page=1, page_size=60) if store else ([], 0)
     return render_template(
         "shop/home.html",
         stores=active_stores(),
         store=store,
         products=products,
         categories=categories,
-        total_products=len(products),
+        total_products=total_products,
     )
 
 @bp.get("/shop")
@@ -123,12 +246,13 @@ def shop():
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
     store = selected_store()
-    # Browsing pages show a manageable first batch; searches scan the broader
-    # catalogue so an item is less likely to be missed.
-    products = catalogue_query(store, q=q, category=category, max_rows=2000)[:120 if not q else 300]
+    # Search, category aisles and all-products browsing use one bounded SQL page.
+    # Name/brand/barcode/SKU and saved aliases are searched in the database directly;
+    # the next 60 results arrive only as the shopper scrolls.
+    products, total = catalogue_page(store, q=q, category=category, page=1, page_size=60) if store else ([], 0)
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
-    return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=StoreProduct.query.join(Product).filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE", StoreProduct.store_id == store.id).count() if store else 0)
+    return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=total)
 
 
 @bp.get("/locations")
@@ -368,17 +492,21 @@ def _lookup_open_food_facts_image(barcode):
     if not 8 <= len(barcode) <= 14:
         return ""
     try:
-        endpoint = "https://world.openfoodfacts.org/api/v2/product/" + barcode + ".json"
-        response = requests.get(endpoint, params={"fields": "code,product_name,image_front_url,image_url"}, headers={"User-Agent": "DenmartOnline/1.0 (product-photo fallback)"}, timeout=(1.5, 3.0))
-        if not response.ok:
-            return ""
-        payload = response.json()
-        item = payload.get("product") if payload.get("status") == 1 else None
-        actual_code = re.sub(r"\D", "", str((item or {}).get("code") or ""))
-        if not item or actual_code != barcode:
-            return ""
-        photo = str(item.get("image_front_url") or item.get("image_url") or "").strip()
-        return photo if _public_image_url(photo) else ""
+        headers = {"User-Agent": "DenmartOnline/1.1 (exact barcode product-photo lookup)"}
+        for domain in ("world.openfoodfacts.org", "world.openbeautyfacts.org"):
+            endpoint = f"https://{domain}/api/v2/product/{barcode}.json"
+            response = requests.get(endpoint, params={"fields": "code,product_name,image_front_url,image_url"}, headers=headers, timeout=(1.2, 2.6))
+            if not response.ok:
+                continue
+            payload = response.json()
+            item = payload.get("product") if payload.get("status") == 1 else None
+            actual_code = re.sub(r"\D", "", str((item or {}).get("code") or ""))
+            if not item or actual_code != barcode:
+                continue
+            photo = str(item.get("image_front_url") or item.get("image_url") or "").strip()
+            if _public_image_url(photo):
+                return photo
+        return ""
     except Exception:
         current_app.logger.debug("Exact-barcode public image lookup unavailable", exc_info=True)
         return ""

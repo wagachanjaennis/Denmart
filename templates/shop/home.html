@@ -30,10 +30,10 @@
         <div><span class="eyebrow">THE CATALOGUE</span><h2 id="home-all-products-title">Everything in store</h2><p class="muted" id="homeCatalogueHint">All products in the catalogue, with products that are out of stock clearly marked.</p></div>
         <span class="home-product-count" id="homeProductCount">{{total_products}} products</span>
       </div>
-      <div class="product-grid home-grid" id="homeProductGrid">
+      <div class="product-grid home-grid" id="homeProductGrid" data-store-code="{{store.code if store else ''}}">
         {% for item in products %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">Products will appear here when available for online ordering.</div>{% endfor %}
       </div>
-      {% if products|length >= 2000 %}<p class="catalogue-limit-note">Showing the first 2,000 available products. Use search or categories to find more.</p>{% endif %}
+      <div class="shop-load-more" id="homeShopLoadMore" role="status" aria-live="polite">Scroll to keep exploring the catalogue.</div>
     </section>
   </div>
 </div>
@@ -44,9 +44,10 @@
  function closeDrawer(){drawer.classList.remove('open');drawer.setAttribute('aria-hidden','true');opener.setAttribute('aria-expanded','false');backdrop.hidden=true}
  function openDrawer(){drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');opener.setAttribute('aria-expanded','true');backdrop.hidden=false}
  opener.addEventListener('click',()=>drawer.classList.contains('open')?closeDrawer():openDrawer());closer.addEventListener('click',closeDrawer);backdrop.addEventListener('click',closeDrawer);
- function filter(value,label){let visible=0;cards.forEach(card=>{const id=card.dataset.categoryId||'';const show=value==='all'||id===String(value);card.hidden=!show;if(show)visible++});if(value!=='all'&&visible===0){const target=new URL('/shop',location.origin);target.searchParams.set('category',String(value));const store='{{store.code if store else ''}}';if(store)target.searchParams.set('store',store);location.href=target.pathname+target.search;return;}document.querySelectorAll('[data-category-filter]').forEach(b=>b.classList.toggle('active',b.dataset.categoryFilter===String(value)));count.textContent=visible+' products';hint.textContent=value==='all'?'All products in the catalogue, with products that are out of stock clearly marked.':'Showing '+label+'.';closeDrawer()}
+ function filter(value,label){const target=new URL(value==='all'?'/':'/shop',location.origin);if(value!=='all')target.searchParams.set('category',String(value));const store='{{store.code if store else ''}}';if(store)target.searchParams.set('store',store);location.href=target.pathname+target.search;}
  document.querySelectorAll('[data-category-filter]').forEach(b=>b.addEventListener('click',()=>filter(b.dataset.categoryFilter,b.textContent.trim())));
  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
 })();
 </script>
+<script src="{{url_for('static',filename='js/shop-infinite.js')}}?v=20261023-catalogue-v2"></script>
 {% endblock %}
