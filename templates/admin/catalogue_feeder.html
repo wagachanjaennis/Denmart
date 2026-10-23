@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<div class="control-shell">
+{% set admin_sidebar_class='control-sidebar' %}{% include 'admin/_nav.html' %}
+<main class="control-main feeder-main">
+  <header class="control-header"><div><span class="eyebrow">ONLINE CATALOGUE · CONNECTIONS</span><h1>Barcode & image feeder</h1><p>Connect an API that supplies authoritative product barcodes and photos. Denmart keeps ownership of names, prices, stock, orders and checkout.</p></div><div class="control-user"><strong>{{summary.count|default(0)}}</strong><small>cached API records</small></div></header>
+  {% with messages=get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class="flash {{cat}}">{{msg}}</div>{% endfor %}{% endwith %}
+  <section class="feeder-count-grid" aria-label="Catalogue counts">
+    <article><span>Local Denmart products</span><strong>{{'{:,}'.format(summary.local_products or 0)}}</strong><small>Current database records</small></article>
+    <article><span>Local barcodes</span><strong>{{'{:,}'.format(summary.local_barcodes or 0)}}</strong><small>Available to POS / offline mode</small></article>
+    <article><span>API barcodes cached</span><strong>{{'{:,}'.format(summary.feed_barcodes or 0)}}</strong><small>Feeder records with barcodes</small></article>
+    <article><span>API images linked</span><strong>{{'{:,}'.format(summary.feed_images or 0)}}</strong><small>Feeder records with image URLs</small></article>
+  </section>
+  <section class="feeder-mode-grid">
+    <article class="admin-panel feeder-mode-card {% if summary.mode=='current' %}selected{% endif %}"><div class="feeder-mode-icon">▦</div><span class="status-pill {% if summary.mode=='current' %}good{% endif %}">{% if summary.mode=='current' %}ACTIVE{% else %}STANDBY{% endif %}</span><h2>Use my current catalogue</h2><p>Use Denmart's saved images and barcodes instead of the feeder. Choose this at any time to return the online display to local data.</p><form method="post" action="/control/catalogue-feeder/mode"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="mode" value="current"><button class="admin-action secondary-action" type="submit" {% if summary.mode=='current' %}disabled{% endif %}>Use my current data</button></form></article>
+    <article class="admin-panel feeder-mode-card {% if summary.mode=='api' %}selected api-selected{% endif %}"><div class="feeder-mode-icon">⇄</div><span class="status-pill {% if summary.mode=='api' %}good{% endif %}">{% if summary.mode=='api' %}ACTIVE{% else %}READY WHEN TESTED{% endif %}</span><h2>Use feeder API</h2><p>For online visitors, the API's matching barcode and photo replace the old local values. Prices, stock and checkout remain Denmart's.</p><form method="post" action="/control/catalogue-feeder/mode"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="mode" value="api"><button class="admin-action" type="submit" {% if not summary.count %}disabled title="Test and sync the API first"{% endif %}>Use API for online shop</button></form></article>
+  </section>
+
+  <section class="admin-panel feeder-connection-panel">
+    <div class="panel-heading"><div><h2>Connect your feeder API</h2><p class="muted">Paste the API endpoint that returns JSON product records. These settings are saved on the server, not in the public page or Android app.</p></div><span class="status-pill {% if summary.status.ok %}good{% elif summary.status.last_error %}bad{% else %}neutral{% endif %}">{% if summary.status.ok %}CONNECTED{% elif summary.status.last_error %}NEEDS ATTENTION{% else %}NOT TESTED{% endif %}</span></div>
+    <form class="settings-stack feeder-form" method="post" action="/control/catalogue-feeder/save">
+      <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+      <div class="admin-form-grid">
+        <label class="span-2">Product API endpoint URL<input class="admin-input wide" type="url" name="endpoint_url" value="{{summary.config.endpoint_url}}" placeholder="https://your-api.example.com/products" required><small class="muted">Use the full endpoint, not only a website homepage. Public HTTP/HTTPS servers only.</small></label>
+        <label>Authentication method<select class="admin-input wide" name="auth_type"><option value="none" {% if summary.config.auth_type=='none' %}selected{% endif %}>No authentication</option><option value="bearer" {% if summary.config.auth_type=='bearer' %}selected{% endif %}>Bearer token</option><option value="header" {% if summary.config.auth_type=='header' %}selected{% endif %}>API key in custom header</option></select></label>
+        <label>Custom header name<input class="admin-input wide" name="header_name" value="{{summary.config.header_name or 'X-API-Key'}}" maxlength="100" placeholder="X-API-Key"><small class="muted">Used only for custom-header authentication.</small></label>
+        <label class="span-2">API key / token <input class="admin-input wide" type="password" name="token" value="" autocomplete="new-password" placeholder="{% if summary.has_token %}Already saved on the server; leave blank to keep it{% else %}Paste the key from your API provider{% endif %}"><small class="muted">The saved secret is never displayed back here. Leave the field empty to keep the existing token.</small></label>
+        <label>Product-list JSON path<input class="admin-input wide" name="items_path" value="{{summary.config.items_path or 'products'}}" placeholder="data.products"><small class="muted">Examples: products, data.products, results.</small></label>
+        <label>Barcode field path<input class="admin-input wide" name="barcode_field" value="{{summary.config.barcode_field or 'barcode'}}" placeholder="barcode"></label>
+        <label>Image URL field path<input class="admin-input wide" name="image_field" value="{{summary.config.image_field or 'image_url'}}" placeholder="image_url"></label>
+        <label>SKU / matching field path<input class="admin-input wide" name="sku_field" value="{{summary.config.sku_field or 'sku'}}" placeholder="sku"></label>
+        <label>Product name / matching field path<input class="admin-input wide" name="name_field" value="{{summary.config.name_field or 'name'}}" placeholder="name"></label>
+        <label class="checkline span-2"><input type="checkbox" name="auto_refresh" value="1" {% if summary.config.auto_refresh %}checked{% endif %}> Automatically refresh the cached API feed when it is older than 15 minutes</label>
+      </div>
+      <div class="settings-actions feeder-actions"><button class="login-action" type="submit">Save connection</button><input type="hidden" name="save_before_sync" value="1"><button class="admin-action" type="submit" formaction="/control/catalogue-feeder/sync">Test connection &amp; sync now</button></div>
+    </form>
+    {% if summary.status.message %}<div class="feeder-status-message {% if summary.status.ok %}success{% else %}failure{% endif %}"><strong>{% if summary.status.ok %}Latest result{% else %}Connection issue{% endif %}</strong><p>{{summary.status.message}}</p></div>{% endif %}
+    <div class="feeder-status-grid"><div><span>Source host</span><strong>{{summary.endpoint_host}}</strong></div><div><span>Last successful sync</span><strong>{{summary.fetched_at or summary.status.last_success or 'Not yet synced'}}</strong></div><div><span>Saved local overrides</span><strong>{{active_overrides}}</strong></div><div><span>Mode</span><strong>{{'Feeder API' if summary.mode=='api' else 'Current catalogue'}}</strong></div></div>
+  </section>
+
+  <section class="admin-panel feeder-rules"><div class="panel-heading"><div><h2>What changes — and what never does</h2><p class="muted">The feeder operates as an online display layer. It does not import an API's prices or stock into Denmart.</p></div></div><div class="feeder-rule-list"><div><b>01</b><span><strong>Online photos and barcodes</strong><small>When API mode is active, matching feed fields are used. Missing API photos remain blank rather than silently showing an older local photo.</small></span></div><div><b>02</b><span><strong>Admin-created products take priority</strong><small>Products added through Denmart's Products page or CSV import can keep their own barcode/photo as a local override.</small></span></div><div><b>03</b><span><strong>POS and offline stay local</strong><small>Cashier scanning, offline catalogue sync, prices, inventory, order matching and checkout continue to use Denmart's database.</small></span></div><div><b>04</b><span><strong>Graceful outage behaviour</strong><small>The last successful feed stays cached. A failed refresh is reported here and does not erase the last good feed or your current database.</small></span></div></div></section>
+</main></div>
+{% endblock %}
