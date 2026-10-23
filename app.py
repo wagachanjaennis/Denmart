@@ -35,6 +35,8 @@ def create_app():
     from routes.pay import bp as pay_bp
     from routes.control2 import bp as control2_bp
     from routes.dev_admin import bp as developer_admin_bp
+    from routes.feeder import bp as feeder_bp
+    from routes.advertising import bp as advertising_bp
     app.register_blueprint(auth_bp)
     app.register_blueprint(shop_bp)
     app.register_blueprint(pos_bp)
@@ -44,11 +46,13 @@ def create_app():
     app.register_blueprint(pay_bp)
     app.register_blueprint(control2_bp)
     app.register_blueprint(developer_admin_bp)
+    app.register_blueprint(feeder_bp)
+    app.register_blueprint(advertising_bp)
 
     @app.get("/robots.txt")
     def robots_txt():
         # Discourage indexing of private control routes; this is not a substitute for auth.
-        return "User-agent: *\nDisallow: /qaz\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600"}
+        return "User-agent: *\nDisallow: /qaz\nDisallow: /advertcontrol\nDisallow: /advertisement\nDisallow: /control/catalogue-feeder\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600"}
 
     # Service gates are owner-controlled and deliberately leave /qaz available.
     @app.before_request

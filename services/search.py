@@ -51,7 +51,14 @@ def _score(query, product, aliases=()):
         ("brand", normalize_text(getattr(product, "brand", "")), 0.90),
         ("alias", "", 0.97),
         ("sku", normalize_text(getattr(product, "sku", "")), 0.90),
-        ("barcode", normalize_text(getattr(product, "barcode", "")), 0.90),
+        # On public online catalogue requests, the feeder's barcode is authoritative.
+        # POS/admin paths do not attach this transient flag and continue searching
+        # against the local database barcode, preserving offline operation.
+        ("barcode", normalize_text(
+            getattr(product, "_denmart_online_barcode", "")
+            if bool(getattr(product, "_denmart_online_feeder_active", False))
+            else getattr(product, "barcode", "")
+        ), 0.90),
         ("keywords", normalize_text(getattr(product, "search_keywords", "")), 0.84),
         ("description", normalize_text(getattr(product, "description", "")), 0.70),
     ]

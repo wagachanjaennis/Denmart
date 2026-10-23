@@ -186,12 +186,24 @@ def _local_static_image(raw: str) -> bool:
 def public_product_image(product) -> str:
     """Resolve an image without losing saved URLs after a database restore.
 
+    An online feeder overlay is authoritative when explicitly attached to a product
+    for this request. An empty feeder image is intentionally empty: it must not
+    silently fall back to the merchant's old image while API mode is selected.
+
     Prefer a real bundled barcode-keyed file, then an administrator-saved URL,
     then the curated exact-name map. Remote URLs are accepted only for HTTP(S);
     arbitrary schemes and stale local paths are rejected. The older implementation
     ignored most saved HTTP URLs, which made images disappear after importing a DB
     whose product names were not an exact key in the curated map.
     """
+    if bool(getattr(product, "_denmart_online_feeder_active", False)):
+        feeder_image = str(getattr(product, "_denmart_online_image_url", "") or "").strip()
+        if is_data_image_url(feeder_image):
+            return feeder_image
+        if feeder_image.startswith(("https://", "http://")):
+            return feeder_image
+        return ""
+
     barcode = str(getattr(product, "barcode", "") or "").strip()
     if barcode and barcode.isdigit():
         stable = f"/static/catalogue/products/by-barcode/{barcode}.webp"
