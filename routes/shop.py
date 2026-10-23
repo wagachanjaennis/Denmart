@@ -66,6 +66,10 @@ def catalogue_query(store=None, q="", category="", max_rows=2000):
     # the first page slow, especially on mobile connections and free hosting.
     rows = query.order_by(Product.name).limit(max(1, min(int(max_rows), 2000))).all()
     rows = _attach_saved_product_images(rows)
+    # Only the public online catalogue consumes this overlay. POS and offline sync
+    # endpoints remain tied to local database barcodes, stock and prices.
+    from services.catalogue_feeder import apply_online_feeder_overlay
+    rows = apply_online_feeder_overlay(rows, store.business_id if store else None)
     if not q:
         return sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))
     product_ids = [row.product_id for row in rows]
@@ -126,7 +130,7 @@ def location_detail(store_code):
 @bp.get("/robots.txt")
 def robots_txt():
     base = request.url_root.rstrip("/")
-    body = f"User-agent: *\nAllow: /\nDisallow: /control\nDisallow: /merchant\nDisallow: /api\nDisallow: /qaz\nSitemap: {base}/sitemap.xml\n"
+    body = f"User-agent: *\nAllow: /\nDisallow: /control\nDisallow: /merchant\nDisallow: /api\nDisallow: /qaz\nDisallow: /advertcontrol\nDisallow: /advertisement\nSitemap: {base}/sitemap.xml\n"
     return Response(body, mimetype="text/plain", headers={"Cache-Control":"public, max-age=3600"})
 
 
@@ -155,6 +159,8 @@ def product(slug):
             .filter(Product.slug == slug, StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE")
             .filter(StoreProduct.store_id == store.id if store else True).first_or_404())
     _attach_saved_product_images([item])
+    from services.catalogue_feeder import apply_online_feeder_overlay
+    apply_online_feeder_overlay([item], store.business_id if store else None)
     return render_template("shop/product.html", item=item, store=store)
 
 

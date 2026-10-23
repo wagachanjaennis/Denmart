@@ -665,6 +665,8 @@ def create_product():
                 reference_type="PRODUCT_OPENING", reference_id=product.id,
                 notes="Opening stock when product was created", created_by=current_user.id))
     db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
+    from services.catalogue_feeder import mark_local_override
+    mark_local_override(current_user.business_id, product.id)
     db.session.commit()
     audit("PRODUCT_CREATED", "Product", product.id, new_values={"name": name, "sku": sku, "barcode": barcode, "stores": len(stores), "opening_stock": str(stock)})
     flash(f"{name} added to {len(stores)} mart(s).", "success")
@@ -778,6 +780,9 @@ def quick_create_product():
                 sp.selling_price = price; sp.minimum_price = price; sp.maximum_price = price * Decimal("1.30")
                 sp.is_available = True; sp.available_pos = True; sp.available_online = True
             if cost is not None: sp.cost_price = cost
+        if created or replaced_placeholder:
+            from services.catalogue_feeder import mark_local_override
+            mark_local_override(current_user.business_id, product.id)
         if quantity > 0:
             sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) + quantity
             db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
@@ -813,6 +818,7 @@ def import_products():
     if not required.issubset({(h or "").strip().lower() for h in (reader.fieldnames or [])}):
         flash("CSV needs at least name,selling_price columns.", "error"); return redirect(url_for("admin.products"))
     from seed import slugify
+    local_override_ids = set()
     stores = [db.session.get(Store, store_id)] if store_id else Store.query.filter_by(business_id=current_user.business_id, is_active=True).all()
     created = updated = 0
     errors = []
@@ -840,6 +846,7 @@ def import_products():
         if sku: product = Product.query.filter_by(sku=sku).first()
         if not product and barcode: product = Product.query.filter_by(barcode=barcode).first()
         if not product: product = Product.query.filter_by(slug=slugify(name)).first()
+        product_is_new = product is None
         if product:
             product.name = name; product.brand = row.get("brand") or product.brand; product.category_id = category.id if category else product.category_id
             product.unit = row.get("unit") or product.unit; product.pack_size = row.get("pack_size") or product.pack_size
@@ -855,6 +862,11 @@ def import_products():
                               sku=sku, barcode=barcode, description=row.get("description") or None, image_url=row.get("image_url") or None,
                               search_keywords=f"{name.lower()} {(row.get('brand') or '').lower()} {(category_name or '').lower()}".strip())
             db.session.add(product); db.session.flush(); db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH")); created += 1
+        # New CSV rows are administrator-created local products. For existing
+        # products, a price-only/stock-only import must not silently turn off the
+        # online feeder; explicit barcode/image values do establish local ownership.
+        if product_is_new or bool(row.get("barcode")) or bool(row.get("image_url")):
+            local_override_ids.add(product.id)
         for store in stores:
             sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
             was_new_link = sp is None
@@ -871,6 +883,8 @@ def import_products():
                     quantity=stock_delta, unit_cost=cost, reference_type="CATALOGUE_IMPORT",
                     reference_id=sp.id, notes=("Opening stock from catalogue import" if was_new_link else "Stock quantity reconciled by catalogue import"),
                     created_by=current_user.id))
+    from services.catalogue_feeder import mark_local_override_many
+    mark_local_override_many(current_user.business_id, local_override_ids)
     db.session.commit()
     audit("PRODUCT_CSV_IMPORTED", "Business", current_user.business_id, new_values={"created": created, "updated": updated, "errors": len(errors)})
     msg = f"Catalogue import complete: {created} added, {updated} updated."
@@ -1008,6 +1022,9 @@ def save_product(product_id):
         sp.available_pos = request.form.get("pos") == "1" and sp.is_available
     alias = ProductAlias.query.filter_by(product_id=product.id, alias=product.name).first()
     if not alias: db.session.add(ProductAlias(product_id=product.id, alias=product.name, alias_type="SEARCH"))
+    if product.barcode != old["barcode"] or product.image_url != old["image_url"]:
+        from services.catalogue_feeder import mark_local_override
+        mark_local_override(current_user.business_id, product.id)
     db.session.commit()
     audit("PRODUCT_UPDATED", "Product", product.id, old_values=old, new_values={"name": product.name, "brand": product.brand, "sku": product.sku, "barcode": product.barcode, "status": product.status, "image_url": product.image_url})
     flash("Product updated.", "success")

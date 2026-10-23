@@ -14,7 +14,8 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 
 
 def safe_product_payload(r, include_stock=False):
-    data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "brand": r.product.brand, "barcode": r.product.barcode,
+    from services.catalogue_feeder import online_barcode
+    data = {"id": r.id, "product_id": r.product_id, "name": r.product.name, "brand": r.product.brand, "barcode": online_barcode(r.product),
             "sku": r.product.sku, "price": str(r.selling_price), "image_url": public_product_image(r.product), "slug": r.product.slug, "category_id": r.product.category_id}
     if include_stock:
         data["stock"] = str(r.stock_quantity)
@@ -187,6 +188,11 @@ def product_search():
     category_id = request.args.get("category_id", "").strip()
     if category_id: query = query.filter(Product.category_id == category_id)
     rows = query.order_by(Product.name).limit(2000).all()
+    from services.catalogue_feeder import apply_online_feeder_overlay
+    # This is the public online product API. The /api/pos/* endpoints intentionally
+    # do not call the feeder so local scanning and offline stock remain unchanged.
+    business_id = next((r.store.business_id for r in rows if getattr(r, "store", None)), None) or (Store.query.filter_by(id=store_id).first().business_id if store_id and Store.query.filter_by(id=store_id).first() else None)
+    apply_online_feeder_overlay(rows, business_id)
     if q:
         aliases_by_product = {}
         ids = [r.product_id for r in rows]

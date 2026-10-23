@@ -1,0 +1,7 @@
+DENMART UPDATE-ONLY PATCH
+
+Merge these files into the ROOT of the existing Denmart GitHub repository, preserving the folder paths. Overwrite same-named files and add missing files. Do not delete or replace the current database. No database file or backup is included.
+
+Included: the missing catalogue feeder and advertisement modules/assets/templates, plus their related route/UI integration files.
+
+After deployment: open /control/android-gateway while logged in as admin, copy the CURRENT complete connection URL shown there, and paste it into the existing Android gateway app. The key seen in the old Render log is not present in the supplied SQLite backup, so this patch deliberately does not hard-code it or weaken authentication.

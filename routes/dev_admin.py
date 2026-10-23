@@ -76,6 +76,9 @@ def login():
     if not _dev_configured():
         return "Developer controls are not configured.", 404
     if _dev_ok():
+        target = str(request.args.get("next") or "").strip()
+        if target == "/advertcontrol":
+            return redirect("/advertcontrol")
         return redirect(url_for("developer_admin.panel"))
     if request.method == "POST":
         name = str(request.form.get("developer_name") or "")
@@ -98,6 +101,11 @@ def login():
             if business:
                 _audit("DEV_CONTROL_LOGIN", "session", {"method": "environment_credentials"})
                 db.session.commit()
+            next_path = str(request.form.get("next") or request.args.get("next") or "").strip()
+            # Only allow local developer-console/ad-studio paths. Never honour an
+            # arbitrary redirect target from a login form.
+            if next_path == "/advertcontrol":
+                return redirect("/advertcontrol")
             return redirect(url_for("developer_admin.panel"))
         session["developer_attempts"] = attempt_count + 1
         flash("Credentials not accepted.", "error")
