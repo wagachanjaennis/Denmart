@@ -1,9 +1,15 @@
 {
-  "version": "2026-09-22-real-v1",
-  "requested": 500,
+  "version": "2026-10-25-real-v3",
+  "status": "pending_render_photo_build",
+  "requested": 350,
   "photo": 0,
-  "missing": 500,
+  "missing": 350,
   "reused_source_rejected": 0,
-  "errors": [],
+  "reused_image_rejected": 0,
+  "errors": [
+    {
+      "note": "This source archive has not run a network-enabled photo build; Render fills the verified photo cache during deployment."
+    }
+  ],
   "products": {}
 }

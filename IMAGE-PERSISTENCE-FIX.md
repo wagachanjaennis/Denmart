@@ -1,3 +1,5 @@
+> **Storefront photo refresh — 25 October 2026:** The Render pipeline now runs `scripts/github_catalogue_image_cache.py --limit 350 --workers 8` followed by `scripts/prepare_catalogue_images.py`. This is the preferred deployed path for the public shop: it prioritizes top products, refuses ambiguous shared photos, keeps database-saved WEBP copies where practical, and uses cache-first browser handling. Real photo discovery needs a network-enabled Render build; the source archive cannot honestly claim new images are bundled before that build. The older standalone SQLite backup workflow documented below remains available for offline repair workflows.
+
 # Denmart image persistence fix
 
 ## What changed

@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-22-real-v1",
+  "version": "2026-10-25-real-v3-no-fake-images",
   "image_prefix": "/static/catalogue/products/",
   "batch_size": 100,
   "priority_count": 500,

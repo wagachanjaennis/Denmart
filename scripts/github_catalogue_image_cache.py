@@ -18,6 +18,7 @@ Filenames are based on the stable unique barcode, not a UUID that could change b
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -252,34 +253,57 @@ def facts_search(product: dict) -> list[tuple[str,float,dict]]:
                 break
         except Exception:
             continue
-    return sorted(out,key=lambda x:x[1],reverse=True)[:5]
+    return sorted(out,key=lambda x:x[1],reverse=True)[:2]
 
 
-def source_candidates(product: dict, sources: dict) -> list[tuple[str,float,dict]]:
-    result=[]; by_id=sources.get("by_product_id") or {}; by_barcode=sources.get("by_barcode") or {}; by_page=sources.get("by_product_page") or {}
-    for key,url in (("curated-product-id",by_id.get(product.get("product_id"))), ("curated-barcode",by_barcode.get(str(product.get("barcode") or "")))):
-        if isinstance(url,str) and url.startswith(("http://","https://")):
-            result.append((url,1.0,{"provider":key}))
-    page=by_page.get(product.get("product_id"))
+def source_candidates(product: dict, sources: dict, curated_owner: dict[str, str] | None = None) -> list[tuple[str,float,dict]]:
+    """Prefer exact curated photos; discover alternatives only when safe to do so.
+
+    If one URL was attached to several different SKUs, it is rejected for every SKU;
+    each pack size must find its own photo instead of inheriting an ambiguous match.
+    """
+    result=[]
+    by_id=sources.get("by_product_id") or {}
+    by_barcode=sources.get("by_barcode") or {}
+    by_page=sources.get("by_product_page") or {}
+    pid=str(product.get("product_id") or "")
+    direct=(by_id.get(pid), by_barcode.get(str(product.get("barcode") or "")))
+    for url in direct:
+        if not isinstance(url,str) or not url.startswith(("http://","https://")):
+            continue
+        if curated_owner is not None and curated_owner.get(url) != pid:
+            continue
+        if not any(existing[0] == url for existing in result):
+            result.append((url,1.0,{"provider":"curated-exact-product-source"}))
+    if result:
+        return result
+
+    page=by_page.get(pid)
     if isinstance(page,str) and page.startswith(("http://","https://")):
         try:
-            result.extend((u,sc,{**meta,"provider":"curated-product-page"}) for u,sc,meta in extract_page_images(page,product))
+            page_images=extract_page_images(page,product)
+            if page_images:
+                return [(u,sc,{**meta,"provider":"curated-product-page"}) for u,sc,meta in page_images]
         except Exception:
             pass
-    result.extend(facts_search(product))
-    for page_url,domain in retailer_search_urls(product):
+
+    # Open Food Facts-family text search verifies name/brand/pack size. Only fall back
+    # to retailer page crawling if the facts catalogs return no credible candidate.
+    result=facts_search(product)
+    if result:
+        return result
+    for page_url,domain in retailer_search_urls(product)[:3]:
         try:
             for u,sc,meta in extract_page_images(page_url,product):
                 meta={**meta,"provider":domain,"page_url":page_url}
                 result.append((u,sc,meta))
         except Exception:
             continue
-    # source URL is global: one URL can never be assigned to two different products.
     seen=set(); out=[]
     for u,sc,meta in sorted(result,key=lambda x:x[1],reverse=True):
         if u in seen: continue
         seen.add(u); out.append((u,sc,meta))
-    return out
+    return out[:3]
 
 
 def load_json(path: Path, default):
@@ -300,6 +324,21 @@ def main() -> int:
     priority=priority_doc.get("priority_products") or []
     priority=sorted(priority,key=lambda x:(x.get("rank",10**9),x.get("name","")))[:args.limit]
     sources=load_json(SOURCES,{})
+    product_index=load_json(PRODUCT_INDEX,{"products":{}}).get("products") or {}
+    rank_by_id={str(item.get("product_id")):int(item.get("rank",i+1))
+                for i,item in enumerate(load_json(PRIORITY,{"priority_products":[]}).get("priority_products",[]))
+                if item.get("product_id")}
+    barcode_to_id={str(item.get("barcode") or ""):str(pid) for pid,item in product_index.items() if item.get("barcode")}
+    source_owners={}
+    for pid,url in (sources.get("by_product_id") or {}).items():
+        if str(url).startswith(("http://","https://")):
+            source_owners.setdefault(str(url),set()).add(str(pid))
+    for barcode,url in (sources.get("by_barcode") or {}).items():
+        if str(url).startswith(("http://","https://")):
+            source_owners.setdefault(str(url),set()).add(barcode_to_id.get(str(barcode),"barcode:"+str(barcode)))
+    # Only use a curated URL when it belongs to exactly one SKU. Reused photos were
+    # the source of wrong pack-size images (e.g. a 500 ml bottle shown for 2 L).
+    curated_owner={url:next(iter(owners)) for url,owners in source_owners.items() if len(owners)==1}
 
     CACHE.mkdir(parents=True,exist_ok=True)
     # The product catalog owns the authoritative list. Remove ONLY stale fake/catalogue
@@ -310,28 +349,61 @@ def main() -> int:
 
     manifest=load_json(MANIFEST,{"version":"2026-09-22-real-v1","image_prefix":"/static/catalogue/products/","batch_size":100,"priority_count":len(priority),"products":{}})
     manifest.setdefault("products",{})
-    report={"version":"2026-09-22-real-v1","requested":len(priority),"photo":0,"missing":0,"reused_source_rejected":0,"errors":[],"products":{}}
-    used_sources={}
-
+    # Purge stale references to illustration files or photos that are no longer shipped.
+    # The manifest may retain old IDs, but they are never treated as real unless the file exists.
+    for stale_id, stale_entry in list(manifest["products"].items()):
+        if not isinstance(stale_entry, dict) or stale_entry.get("type") != "photo":
+            continue
+        stale_url = str(stale_entry.get("url") or "").strip()
+        if not stale_url.startswith("/static/") and stale_entry.get("file"):
+            stale_url = "/static/catalogue/products/" + str(stale_entry.get("file") or "").lstrip("/")
+        rel = stale_url.split("?", 1)[0].removeprefix("/static/") if stale_url.startswith("/static/") else ""
+        stale_path = (ROOT / "static" / rel).resolve() if rel else None
+        try:
+            shipped = bool(stale_path and stale_path.is_file() and stale_path.stat().st_size > 0 and stale_path.is_relative_to((ROOT / "static").resolve()))
+        except Exception:
+            shipped = False
+        if not shipped:
+            stale_entry.update(type="pending_real_photo", needs_real_photo=True, url="", file="")
+    report={"version":"2026-10-25-real-v3","requested":len(priority),"photo":0,"missing":0,"reused_source_rejected":0,"reused_image_rejected":0,"errors":[],"products":{}}
     def one(idx,p):
         batch=f"{(idx//BATCH_SIZE)+1:03d}"
         barcode=str(p.get("barcode") or "").strip()
         if not barcode:
             return idx,p,batch,None,None,[],"missing barcode"
         dest=CACHE/batch/f"{barcode}.webp"
-        candidates=source_candidates(p,sources)
+        candidates=source_candidates(p,sources,curated_owner)
         last_errors=[]
         for url,sc,meta in candidates:
-            owner=used_sources.get(url)
-            if owner and owner!=barcode:
-                report["reused_source_rejected"] += 1
-                continue
             try:
                 data=fetch_bytes(url)
                 photo=normalize_photo(data)
                 return idx,p,batch,dest,(url,sc,meta),photo,None
             except Exception as e:
                 last_errors.append(f"{url}: {e}")
+        # A dead curated URL should not prevent trying verified product databases.
+        # Do this fallback only after the exact curated source failed, avoiding extra
+        # external search requests when the supplied product photo already works.
+        if candidates and all((meta.get("provider") or "").startswith("curated-") for _, _, meta in candidates):
+            for url,sc,meta in facts_search(p):
+                try:
+                    photo=normalize_photo(fetch_bytes(url))
+                    if photo:
+                        return idx,p,batch,dest,(url,sc,meta),photo,None
+                except Exception as e:
+                    last_errors.append(f"{url}: {e}")
+            for page_url,domain in retailer_search_urls(p)[:2]:
+                try:
+                    found=extract_page_images(page_url,p)[:2]
+                except Exception:
+                    found=[]
+                for url,sc,meta in found:
+                    try:
+                        photo=normalize_photo(fetch_bytes(url))
+                        if photo:
+                            return idx,p,batch,dest,(url,sc,{**meta,"provider":domain}),photo,None
+                    except Exception as e:
+                        last_errors.append(f"{url}: {e}")
         return idx,p,batch,dest,None,None,"; ".join(last_errors[-3:])
 
     # Fetch concurrently, but write sequentially so deterministic manifests/reports are produced.
@@ -342,17 +414,36 @@ def main() -> int:
             results.append(fut.result())
     results.sort(key=lambda x:x[0])
 
+    used_sources={}
+    used_photo_hashes={}
     for idx,p,batch,dest,src,photo,err in results:
-        key=p.get("product_id") or barcode
+        key=p.get("product_id") or str(p.get("barcode") or "unknown")
+        if src and photo:
+            candidate_url=src[0]
+            owner_key=str(p.get("product_id") or p.get("barcode") or "unknown")
+            owner=used_sources.get(candidate_url)
+            if owner and owner!=owner_key:
+                report["reused_source_rejected"] += 1
+                src=None; photo=None
+                err=f"Source URL already assigned to another SKU ({owner}); refusing duplicate product photo."
+            else:
+                image_hash=hashlib.sha256(photo).hexdigest()
+                image_owner=used_photo_hashes.get(image_hash)
+                if image_owner and image_owner!=owner_key:
+                    report["reused_image_rejected"] += 1
+                    src=None; photo=None
+                    err=f"Normalized photo bytes already assigned to another SKU ({image_owner}); refusing duplicate product photo."
+                else:
+                    used_sources[candidate_url]=owner_key
+                    used_photo_hashes[image_hash]=owner_key
         entry={
             "name":p.get("name",""),"brand":p.get("brand","") or "","barcode":str(p.get("barcode") or ""),
             "priority_rank":int(p.get("rank",idx)),"batch":batch,
-            "url":f"/static/catalogue/products/{batch}/{dest.name if dest else (str(p.get('barcode') or 'unknown')+'.webp')}",
+            "url":f"/static/catalogue/products/{batch}/{dest.name if dest else (str(p.get('barcode') or 'unknown')+'.webp')}?v={hashlib.sha256(photo).hexdigest()[:10]}" if src and photo else f"/static/catalogue/products/{batch}/{dest.name if dest else (str(p.get('barcode') or 'unknown')+'.webp')}",
             "file":f"{batch}/{dest.name if dest else (str(p.get('barcode') or 'unknown')+'.webp')}",
         }
         if src and photo:
             url,sc,meta=src
-            used_sources[url]=entry["barcode"]
             if not args.dry_run:
                 dest.parent.mkdir(parents=True,exist_ok=True)
                 dest.write_bytes(photo)
@@ -366,13 +457,13 @@ def main() -> int:
         report["products"][key]=entry
 
     # Never carry forward an old generated status for the priority set.
-    manifest["version"]="2026-09-22-real-v1"
+    manifest["version"]="2026-10-25-real-v3"
     manifest["batch_size"]=BATCH_SIZE
     manifest["priority_count"]=len(priority)
     MANIFEST.parent.mkdir(parents=True,exist_ok=True)
     MANIFEST.write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding="utf-8")
     REPORT.write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding="utf-8")
-    print(json.dumps({k:report[k] for k in ("requested","photo","missing","reused_source_rejected")},indent=2))
+    print(json.dumps({k:report[k] for k in ("requested","photo","missing","reused_source_rejected","reused_image_rejected")},indent=2))
     return 0
 
 

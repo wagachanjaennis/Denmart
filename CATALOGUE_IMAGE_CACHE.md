@@ -1,11 +1,11 @@
 # Denmart catalogue image cache
 
-This build removes runtime product-image searching from the customer storefront.
+The public storefront no longer displays generated bottle/box/tube illustrations as if they were real product photos. A product without a verified photograph gets a neutral “Photo being added” panel.
 
-Each product stores a same-origin URL such as `/static/catalogue/products/<product-id>.webp` in `products.image_url`, and the matching file is bundled under `static/catalogue/products/`.
+The Render build runs `scripts/github_catalogue_image_cache.py --limit 350 --workers 8`, then `scripts/prepare_catalogue_images.py`. The first step searches product-photo sources for top-ranked essentials; the second reuses local assets and saved database photo copies, normalizes available photos to WEBP and persists compact copies in `product_images`. This work happens during deployment, not each page render. Coverage depends on which exact source photos are reachable and can be verified.
 
-The Render build runs `scripts/prepare_catalogue_images.py`. It uses the stored source manifest for previously verified product-image URLs and attempts to download/normalize those photos during the build. A temporary source failure never replaces an existing local asset. Products without a verified photograph receive a deterministic product-specific catalogue visual rather than an unrelated stock image or blank tile.
+The product route prefers locally bundled and database-saved photos before trying a small set of known remote sources. It does not conduct a live product search during a customer image request. Existing uploads/gallery rows are preserved. Shared source URLs used by multiple SKUs are treated as ambiguous, so a 500 ml pack is not blindly used as the image for a 2 L item.
 
-The PWA service worker caches local catalogue images cache-first after they are viewed, while HTTP caching marks product assets immutable for one year.
+The PWA service worker is cache-first for product images, retaining up to 1,800 cached images without re-fetching them on every visit. Static photo URLs are versioned by image content to allow a corrected photo to replace a prior cached version.
 
-For portable SQLite use, `scripts/cache_sqlite_backup.py` prepares a supplied SQLite backup with the same local product-image mappings.
+For portable SQLite workflows, existing scripts such as `scripts/cache_sqlite_backup.py` and `scripts/cache_catalogue_photo_urls.py` remain available. Check source-site licensing/attribution terms before commercial use.

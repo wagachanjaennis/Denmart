@@ -7,6 +7,7 @@ supported. Unknown products intentionally show a neutral unavailable-image state
 
 import base64
 from functools import lru_cache
+from collections import Counter
 
 
 REAL_PRODUCT_IMAGES = {
@@ -150,7 +151,16 @@ REAL_PRODUCT_IMAGES = {
     'Unga Exe All Purpose Flour 2kg': 'https://artcaffemarket.co.ke/cdn/shop/files/11428-262795.jpg?v=1734955008',
 }
 
-_NORMALIZED_REAL_IMAGES = {" ".join(k.split()).casefold(): v for k, v in REAL_PRODUCT_IMAGES.items()}
+# Do not reuse the same supplier image for different pack sizes or variants.
+# Several legacy mappings pointed every size/flavour at one photo (for example,
+# a 500 ml bottle for a 2 L product). Ambiguous source URLs are intentionally
+# excluded until a product-specific source is curated.
+_REAL_URL_COUNTS = Counter(REAL_PRODUCT_IMAGES.values())
+_NORMALIZED_REAL_IMAGES = {
+    " ".join(k.split()).casefold(): v
+    for k, v in REAL_PRODUCT_IMAGES.items()
+    if _REAL_URL_COUNTS[v] == 1
+}
 
 
 def normalize_product_name(value: str) -> str:
@@ -201,6 +211,33 @@ def _read_photo_manifest() -> dict:
 
 
 @lru_cache(maxsize=1)
+def _read_static_photo_manifest() -> dict:
+    """Read the deployment-time real-photo cache manifest once per worker."""
+    import json
+    from pathlib import Path
+    manifest = Path(__file__).resolve().parents[1] / "static" / "catalogue" / "catalogue-image-manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data.get("products", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _static_manifest_photo_url(product) -> str:
+    """Return a real, verified photo downloaded by the build-time cache, if present."""
+    product_id = str(getattr(product, "id", "") or "").strip()
+    if not product_id:
+        return ""
+    item = _read_static_photo_manifest().get(product_id, {})
+    if not isinstance(item, dict) or item.get("type") != "photo":
+        return ""
+    candidate = str(item.get("url") or "").strip()
+    if not candidate.startswith("/static/") and item.get("file"):
+        candidate = "/static/catalogue/products/" + str(item.get("file") or "").lstrip("/")
+    return candidate if _local_static_image(candidate) else ""
+
+
+@lru_cache(maxsize=1)
 def _explicit_real_photo_ids() -> set[str]:
     """IDs of real bundled photos shipped with this patch, independent of old manifests."""
     from pathlib import Path
@@ -218,6 +255,21 @@ def _is_verified_bundled_photo_id(product_id: str) -> bool:
     item = _read_photo_manifest().get(product_id, {})
     return (isinstance(item, dict) and item.get("type") == "photo") or product_id in _explicit_real_photo_ids()
 
+@lru_cache(maxsize=1)
+def _unambiguous_manifest_sources() -> dict[str, str]:
+    """Only expose manifest source URLs attached to one catalogue SKU."""
+    from collections import defaultdict
+    owners = defaultdict(set)
+    products = _read_photo_manifest()
+    for pid, item in products.items():
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source_url") or "").strip()
+        if source.startswith(("https://", "http://")):
+            owners[source].add(str(pid))
+    return {source: next(iter(ids)) for source, ids in owners.items() if len(ids) == 1}
+
+
 def _manifest_source_url(product) -> str:
     """Return an exact product's verified image source from the bundled manifest.
 
@@ -229,10 +281,13 @@ def _manifest_source_url(product) -> str:
     if not product_id:
         return ""
     item = _read_photo_manifest().get(product_id, {})
-    if not isinstance(item, dict) or item.get("type") != "photo":
+    if not isinstance(item, dict) or item.get("type") not in {"photo", "pending_real_photo"}:
         return ""
     source = str(item.get("source_url") or "").strip()
-    return source if source.startswith(("https://", "http://")) else ""
+    if not source.startswith(("https://", "http://")):
+        return ""
+    owners = _unambiguous_manifest_sources()
+    return source if owners.get(source) == product_id else ""
 
 
 def _manifest_photo_url(product) -> str:
@@ -246,20 +301,26 @@ def _manifest_photo_url(product) -> str:
     product_id = str(getattr(product, "id", "") or "").strip()
     if not product_id:
         return ""
-    # Only positively identified real product photos count. Generic placeholder
-    # illustrations in older catalogue trees must never be shown as a product photo.
-    if not _is_verified_bundled_photo_id(product_id):
+    # Prefer the stable path recorded by the latest build. Older flat UUID files are
+    # only accepted if their manifest explicitly verifies them and they still exist.
+    item = _read_photo_manifest().get(product_id, {})
+    if not isinstance(item, dict) or item.get("type") != "photo":
         return ""
+    candidate = str(item.get("url") or "").strip()
+    if not candidate.startswith("/static/") and item.get("file"):
+        candidate = "/static/catalogue/products/" + str(item.get("file") or "").lstrip("/")
+    if candidate and _local_static_image(candidate):
+        return candidate
     candidate = f"/static/catalogue/products/{product_id}.webp"
-    return candidate if _local_static_image(candidate) else ""
+    return candidate if _is_verified_bundled_photo_id(product_id) and _local_static_image(candidate) else ""
 
 
 def product_image_sources(product) -> list[str]:
-    """Return distinct real image candidates, ordered by authority and offline reliability.
+    """Return trustworthy image candidates with durable/local photos first.
 
-    API data is first when it supplies an image; a missing API image is not a reason to
-    hide the stored photo. Local bundled assets come before remote URLs so the shop and
-    advert studio still have a usable image when the supplier API or CDN is unreachable.
+    A photo already cached in PostgreSQL must beat its original external URL. This
+    prevents every visit from waiting on a supplier CDN and makes images survive
+    Render redeploys. Generated silhouette art is never accepted as a real photo.
     """
     values: list[str] = []
 
@@ -272,44 +333,62 @@ def product_image_sources(product) -> list[str]:
                 values.append(value)
             return
         if value.startswith("/static/"):
-            # Reject UUID product-card artwork unless a manifest positively identifies
-            # that file as an actual product photo. Uploaded assets and barcode-photo
-            # paths are not treated as the old UUID placeholder family.
             product_prefix = "/static/catalogue/products/"
             if value.startswith(product_prefix) and value.lower().endswith(".webp"):
                 leaf = value[len(product_prefix):].split("?", 1)[0]
+                # Old flat UUID images are accepted only when the real-photo manifest
+                # explicitly verifies them. Barcode and numbered batch paths are allowed
+                # only if the file actually exists in this deployment.
                 if "/" not in leaf and not _is_verified_bundled_photo_id(leaf[:-5]):
                     return
             if _local_static_image(value) and value not in values:
                 values.append(value)
             return
-        if value.startswith(("https://", "http://")) and value not in values:
-            values.append(value)
+        if value.startswith(("https://", "http://")):
+            ambiguous = set(getattr(product, "_denmart_ambiguous_image_urls", None) or [])
+            if value in ambiguous:
+                return
+            if value not in values:
+                values.append(value)
 
+    def add_if_local_or_data(raw):
+        value = str(raw or "").strip()
+        if value.startswith("/static/") or is_data_image_url(value):
+            add(value)
+
+    # 1) Persistent database cache: it survives a new deployment and avoids hotlinks.
+    for saved in (getattr(product, "_denmart_durable_image_urls", None) or []):
+        add(saved)
+
+    # 2) Same-origin files bundled by the latest build. Prefer their versioned
+    # manifest URL so a corrected photo can replace an old immutable browser cache.
+    barcode = str(getattr(product, "barcode", "") or "").strip()
+    versioned_static = _static_manifest_photo_url(product)
+    add(versioned_static)
+    if barcode and barcode.isdigit():
+        fallback_barcode_url = f"/static/catalogue/products/by-barcode/{barcode}.webp"
+        if not any(value.split("?", 1)[0] == fallback_barcode_url for value in values):
+            add(fallback_barcode_url)
+    add(_manifest_photo_url(product))
+
+    # 3) Existing product/gallery uploads and local product.image_url mappings.
+    add_if_local_or_data(getattr(product, "image_url", ""))
+    add_if_local_or_data(getattr(product, "_denmart_saved_image_url", ""))
+    for saved in (getattr(product, "_denmart_gallery_image_urls", None) or []):
+        add_if_local_or_data(saved)
+
+    # 4) Only after durable assets, try live sources. If they succeed, the image route
+    # saves a compressed copy in ProductImage so future visits no longer need the CDN.
     if bool(getattr(product, "_denmart_online_feeder_active", False)):
         add(getattr(product, "_denmart_online_image_url", ""))
-
-    barcode = str(getattr(product, "barcode", "") or "").strip()
-    if barcode and barcode.isdigit():
-        stable = f"/static/catalogue/products/by-barcode/{barcode}.webp"
-        add(stable)
-
-    # Locally bundled photos are strongest for offline use. Also use exact real
-    # source URLs in the same manifest when their files have not yet been bundled.
-    add(_manifest_photo_url(product))
-    add(_manifest_source_url(product))
-
-    # ProductImage records have historically held photos that were not copied to the
-    # Product.image_url column. User-selected gallery records and photos successfully
-    # cached from remote sources must both remain addressable without the supplier API.
     add(getattr(product, "_denmart_saved_image_url", ""))
     for saved in (getattr(product, "_denmart_gallery_image_urls", None) or []):
         add(saved)
-    for saved in (getattr(product, "_denmart_durable_image_urls", None) or []):
-        add(saved)
     add(getattr(product, "image_url", ""))
+    add(_manifest_source_url(product))
 
-    # Curated catalogue sources are exact name matches, never generic/generated art.
+    # Exact-name mappings are last-resort candidates. Ambiguous URLs shared by many
+    # product sizes/flavours were excluded above to stop wrong pack photos appearing.
     add(real_product_image_url(getattr(product, "name", "")))
     return values
 
@@ -324,19 +403,19 @@ def product_image_source(product, index: int = 0) -> str:
 
 
 def public_product_image(product) -> str:
-    """Return a durable image URL for public pages and APIs.
+    """Return a fast local/cached image URL, or an empty value when no source is known.
 
-    Same-origin /product-photo URLs proxy saved/API/curated photos. That makes image
-    loads cacheable by Denmart's service worker and avoids canvas CORS failures in ads.
-    Missing photos remain missing; the product row itself is never suppressed.
+    Only products with a known source trigger the image proxy from the storefront.
+    The proxy still supports exact-barcode discovery when called directly, but the
+    catalogue no longer launches slow external lookups for every barcoded SKU.
     """
     source = product_image_source(product, 0)
+    if not source:
+        return ""
     if source.startswith("/static/"):
         return source
     product_id = str(getattr(product, "id", "") or "").strip()
-    # Try the exact barcode lookup for every barcoded item. It will only display a
-    # photo returned for the same barcode; it never substitutes a similar product.
-    if product_id and (source or str(getattr(product, "barcode", "") or "").strip()):
+    if product_id:
         return f"/product-photo/{product_id}.jpg"
     return source
 

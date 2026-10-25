@@ -33,9 +33,9 @@
 
     const href = product.url || '/shop';
     const imageLink = document.createElement('a'); imageLink.className = 'product-image product-image-clean'; imageLink.href = href;
-    const imageLabel = document.createElement('span'); imageLabel.className = 'image-unavailable-label'; imageLabel.textContent = 'Product photo unavailable';
+    const imageLabel = document.createElement('span'); imageLabel.className = 'image-unavailable-label'; imageLabel.textContent = 'Photo being added';
     if (product.image) {
-      const img = document.createElement('img'); img.loading = 'lazy'; img.decoding = 'async'; img.src = product.image; img.alt = product.name || 'Product'; img.referrerPolicy = 'no-referrer';
+      const img = document.createElement('img'); img.loading = loaded < 8 ? 'eager' : 'lazy'; img.decoding = 'async'; img.width = 720; img.height = 720; img.fetchPriority = loaded < 4 ? 'high' : 'auto'; img.src = product.image; img.alt = product.name || 'Product'; img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => { imageLink.classList.add('image-unavailable'); img.remove(); }, { once: true });
       imageLink.append(img, imageLabel);
     } else imageLink.appendChild(imageLabel);

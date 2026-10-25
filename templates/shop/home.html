@@ -17,11 +17,19 @@
     {% if sidebar_ad_title or sidebar_ad_body %}<a class="shop-sidebar-ad" href="{{sidebar_ad_link or '/shop'}}"><span class="eyebrow">FEATURED</span><strong>{{sidebar_ad_title or 'Discover more at ' ~ business_name}}</strong>{% if sidebar_ad_body %}<span>{{sidebar_ad_body}}</span>{% endif %}<b>Explore offer →</b></a>{% endif %}
   </aside>
   <div class="shop-home-main">
-    <section class="denmart-hero denmart-hero-compact" aria-label="Shop online">
-      <div class="hero-left">
-        <a class="hero-pill solid home-shop-now" href="#homeProductGrid">Shop now <span aria-hidden="true">→</span></a>
+    <section class="denmart-hero denmart-hero-compact denmart-hero-retail" aria-label="{{business_name}} online supermarket">
+      <div class="hero-retail-copy">
+        <span class="hero-retail-kicker">{{business_name|upper}} · ONLINE SUPERMARKET</span>
+        <h1>Everyday essentials, all in one basket.</h1>
+        <p>Shop groceries, drinks, fresh staples, personal care and home essentials with clear KES prices.</p>
+        <div class="hero-retail-highlights" aria-label="Shop benefits"><span>Everyday essentials</span><span>Clear KES prices</span><span>Simple ordering</span></div>
+        <a class="hero-pill solid home-shop-now" href="#homeProductGrid">Shop the catalogue <span aria-hidden="true">→</span></a>
+      </div>
+      <div class="hero-retail-side">
+        <div class="hero-retail-count"><strong>{{total_products|int}}</strong><span>products in our catalogue</span></div>
         <a class="shop-qr-chip shop-qr-feature home-qr-only" href="/app-qr.png" target="_blank" rel="noopener" aria-label="Open {{business_name}} shop QR code">
-          <img src="/app-qr.png" alt="{{business_name}} online shop QR code" loading="eager">
+          <img src="/app-qr.png" alt="{{business_name}} online shop QR code" loading="lazy" decoding="async" width="160" height="160">
+          <span class="hero-qr-caption">Scan to open the shop</span>
         </a>
       </div>
     </section>
@@ -31,7 +39,7 @@
         <span class="home-product-count" id="homeProductCount">{{total_products}} products</span>
       </div>
       <div class="product-grid home-grid" id="homeProductGrid" data-store-code="{{store.code if store else ''}}">
-        {% for item in products %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">Products will appear here when available for online ordering.</div>{% endfor %}
+        {% for item in products %}{% set storefront_card_index = loop.index %}{% include 'shop/_card.html' %}{% else %}<div class="empty-shop">Products will appear here when available for online ordering.</div>{% endfor %}
       </div>
       <div class="shop-load-more" id="homeShopLoadMore" role="status" aria-live="polite">Scroll to keep exploring the catalogue.</div>
     </section>
@@ -48,6 +56,7 @@
  document.querySelectorAll('[data-category-filter]').forEach(b=>b.addEventListener('click',()=>filter(b.dataset.categoryFilter,b.textContent.trim())));
  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
 })();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){}); } catch (_) {}
 </script>
-<script src="{{url_for('static',filename='js/shop-infinite.js')}}?v=20261023-catalogue-v2"></script>
+<script src="{{url_for('static',filename='js/shop-infinite.js')}}?v=20261025-photo-cache-v4"></script>
 {% endblock %}
