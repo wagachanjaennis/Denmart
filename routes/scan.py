@@ -266,6 +266,12 @@ def save():
     for value in (price, cost):
         if value is not None and (not value.is_finite() or value < 0):
             return jsonify(ok=False, error="invalid_price", message="Prices must be finite and cannot be negative."), 400
+    if price is not None and price > Decimal("10000") and data.get("confirm_high_price") is not True:
+        return jsonify(
+            ok=False,
+            error="high_price_confirmation_required",
+            message=f"KES {price:,.2f} is unusually high for a scanned item. Check that the barcode was not entered as the selling price. Confirm only if this is the genuine price.",
+        ), 409
     if price is not None and price > 0 and cost is not None and price < cost:
         return jsonify(ok=False, error="selling_below_cost", message=f"Selling price KES {price:.2f} is below cost KES {cost:.2f}."), 400
     if price is not None and price == 0 and cost is not None and cost > 0:
