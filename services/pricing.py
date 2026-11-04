@@ -22,4 +22,10 @@ def suggested_price(store_product, rule: PricingRule | None):
         price = minimum
     if maximum and price > maximum:
         price = maximum
-    return round_price(price, Decimal(rule.rounding_rule or 1))
+    rounded = round_price(price, Decimal(rule.rounding_rule or 1))
+    # Rounding must never push a suggestion outside the configured floor/ceiling.
+    if minimum and rounded < minimum:
+        rounded = minimum
+    if maximum is not None and rounded > maximum:
+        rounded = maximum
+    return rounded
