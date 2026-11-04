@@ -300,13 +300,26 @@
         weight_kg: weightInput?.value || '',
         store_id: storeSelect.value,
       };
-      const response = await fetch('/scan/api/save', {
+      let response = await fetch('/scan/api/save', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', ...(csrfToken ? {'X-CSRFToken': csrfToken} : {}) },
         body: JSON.stringify(payload),
       });
-      const data = await response.json();
+      let data = await response.json();
+      if (response.status === 409 && data.error === 'high_price_confirmation_required') {
+        if (!window.confirm(data.message || 'This price is unusually high. Confirm that it is the genuine selling price, not a scanned barcode.')) {
+          throw new Error('Save cancelled. Check the selling price and try again.');
+        }
+        payload.confirm_high_price = true;
+        response = await fetch('/scan/api/save', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', ...(csrfToken ? {'X-CSRFToken': csrfToken} : {}) },
+          body: JSON.stringify(payload),
+        });
+        data = await response.json();
+      }
       if (!response.ok || !data.ok) throw new Error(data.message || 'Could not save this item.');
       const stockMessage = data.product.stock_changed
         ? `${fmtNumber(data.product.added)} added. Stock is now ${fmtNumber(data.product.stock)} at ${data.product.store}.`
