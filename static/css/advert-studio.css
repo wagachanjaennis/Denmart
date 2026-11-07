@@ -28,3 +28,7 @@
 
 .ad-uploaded-photo-actions{display:flex;gap:5px;flex-wrap:wrap}
 .ad-uploaded-photo-card .ad-uploaded-photo-actions button.secondary{background:#fff;color:#17613b;border-color:#b9d9c5}
+
+
+/* Restore the full, always-visible advert controls below the creative canvas. */
+.advert-controls-heading{grid-column:1/-1;padding:4px 2px 10px}.advert-controls-heading h2{margin:5px 0;font-size:clamp(20px,2.5vw,28px);color:#142c40}.advert-controls-heading p{margin:0;color:#687789;max-width:850px;line-height:1.55;font-size:13px}.advert-studio-grid{scroll-margin-top:18px}.advert-studio-grid .advert-editor-column,.advert-studio-grid .advert-preview-column{align-self:start}

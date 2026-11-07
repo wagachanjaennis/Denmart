@@ -8,8 +8,7 @@
   const stage = $('adStageShell');
   const overlay = $('adLayerOverlay');
   const host = $('adStageHost');
-  const advanced = $('adAdvancedDrawer');
-  const advancedContent = $('adAdvancedContent');
+  const advanced = null; // The full campaign controls remain visible below the canvas.
   const productDrawer = $('adDesignProductSearch')?.closest('.ad-product-drawer');
   const upload = $('designImageUpload');
   let currentState = api.getState();
@@ -26,16 +25,9 @@
   const elementNames = { text: 'Text', number: 'Number', image: 'Image', rect: 'Rectangle', circle: 'Circle', line: 'Line', badge: 'Price badge', sticker: 'Sticker', qr: 'Shop QR' };
   const elementSymbols = { text: 'T', number: '12', image: '▧', rect: '▰', circle: '◯', line: '／', badge: '¤', sticker: '✦', qr: '▦' };
 
-  // Move the real preview, template/schedule controls and original upload/save controls into
-  // the visual workspace. They still use the existing campaign endpoints and database rows.
-  const oldFrame = $('advertPreviewFrame');
-  if (oldFrame && host) host.appendChild(oldFrame);
-  ['campaigns', 'settings', 'upload', 'ai'].forEach((key) => {
-    const section = document.querySelector(`[data-ad-legacy-panel="${key}"]`);
-    if (section && advancedContent) advancedContent.appendChild(section);
-  });
-  const actionsPanel = document.querySelector('.advert-actions-panel');
-  if (actionsPanel && advancedContent) advancedContent.appendChild(actionsPanel);
+  // Keep all original campaign panels, product library, storyboard, upload tools, AI helper,
+  // live preview and publish controls in their normal visible page layout. Nothing is hidden
+  // behind a collapsed drawer.
   // Keep original form fields as the durable interface used by the existing save/publish code.
   const visibleName = $('adDesignCampaignName');
   const originalName = $('campaignName');
@@ -147,9 +139,11 @@
   }
   function chooseScene(index) {
     activeScene = Math.max(0, Math.min(slides().length - 1, Number(index) || 0));
-    selectedLayer = null;
+    const sceneDesign = api.ensureDesign(activeScene);
+    selectedLayer = sceneDesign?.elements?.[0]?.id || null;
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, true);
     renderAll();
+    setStatus('Scene ready to edit. Select text, photos, shapes or prices and change them in the inspector.');
   }
   function renderLayers() {
     const list = $('adLayerList');
@@ -479,8 +473,8 @@
 
   $('adDesignSave')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(false); });
   $('adDesignPublish')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(true); });
-  $('adUploadFinishedVideo')?.addEventListener('click', () => { if (advanced) advanced.open = true; window.setTimeout(() => $('adVideoUpload')?.click(), 50); });
-  $('adOpenAdvanced')?.addEventListener('click', () => { if (advanced) { advanced.open = !advanced.open; if (advanced.open) advanced.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } });
+  $('adUploadFinishedVideo')?.addEventListener('click', () => $('adVideoUpload')?.click());
+  $('adOpenAdvanced')?.addEventListener('click', () => $('legacyAdvertGrid')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   $('adDesignExport')?.addEventListener('click', () => {
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, false);
     $('exportVideo')?.click();
@@ -503,7 +497,8 @@
     const before = activeScene; currentState = api.getState() || currentState;
     if (visibleName && originalName) visibleName.value = currentState.name || originalName.value || '';
     activeScene = Math.max(0, Math.min(activeScene, Math.max(0, slides().length - 1)));
-    if (before !== activeScene || !getLayer()) selectedLayer = null;
+    const readyDesign = api.ensureDesign(activeScene);
+    if (before !== activeScene || !getLayer()) selectedLayer = readyDesign?.elements?.[0]?.id || null;
     renderTimeline(); renderLayers(); renderOverlay(); renderInspector(); renderBackground();
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, true);
   });
@@ -513,6 +508,9 @@
   // controls and secondary public-display links remain out of the everyday workspace.
   const publicLink = document.querySelector('.ad-studio-nav-actions a[href="/advertisement"]');
   if (publicLink) { publicLink.href = '/'; publicLink.target = '_blank'; publicLink.rel = 'noopener'; publicLink.textContent = 'Open public site ↗'; }
+  // Automatically expose the canvas tools for the current scene; no extra unlock step.
+  const initialDesign = api.ensureDesign(activeScene);
+  selectedLayer = initialDesign?.elements?.[0]?.id || null;
   renderAll();
   if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(0, true);
 })();
