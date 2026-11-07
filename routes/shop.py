@@ -202,19 +202,57 @@ def _catalogue_priority_ranks():
 
 def _storefront_catalogue_order(query, q="", category=""):
     """Put saved photos and the curated everyday essentials first on the home page."""
-    if q or category:
-        return query.order_by(Product.name, Product.id)
+    filtered_catalogue = bool(q or category)
     ranks = _catalogue_priority_ranks()
     # Prefer already-saved photos. If a database row is missing a direct image URL,
     # use the rank list so build-cached bread, milk, flour, oil and household staples
     # still lead the catalogue rather than arbitrary UUID ordering.
+    # Durable local photos from the saved image gallery outrank external URLs.
+    # Placeholder-style paths are intentionally not treated as real product photos.
+    real_local_url = db.and_(
+        Product.image_url.like("/static/%"),
+        Product.image_url.notilike("%placeholder%"),
+        Product.image_url.notilike("%unavailable%"),
+        Product.image_url.notilike("%no-image%"),
+        Product.image_url.notilike("%photo-being-added%"),
+    )
+    local_gallery_photo = db.session.query(ProductImage.id).filter(
+        ProductImage.product_id == Product.id,
+        db.or_(ProductImage.image_url.like("/static/%"), ProductImage.image_url.like("data:image/%")),
+        ProductImage.image_url.isnot(None),
+        ProductImage.image_url.notilike("%placeholder%"),
+        ProductImage.image_url.notilike("%unavailable%"),
+        ProductImage.image_url.notilike("%no-image%"),
+    ).exists()
+    durable_gallery_photo = db.session.query(ProductImage.id).filter(
+        ProductImage.product_id == Product.id,
+        ProductImage.source_type == "denmart-offline-cache",
+        ProductImage.image_url.isnot(None),
+        ProductImage.image_url != "",
+        ProductImage.image_url.notilike("%placeholder%"),
+        ProductImage.image_url.notilike("%unavailable%"),
+        ProductImage.image_url.notilike("%no-image%"),
+    ).exists()
+    saved_gallery_photo = db.session.query(ProductImage.id).filter(
+        ProductImage.product_id == Product.id,
+        ProductImage.image_url.isnot(None),
+        ProductImage.image_url != "",
+        ProductImage.image_url.notilike("%placeholder%"),
+        ProductImage.image_url.notilike("%unavailable%"),
+        ProductImage.image_url.notilike("%no-image%"),
+    ).exists()
     image_rank = case(
-        (Product.image_url.like("/static/%"), 0),
+        (real_local_url, 0),
         (Product.image_url.like("data:image/%"), 0),
+        (local_gallery_photo, 0),
+        (durable_gallery_photo, 0),
         (Product.image_url.like("http://%"), 1),
         (Product.image_url.like("https://%"), 1),
+        (saved_gallery_photo, 1),
         else_=2,
     )
+    if filtered_catalogue:
+        return query.order_by(image_rank, Product.name, Product.id)
     priority_rank = case(ranks, value=Product.id, else_=100000) if ranks else Product.name
     return query.order_by(image_rank, priority_rank, Product.name, Product.id)
 
@@ -677,36 +715,333 @@ def shop_app_icon(size):
 
 @bp.get("/shop/sw.js")
 def shop_service_worker():
-    js = r'''const CACHE_VERSION = "denmart-public-v27-persistent-photos";
+    js = r'''const CACHE_VERSION = "denmart-public-v28-advert-offline";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const PAGE_CACHE = `${CACHE_VERSION}-pages`;
-const STATIC_ASSETS = ["/static/css/app.css","/static/js/app.js","/static/js/offline-core.js","/shop/manifest.webmanifest","/shop/app-icon/192.png","/shop/app-icon/512.png"];
-self.addEventListener("install", event => event.waitUntil((async()=>{const cache=await caches.open(STATIC_CACHE);await Promise.all(STATIC_ASSETS.map(async url=>{try{const r=await fetch(url,{cache:"no-store"});if(r.ok)await cache.put(url,r);}catch(_){}}));await self.skipWaiting();})()));
-self.addEventListener("activate", event => {event.waitUntil((async()=>{const keys=await caches.keys();const fresh=await caches.open(IMAGE_CACHE);for(const key of keys){if(!key.startsWith("denmart-public-")||key.startsWith(CACHE_VERSION)||!key.endsWith("-images"))continue;try{const old=await caches.open(key);for(const req of await old.keys()){if(!await fresh.match(req)){const res=await old.match(req);if(res)await fresh.put(req,res);}}}catch(_){}}for(const key of keys){if(key.startsWith("denmart-public-")&&!key.startsWith(CACHE_VERSION))await caches.delete(key);}await self.clients.claim();})());});
-async function cacheImage(cache, request, response){if(!(response&&(response.ok||response.type==="opaque")))return;try{await cache.put(request,response.clone());const keys=await cache.keys();if(keys.length>1800){for(const key of keys.slice(0,keys.length-1800))await cache.delete(key);}}catch(_){}}
-async function imageCacheFirst(request){const cache=await caches.open(IMAGE_CACHE);const saved=await cache.match(request);if(saved)return saved;try{const response=await fetch(request);await cacheImage(cache,request,response);return response;}catch(_){return new Response("",{status:504});}}
-function isPrivatePortal(path){return path==="/control"||path.startsWith("/control/")||path==="/control/offline-login"||path==="/control2"||path.startsWith("/control2/")||path==="/control2/offline-login"||path==="/merchant"||path.startsWith("/merchant/")||path==="/merchant/offline-login";}
-function shouldCachePage(path){if(path==="/"||path==="/shop"||path.startsWith("/shop?")||path.startsWith("/product/")||path==="/cart"||path==="/locations"||path.startsWith("/locations/"))return true;if(["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return true;return false;}
-function forbiddenPublicCache(path){return path.startsWith("/api/")||path.startsWith("/pay/order/")||path.startsWith("/pay/approval/")||path.startsWith("/pay/api/")||path.startsWith("/control/pay/")||path.startsWith("/logout");}
-self.addEventListener("fetch", event => {
-  const request=event.request,url=new URL(request.url);
-  if(request.method!=="GET")return;
-  // Product photos may be served from a trusted external image host. Cache only image
-  // subresources here; never broaden this to cross-origin pages or API requests.
-  if(request.destination==="image"&&url.origin!==location.origin){event.respondWith(imageCacheFirst(request));return;}
-  if(url.origin!==location.origin)return;
-  const path=url.pathname;
-  if(path.startsWith("/api/"))return;
-  if(request.destination==="style"||request.destination==="script"||path.endsWith("manifest.webmanifest")||path.includes("/shop/app-icon/")){
-    event.respondWith((async()=>{const cache=await caches.open(STATIC_CACHE);try{const response=await fetch(request);if(response.ok){try{await cache.put(request,response.clone());}catch(_){}}return response;}catch(_){return await cache.match(request,{ignoreSearch:true})||new Response("Offline asset unavailable",{status:503});}})());return;
+const AD_DATA_CACHE = `${CACHE_VERSION}-advert-data`;
+const AD_MEDIA_CACHE = `${CACHE_VERSION}-advert-media`;
+const STATIC_ASSETS = [
+  "/static/css/app.css",
+  "/static/js/app.js",
+  "/static/js/offline-core.js",
+  "/static/css/advert-player.css",
+  "/static/js/advert-player.js",
+  "/shop/manifest.webmanifest",
+  "/shop/app-icon/192.png",
+  "/shop/app-icon/512.png"
+];
+const AD_PAGE = "/advertisement";
+const AD_JSON = "/advertisement/current.json";
+self.addEventListener("install", event => event.waitUntil((async () => {
+  const cache = await caches.open(STATIC_CACHE);
+  await Promise.all(STATIC_ASSETS.map(async url => {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (response.ok) await cache.put(url, response);
+    } catch (_) {}
+  }));
+  await self.skipWaiting();
+})()));
+self.addEventListener("activate", event => event.waitUntil((async () => {
+  const keys = await caches.keys();
+  const keep = [
+    ["-images", IMAGE_CACHE],
+    ["-pages", PAGE_CACHE],
+    ["-static", STATIC_CACHE]
+  ];
+  for (const [suffix, targetName] of keep) {
+    const target = await caches.open(targetName);
+    for (const oldName of keys) {
+      if (!oldName.startsWith("denmart-public-") || oldName.startsWith(CACHE_VERSION) || !oldName.endsWith(suffix)) continue;
+      try {
+        const old = await caches.open(oldName);
+        for (const request of await old.keys()) {
+          if (!await target.match(request)) {
+            const response = await old.match(request);
+            if (response) await target.put(request, response);
+          }
+        }
+      } catch (_) {}
+    }
   }
-  if(request.destination==="image" && !forbiddenPublicCache(path)){event.respondWith(imageCacheFirst(request));return;}
-  if(request.mode==="navigate"){
-    if(isPrivatePortal(path) && !["/control/offline-login","/control2/offline-login","/merchant/offline-login"].includes(path))return;
-    if(!shouldCachePage(path)||forbiddenPublicCache(path))return;
-    event.respondWith((async()=>{try{const response=await fetch(request);if(response.ok&&!response.redirected){try{await caches.open(PAGE_CACHE).then(c=>c.put(request,response.clone()));}catch(_){}}return response;}catch(_){const pages=await caches.open(PAGE_CACHE);const exact=await pages.match(request)||await pages.match(url.origin+path);if(exact)return exact;if(path.startsWith("/product/"))return new Response('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Product not saved offline</title><main style="font:16px system-ui;max-width:32rem;margin:3rem auto;padding:1rem"><h1>This product page is not saved on this device yet.</h1><p>Your basket is saved locally. Reconnect once to open this product and make it available offline.</p><a href="/shop">Return to the catalogue</a></main>',{status:503,headers:{"Content-Type":"text/html; charset=utf-8"}});if(path==="/shop"||path==="/cart")return await pages.match(url.origin+path)||await pages.match("/")||new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8"}});return await pages.match("/")||new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8"}});}})());
+  for (const oldName of keys) {
+    if (oldName.startsWith("denmart-public-") && !oldName.startsWith(CACHE_VERSION)) await caches.delete(oldName);
+  }
+  await self.clients.claim();
+})()));
+async function cacheImage(cache, request, response) {
+  if (!(response && (response.ok || response.type === "opaque"))) return;
+  try {
+    await cache.put(request, response.clone());
+    const keys = await cache.keys();
+    if (keys.length > 1800) {
+      for (const key of keys.slice(0, keys.length - 1800)) await cache.delete(key);
+    }
+  } catch (_) {}
+}
+async function imageCacheFirst(request) {
+  const cache = await caches.open(IMAGE_CACHE);
+  const saved = await cache.match(request);
+  if (saved) return saved;
+  try {
+    const response = await fetch(request);
+    await cacheImage(cache, request, response);
+    return response;
+  } catch (_) {
+    return new Response("", { status: 504 });
+  }
+}
+function isPrivatePortal(path) {
+  return path === "/control" || path.startsWith("/control/") || path === "/control/offline-login" ||
+    path === "/control2" || path.startsWith("/control2/") || path === "/control2/offline-login" ||
+    path === "/merchant" || path.startsWith("/merchant/") || path === "/merchant/offline-login";
+}
+function shouldCachePage(path) {
+  if (path === "/" || path === "/shop" || path.startsWith("/shop?") || path.startsWith("/product/") ||
+      path === "/cart" || path === "/locations" || path.startsWith("/locations/") ||
+      path === AD_PAGE || path === "/advertisement/screen") return true;
+  return ["/control/offline-login", "/control2/offline-login", "/merchant/offline-login"].includes(path);
+}
+function forbiddenPublicCache(path) {
+  return path.startsWith("/api/") || path.startsWith("/pay/order/") || path.startsWith("/pay/approval/") ||
+    path.startsWith("/pay/api/") || path.startsWith("/control/pay/") || path.startsWith("/logout");
+}
+async function saveAdvertPage(url, response) {
+  if (!response || !response.ok || response.redirected) return;
+  const pages = await caches.open(PAGE_CACHE);
+  const canonicalPath = url.pathname === "/advertisement/screen" ? AD_PAGE : url.pathname;
+  await pages.put(url.origin + canonicalPath, response.clone());
+  if (url.pathname !== canonicalPath) await pages.put(url.origin + url.pathname, response.clone());
+}
+function rangeFromFullResponse(fullResponse, rangeHeader) {
+  return fullResponse.blob().then(blob => {
+    const total = blob.size;
+    const headers = new Headers(fullResponse.headers);
+    headers.delete("Content-Encoding");
+    headers.delete("Content-Range");
+    headers.set("Accept-Ranges", "bytes");
+    headers.set("Content-Length", String(total));
+    if (!rangeHeader) return new Response(blob, { status: 200, headers });
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
+    if (!match || (!match[1] && !match[2])) return new Response(blob, { status: 200, headers });
+    let start;
+    let end;
+    if (!match[1]) {
+      const suffixLength = Number(match[2]);
+      start = Math.max(0, total - suffixLength);
+      end = total - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] ? Math.min(Number(match[2]), total - 1) : total - 1;
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= total || end < start) {
+      headers.set("Content-Range", `bytes */${total}`);
+      headers.set("Content-Length", "0");
+      return new Response(null, { status: 416, headers });
+    }
+    const part = blob.slice(start, end + 1);
+    headers.set("Content-Range", `bytes ${start}-${end}/${total}`);
+    headers.set("Content-Length", String(part.size));
+    return new Response(part, { status: 206, headers });
+  });
+}
+async function advertMediaCacheFirst(request, url) {
+  if (url.searchParams.has("download")) return fetch(request);
+  const key = url.origin + url.pathname;
+  const cache = await caches.open(AD_MEDIA_CACHE);
+  const saved = await cache.match(key);
+  if (saved) return rangeFromFullResponse(saved, request.headers.get("range"));
+  try {
+    // Fetch the complete MP4 once. Browsers normally request byte ranges, but a full
+    // cached object is needed so later offline range requests can be reconstructed.
+    const fullRequest = new Request(key, {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Accept": request.headers.get("accept") || "video/mp4,*/*" }
+    });
+    const networkResponse = await fetch(fullRequest);
+    if (networkResponse.ok && networkResponse.status === 200) {
+      const blob = await networkResponse.clone().blob();
+      if (blob.size <= 26 * 1024 * 1024) {
+        const stored = new Response(blob, { status: 200, headers: networkResponse.headers });
+        await cache.put(key, stored.clone());
+        const keys = await cache.keys();
+        if (keys.length > 3) {
+          for (const old of keys.slice(0, keys.length - 3)) await cache.delete(old);
+        }
+        return rangeFromFullResponse(stored, request.headers.get("range"));
+      }
+      return networkResponse;
+    }
+    return networkResponse;
+  } catch (_) {
+    return new Response("This advertisement video has not been saved offline on this device.", {
+      status: 504,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
+  }
+}
+async function cacheAdImageUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl || rawUrl.startsWith("data:")) return;
+  let url;
+  try { url = new URL(rawUrl, self.location.origin); } catch (_) { return; }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return;
+  const cache = await caches.open(IMAGE_CACHE);
+  if (await cache.match(url.href)) return;
+  try {
+    const request = new Request(url.href, { mode: url.origin === self.location.origin ? "same-origin" : "no-cors" });
+    const response = await fetch(request);
+    await cacheImage(cache, request, response);
+  } catch (_) {}
+}
+async function cacheAdvertMediaById(assetId) {
+  const id = String(assetId || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+  if (!id) return;
+  const url = new URL(`/advertisement/media/${encodeURIComponent(id)}`, self.location.origin);
+  const cache = await caches.open(AD_MEDIA_CACHE);
+  if (await cache.match(url.href)) return;
+  try {
+    const request = new Request(url.href, { method: "GET", credentials: "same-origin", cache: "no-store" });
+    const response = await fetch(request);
+    if (!response.ok || response.status !== 200) return;
+    const blob = await response.clone().blob();
+    if (blob.size > 26 * 1024 * 1024) return;
+    await cache.put(url.href, new Response(blob, { status: 200, headers: response.headers }));
+    const keys = await cache.keys();
+    if (keys.length > 3) for (const old of keys.slice(0, keys.length - 3)) await cache.delete(old);
+  } catch (_) {}
+}
+async function warmCampaignAssets(campaign) {
+  if (!campaign || typeof campaign !== "object") return;
+  const imageUrls = new Set();
+  function walk(value, key) {
+    if (typeof value === "string") {
+      if (/(image|photo|qr)/i.test(String(key || "")) && /^(https?:\/\/|\/)/i.test(value)) imageUrls.add(value);
+      return;
+    }
+    if (Array.isArray(value)) { for (const item of value) walk(item, key); return; }
+    if (value && typeof value === "object") {
+      for (const [childKey, childValue] of Object.entries(value)) walk(childValue, childKey);
+    }
+  }
+  walk(campaign, "");
+  await Promise.all(Array.from(imageUrls).slice(0, 80).map(cacheAdvertImageUrl));
+  await cacheAdvertMediaById(campaign.media_asset_id);
+  await cacheAdvertImageUrl("/advertisement/qr.png");
+}
+async function cacheAdvertisementSnapshot() {
+  const pageUrl = new URL(AD_PAGE, self.location.origin);
+  try {
+    const pageResponse = await fetch(pageUrl.href, { cache: "no-store", credentials: "same-origin" });
+    if (pageResponse.ok && !pageResponse.redirected) {
+      await saveAdvertPage(pageUrl, pageResponse.clone());
+      const html = await pageResponse.clone().text();
+      const match = /<script[^>]+id=["']adCampaign["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+      if (match) {
+        try { await warmCampaignAssets(JSON.parse(match[1])); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  try {
+    const jsonUrl = new URL(AD_JSON, self.location.origin);
+    const response = await fetch(jsonUrl.href, { cache: "no-store", credentials: "same-origin" });
+    if (response.ok) {
+      await caches.open(AD_DATA_CACHE).then(cache => cache.put(jsonUrl.href, response.clone()));
+      const data = await response.clone().json();
+      if (data && data.campaign) await warmCampaignAssets(data.campaign);
+    }
+  } catch (_) {}
+}
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "DENMART_CACHE_ADVERTISEMENT") {
+    event.waitUntil(cacheAdvertisementSnapshot());
   }
 });
-'''
+self.addEventListener("fetch", event => {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== "GET") return;
+  // Product photos may be hosted by suppliers; cache image subresources only.
+  if (request.destination === "image" && url.origin !== self.location.origin) {
+    event.respondWith(imageCacheFirst(request));
+    return;
+  }
+  if (url.origin !== self.location.origin) return;
+  const path = url.pathname;
+  if (path.startsWith("/api/")) return;
+  if (path === AD_JSON) {
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(request);
+        if (response.ok) await caches.open(AD_DATA_CACHE).then(cache => cache.put(url.origin + AD_JSON, response.clone()));
+        return response;
+      } catch (_) {
+        const saved = await caches.open(AD_DATA_CACHE).then(cache => cache.match(url.origin + AD_JSON));
+        return saved || new Response(JSON.stringify({ campaign: null, offline: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", "X-Denmart-Offline": "1" }
+        });
+      }
+    })());
+    return;
+  }
+  if (path.startsWith("/advertisement/media/") && !url.searchParams.has("download")) {
+    event.respondWith(advertMediaCacheFirst(request, url));
+    return;
+  }
+  if (request.destination === "style" || request.destination === "script" || path.endsWith("manifest.webmanifest") || path.includes("/shop/app-icon/")) {
+    event.respondWith((async () => {
+      const cache = await caches.open(STATIC_CACHE);
+      try {
+        const response = await fetch(request);
+        if (response.ok) { try { await cache.put(request, response.clone()); } catch (_) {} }
+        return response;
+      } catch (_) {
+        return await cache.match(request, { ignoreSearch: true }) || new Response("Offline asset unavailable", { status: 503 });
+      }
+    })());
+    return;
+  }
+  if (request.destination === "image" && !forbiddenPublicCache(path)) {
+    event.respondWith(imageCacheFirst(request));
+    return;
+  }
+  if (request.mode === "navigate") {
+    if (isPrivatePortal(path) && !["/control/offline-login", "/control2/offline-login", "/merchant/offline-login"].includes(path)) return;
+    if (!shouldCachePage(path) || forbiddenPublicCache(path)) return;
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(request);
+        if (response.ok && !response.redirected) {
+          try {
+            const pages = await caches.open(PAGE_CACHE);
+            await pages.put(request, response.clone());
+            if (path === AD_PAGE || path === "/advertisement/screen") await saveAdvertPage(url, response.clone());
+          } catch (_) {}
+        }
+        return response;
+      } catch (_) {
+        const pages = await caches.open(PAGE_CACHE);
+        const candidates = [request, url.origin + path];
+        if (path === "/advertisement/screen") candidates.push(url.origin + AD_PAGE);
+        if (path === AD_PAGE) candidates.push(url.origin + "/advertisement/screen");
+        for (const candidate of candidates) {
+          const saved = await pages.match(candidate, { ignoreSearch: true });
+          if (saved) return saved;
+        }
+        if (path === "/advertisement" || path === "/advertisement/screen") {
+          return new Response("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Denmart advertisement</title><main style='font:16px system-ui;max-width:36rem;margin:12vh auto;padding:1.5rem;text-align:center'><h1>Denmart advertisement has not been saved on this device yet.</h1><p>Open this advertisement once while connected to the internet. After the campaign has loaded, it will be available here offline.</p></main>", {
+            status: 503,
+            headers: { "Content-Type": "text/html; charset=utf-8" }
+          });
+        }
+        if (path.startsWith("/product/")) return new Response("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Product not saved offline</title><main style='font:16px system-ui;max-width:32rem;margin:3rem auto;padding:1rem'><h1>This product page is not saved on this device yet.</h1><p>Your basket is saved locally. Reconnect once to open this product and make it available offline.</p><a href='/shop'>Return to the catalogue</a></main>", { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } });
+        if (path === "/shop" || path === "/cart") return await pages.match(url.origin + path) || await pages.match(url.origin + "/") || new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        return await pages.match(url.origin + "/") || new Response("This page has not been saved on this device yet. Connect once to cache it for offline browsing.", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      }
+    })());
+  }
+});'''
     return Response(js, mimetype="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})

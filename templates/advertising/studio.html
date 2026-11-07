@@ -60,7 +60,8 @@
         <div class="ad-background-properties" id="adBackgroundProperties"><div class="ad-panel-title"><strong>Canvas background</strong></div><div class="ad-field-grid"><label class="ad-field">Colour<input id="adBgColor" type="color" value="#10243a"></label><label class="ad-field">Second colour<input id="adBgColor2" type="color" value="#45264f"></label></div><label class="ad-check"><input id="adBgGradient" type="checkbox" checked> Blend colours as a gradient</label><div class="ad-field-grid"><label class="ad-field">Video tint<input id="adVideoTint" type="color" value="#10243a"></label><label class="ad-field">Tint strength<input id="adVideoTintOpacity" type="range" min="0" max="75" value="0"><small>0 = original colour</small></label></div><button type="button" id="adApplyBackground" class="ad-wide-action">Apply background</button></div>
       </aside>
     </div>
-    <details class="ad-product-drawer"><summary>Find authentic product photos from Denmart's saved barcode catalogue</summary><div class="ad-product-drawer-body"><div class="ad-product-search-row"><input class="admin-input wide" id="adDesignProductSearch" type="search" placeholder="Product name, brand or barcode" autocomplete="off"><button class="ad-btn publish" type="button" id="adDesignProductSearchButton">Search</button></div><div id="adDesignProductResults" class="ad-design-product-results"><span>Search the existing catalogue, then drag a product image onto the canvas or choose Add.</span></div></div></details>
+    <details class="ad-product-drawer ad-uploaded-photo-drawer" open><summary>★ New Denmart photo uploads · first priority</summary><div class="ad-product-drawer-body"><p class="ad-photo-library-note">Your newly supplied shop photos appear first, ranked by image clarity. Choose one to place it on the advert canvas. Use “Match product + price” to select the exact catalogue product/size before adding its saved KES price.</p><div id="adUploadedPhotoResults" class="ad-design-product-results ad-uploaded-photo-results"><span>Loading the new Denmart photo library…</span></div></div></details>
+    <details class="ad-product-drawer"><summary>Find catalogue products · real product photos and KES prices</summary><div class="ad-product-drawer-body"><div class="ad-product-search-row"><input class="admin-input wide" id="adDesignProductSearch" type="search" placeholder="Product name, brand or barcode" autocomplete="off"><button class="ad-btn publish" type="button" id="adDesignProductSearchButton">Search</button></div><div id="adDesignProductResults" class="ad-design-product-results"><span>Search the existing catalogue, then drag a product image onto the canvas or choose Add.</span></div></div></details>
     <details class="ad-advanced-drawer" id="adAdvancedDrawer"><summary>Campaign templates, scheduling, uploaded video and advanced tools</summary><div id="adAdvancedContent" class="ad-advanced-content"></div></details>
     <input id="designImageUpload" type="file" accept="image/png,image/jpeg,image/webp,image/avif" multiple hidden>
   </section>
@@ -69,7 +70,7 @@
     <section class="advert-editor-column">
       <section class="admin-panel advert-panel" data-ad-legacy-panel="campaigns"><div class="panel-heading"><div><h2>Start with a template</h2><p class="muted">Choose a ready-made retail concept, then change the message to fit your campaign.</p></div></div>
         <div class="advert-template-row"><label>Saved campaigns<select class="admin-input wide" id="loadCampaign">{% for item in campaigns %}<option value="{{item.id}}" {% if item.id==current_campaign.id %}selected{% endif %}>{{item.name}}{% if published.id==item.id and published.updated_at==item.updated_at %} · live{% elif item.id in scheduled_ids %} · scheduled{% else %} · draft{% endif %}</option>{% endfor %}</select></label><button class="admin-action secondary-action" type="button" id="newCampaignButton">＋ New campaign</button></div>
-        <div class="advert-template-row"><label>Creative starting point<select class="admin-input wide" id="templateChoice"><option value="welcome">Welcome / opening soon</option><option value="school">Back to school</option><option value="laundry">Laundry & bathing care</option><option value="christmas">Christmas / festive season</option><option value="essentials">Everyday essentials</option><option value="promotion">Featured offer (add your verified offer)</option></select></label><button class="admin-action" type="button" id="applyTemplate">Use template</button></div>
+        <div class="advert-template-row"><label>Creative starting point<select class="admin-input wide" id="templateChoice"><option value="welcome">Welcome / Denmart brand introduction</option><option value="school">Back to school</option><option value="laundry">Laundry & bathing care</option><option value="christmas">Christmas / festive season</option><option value="essentials">Everyday essentials</option><option value="promotion">Featured offer (add your verified offer)</option></select></label><button class="admin-action" type="button" id="applyTemplate">Use template</button></div>
         <p class="muted advert-small-note">Templates create editable words and animated layouts. For branded products such as Blue Band or named soap brands, upload the real approved product photo and check all wording/claims before publishing.</p>
       </section>
 
@@ -102,7 +103,7 @@
       </section>
 
       <section class="admin-panel advert-panel" data-ad-legacy-panel="ai"><div class="panel-heading"><div><h2>AI idea-to-ad helper</h2><p class="muted">Turn your idea into a professional prompt. Copy it into Canva, CapCut or Adobe Express to create extra product shots, voice-over or music, then upload the finished image assets here.</p></div></div>
-        <label>What do you want the advert to achieve?<textarea class="admin-input wide" id="adIdea" rows="3" placeholder="Example: Welcome visitors to Denmart online. Explain that online ordering opens on 5 November 2026, show a scannable QR code, and make it feel premium, joyful and trustworthy."></textarea></label>
+        <label>What do you want the advert to achieve?<textarea class="admin-input wide" id="adIdea" rows="3" placeholder="Example: Make a polished local Denmart advert. Mention denmart.co.ke, the Main Branch at Toll near Thika Road, and Kimbo at Exit 13 → Maangi → Ebenezer Centre. Use genuine store photos and exact catalogue prices."></textarea></label>
         <div class="advert-tool-actions"><button class="admin-action" type="button" id="makePrompt">Build my AI prompt</button><button class="admin-action secondary-action" type="button" id="copyPrompt">Copy prompt</button><button class="admin-action secondary-action" type="button" id="speakScript">Preview voice-over</button></div>
         <textarea class="admin-input wide advert-prompt-output" id="aiPromptOutput" rows="6" placeholder="Your copy-ready prompt appears here…"></textarea>
         <div class="advert-external-tools"><a href="https://www.canva.com/" target="_blank" rel="noopener">Canva Magic Video ↗</a><a href="https://www.capcut.com/tools/ai-lab" target="_blank" rel="noopener">CapCut AI Lab ↗</a><a href="https://new.express.adobe.com/" target="_blank" rel="noopener">Adobe Express ↗</a></div>
@@ -117,12 +118,12 @@
     </aside>
   </div>
 </main></div>
-<link rel="stylesheet" href="{{url_for('static',filename='css/advert-studio.css')}}?v=20261023-design-v4">
+<link rel="stylesheet" href="{{url_for('static',filename='css/advert-studio.css')}}?v=20261107-photo-price-fullscreen">
 <script id="adCampaign" type="application/json">{{current_campaign|tojson}}</script>
 <script id="initialAdCampaign" type="application/json">{{current_campaign|tojson}}</script>
 <script id="initialAdPublished" type="application/json">{{published|tojson}}</script>
 <script id="initialAdScheduled" type="application/json">{{scheduled_ids|tojson}}</script>
-<script src="{{url_for('static',filename='js/advert-player.js')}}?v=20261023-design-v4"></script>
-<script src="{{url_for('static',filename='js/advert-studio.js')}}?v=20261023-design-v4"></script>
-<script src="{{url_for('static',filename='js/advert-design-editor.js')}}?v=20261023-design-v4"></script>
+<script src="{{url_for('static',filename='js/advert-player.js')}}?v=20261107-photo-price-fullscreen"></script>
+<script src="{{url_for('static',filename='js/advert-studio.js')}}?v=20261107-photo-price-fullscreen"></script>
+<script src="{{url_for('static',filename='js/advert-design-editor.js')}}?v=20261107-photo-price-fullscreen"></script>
 {% endblock %}

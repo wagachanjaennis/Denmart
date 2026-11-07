@@ -111,9 +111,29 @@
   function syncUploadedMedia(){if(!video)return;const id=String(campaign.media_asset_id||'');if(id){const src='/advertisement/media/'+encodeURIComponent(id);if(activeMediaId!==id||video.dataset.mediaSrc!==src){activeMediaId=id;video.dataset.mediaSrc=src;video.src=src;try{video.load();const play=video.play();if(play&&play.catch)play.catch(()=>{});}catch(_){}}const layered=(campaign.slides||[]).some(s=>s&&s.design&&s.design.enabled);video.hidden=false;video.style.visibility=layered?'hidden':'visible';if(canvas)canvas.style.visibility=layered?'visible':'hidden';if(overlay){overlay.hidden=layered;overlay.classList.toggle('darken',!!campaign.darken_screen);overlay.style.setProperty('--ad-dim',String(Math.max(.15,Math.min(.85,Number(campaign.overlay_opacity||.52)))));const flow=String(campaign.flow_text||'').trim();flowNode.textContent=flow.toUpperCase();overlay.classList.toggle('flowing',!!(campaign.flow_text_enabled&&flow));flowNode.style.display=campaign.flow_text_enabled&&flow?'block':'none';}}else{if(activeMediaId){activeMediaId='';video.pause();video.removeAttribute('src');video.load();}video.hidden=true;video.style.visibility='visible';if(canvas)canvas.style.visibility='visible';if(overlay)overlay.hidden=true;}}
   function frame(now){if(!running)return;syncUploadedMedia();const elapsed=(now-started)/1000;const scene=sceneAt(elapsed);const hasDesign=(campaign.slides||[]).some(s=>s&&s.design&&s.design.enabled);if(!campaign.media_asset_id||hasDesign){if(editorSceneIndex!==null){const slide=campaign.slides?.[editorSceneIndex]||campaign.slides?.[0];const d=Math.max(3,Number(slide?.duration||6));const local=(now-editorSceneStarted)/1000;drawScene(slide,editorSceneIndex,local,Math.min(1,local/d),local);}else drawScene(scene.slide,scene.index,elapsed,scene.progress,scene.slideElapsed);}requestAnimationFrame(frame);}
   if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>requestAnimationFrame(frame));else requestAnimationFrame(frame);
-  // Click or tap to ask the browser for kiosk fullscreen without adding player controls.
-  if(document.body.classList.contains('ad-screen-body'))document.querySelector('.ad-screen')?.addEventListener('click',()=>{if(!document.fullscreenElement)document.documentElement.requestFullscreen?.().catch(()=>{});});
-  async function refreshScheduledCampaign(){try{const r=await fetch('/advertisement/current.json',{cache:'no-store'});if(!r.ok)return;const data=await r.json();if(data.campaign&&data.campaign.id&&(data.campaign.id!==campaign.id||data.campaign.updated_at!==campaign.updated_at)){campaign=data.campaign;started=performance.now();const node=document.getElementById('adCampaign');if(node)node.textContent=JSON.stringify(campaign);}}catch(_){}}
+  // The browser requires a user gesture before a page can enter true fullscreen.
+  // The page itself stays visually clean: no player controls or exit buttons are added.
+  if(document.body.classList.contains('ad-screen-body')){
+    const screen=document.querySelector('.ad-screen');
+    let fullscreenRequested=false;
+    const requestImmersive=()=>{
+      if(fullscreenRequested||document.fullscreenElement)return;
+      const root=document.documentElement;
+      if(!root.requestFullscreen)return;
+      fullscreenRequested=true;
+      try{
+        const result=root.requestFullscreen({navigationUI:'hide'});
+        if(result&&result.catch)result.catch(()=>{fullscreenRequested=false;});
+      }catch(_){fullscreenRequested=false;}
+      try{if(window.screen&&window.screen.orientation&&window.screen.orientation.lock)window.screen.orientation.lock('landscape').catch(()=>{});}catch(_){}
+    };
+    screen?.addEventListener('pointerup',requestImmersive,{passive:true});
+    screen?.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();requestImmersive();}});
+    screen?.addEventListener('contextmenu',(event)=>event.preventDefault());
+    document.addEventListener('fullscreenchange',()=>{fullscreenRequested=!!document.fullscreenElement;});
+  }
+  function requestOfflineCampaignRefresh(){try{if(navigator.serviceWorker&&navigator.serviceWorker.controller)navigator.serviceWorker.controller.postMessage({type:'DENMART_CACHE_ADVERTISEMENT'});}catch(_){}}
+  async function refreshScheduledCampaign(){try{const r=await fetch('/advertisement/current.json',{cache:'no-store'});if(!r.ok)return;const data=await r.json();if(data.campaign&&data.campaign.id&&(data.campaign.id!==campaign.id||data.campaign.updated_at!==campaign.updated_at)){campaign=data.campaign;started=performance.now();const node=document.getElementById('adCampaign');if(node)node.textContent=JSON.stringify(campaign);requestOfflineCampaignRefresh();}}catch(_){}}
   if(document.body.classList.contains('ad-screen-body'))setInterval(refreshScheduledCampaign,45000);
   // Keep a reference for the in-studio renderer/exporter; nothing is exposed on the public screen.
   window.DenmartAdPlayer={setCampaign(value,preserveTime=false){campaign=value||{};if(!preserveTime){started=performance.now();if(editorSceneIndex!==null)editorSceneStarted=performance.now();}syncUploadedMedia();},setEditorScene(index,enabled=true,preserveTime=false){editorSceneIndex=enabled?Math.max(0,Number(index)||0):null;if(!preserveTime)editorSceneStarted=performance.now();},render(value,time){campaign=value||campaign;syncUploadedMedia();const scene=sceneAt(time||0);if(!campaign.media_asset_id||(campaign.slides||[]).some(s=>s&&s.design&&s.design.enabled))drawScene(scene.slide,scene.index,time||0,scene.progress,scene.slideElapsed);},drawScene,sceneAt,canvas,palettes};

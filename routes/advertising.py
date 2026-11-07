@@ -24,7 +24,8 @@ from flask import Blueprint, current_app, jsonify, redirect, render_template, re
 
 from extensions import db
 from flask_login import current_user
-from models import SystemSetting, Product, ProductImage, StoreProduct, now
+from sqlalchemy import case
+from models import SystemSetting, Product, ProductImage, Store, StoreProduct, now
 from services.product_images import product_image_sources, product_image_source, data_url_to_bytes, is_data_image_url, _local_static_image, real_product_image_url
 from routes.dev_admin import _dev_ok, _business, _audit
 
@@ -36,35 +37,70 @@ THEMES = {"emerald", "midnight", "sunrise", "christmas", "school", "ocean", "plu
 
 
 def default_campaign():
-    return {
-        "id": "denmart-welcome-2026",
-        "name": "Welcome to Denmart Online",
-        "theme": "emerald",
-        "ticker": "WELCOME TO DENMART  •  EVERYDAY ESSENTIALS  •  ONLINE ORDERING OPENS 5 NOVEMBER 2026  •  DENMART.CO.KE",
-        "website": "denmart.co.ke",
-        "show_qr": True,
-        "duration": 6,
-        "schedule_enabled": False,
-        "start_date": "",
-        "end_date": "",
-        "daily_start_time": "",
-        "daily_end_time": "",
-        "schedule_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-        "priority": 0,
-        "darken_screen": False,
-        "overlay_opacity": 0.52,
-        "flow_text_enabled": False,
-        "flow_text": "",
-        "media_asset_id": "",
-        "media_name": "",
-        "media_mime": "",
-        "slides": [
-            {"headline": "WELCOME TO DENMART ONLINE", "body": "Everyday essentials. A simpler way to shop.", "cta": "VISIT DENMART.CO.KE", "image_url": "", "image_urls": [], "show_qr": True, "duration": 6},
-            {"headline": "THE THINGS YOUR HOME NEEDS", "body": "Discover groceries, laundry care, bathing essentials and everyday favourites in one convenient place.", "cta": "YOUR EVERYDAY STORE, ONLINE", "image_url": "", "image_urls": [], "show_qr": False, "duration": 6},
-            {"headline": "WE'RE GETTING READY FOR YOU", "body": "Online ordering opens 5 November 2026.", "cta": "SAVE THE DATE  •  DENMART.CO.KE", "image_url": "", "image_urls": [], "show_qr": True, "duration": 7},
-        ],
-        "updated_at": "built-in-welcome-v1",
-    }
+    """A reusable, non-seasonal Denmart campaign using the freshly supplied store photos."""
+    return {'id': 'denmart-welcome-2026',
+     'name': 'Denmart · Your Everyday Store, Online',
+     'theme': 'emerald',
+     'ticker': 'DENMART.CO.KE  •  MAIN BRANCH: TOLL, NEAR THIKA ROAD  •  KIMBO: EXIT 13 → MAANGI → EBENEZER '
+               'CENTRE  •  EVERYDAY ESSENTIALS',
+     'website': 'denmart.co.ke',
+     'show_qr': True,
+     'duration': 7,
+     'schedule_enabled': False,
+     'start_date': '',
+     'end_date': '',
+     'daily_start_time': '',
+     'daily_end_time': '',
+     'schedule_days': ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+     'priority': 1,
+     'darken_screen': False,
+     'overlay_opacity': 0.34,
+     'flow_text_enabled': False,
+     'flow_text': '',
+     'media_asset_id': '',
+     'media_name': '',
+     'media_mime': '',
+     'slides': [{'headline': 'EVERYDAY ESSENTIALS. ONE EASY ONLINE STOP.',
+                 'body': 'Shop groceries, homeware, household essentials and personal care at Denmart — all in '
+                         'one convenient online catalogue.',
+                 'cta': 'SHOP ONLINE AT DENMART.CO.KE',
+                 'image_url': '/static/advertising/uploads/IMG-20261107-WA0000.webp',
+                 'image_urls': ['/static/advertising/uploads/IMG-20261107-WA0000.webp'],
+                 'show_qr': True,
+                 'duration': 7},
+                {'headline': 'GOOD THINGS FOR YOUR HOME',
+                 'body': 'Explore kitchen, storage, cleaning and everyday household favourites. Browse the '
+                         'catalogue and check current KES prices online.',
+                 'cta': 'EXPLORE THE DENMART CATALOGUE',
+                 'image_url': '/static/advertising/uploads/IMG-20261107-WA0018.webp',
+                 'image_urls': ['/static/advertising/uploads/IMG-20261107-WA0018.webp'],
+                 'show_qr': True,
+                 'duration': 7},
+                {'headline': 'A LITTLE TREAT FOR EVERY DAY',
+                 'body': 'Find chocolates, sweets, snacks and more everyday favourites at Denmart.',
+                 'cta': 'FIND YOUR FAVOURITES ONLINE',
+                 'image_url': '/static/advertising/uploads/IMG-20261107-WA0039.webp',
+                 'image_urls': ['/static/advertising/uploads/IMG-20261107-WA0039.webp'],
+                 'show_qr': False,
+                 'duration': 7},
+                {'headline': 'NEW ARRIVALS & EVERYDAY FAVOURITES',
+                 'body': 'Discover new additions and pantry favourites at Denmart. '
+                         'Visit the online catalogue for current details and prices.',
+                 'cta': "SEE WHAT'S NEW",
+                 'image_url': '/static/advertising/uploads/IMG-20261107-WA0043.webp',
+                 'image_urls': ['/static/advertising/uploads/IMG-20261107-WA0043.webp'],
+                 'show_qr': True,
+                 'duration': 7},
+                {'headline': 'TWO CONVENIENT DENMART LOCATIONS',
+                 'body': 'Main Branch: Toll, close to Thika Road. Kimbo: Exit 13, Kimbo Maangi, then Ebenezer '
+                         'Centre. Shop online at denmart.co.ke.',
+                 'cta': 'VISIT DENMART.CO.KE',
+                 'image_url': '/static/advertising/uploads/IMG-20261107-WA0050.webp',
+                 'image_urls': ['/static/advertising/uploads/IMG-20261107-WA0050.webp'],
+                 'show_qr': True,
+                 'duration': 8}],
+     'updated_at': '2026-11-07T06:43:14+00:00'}
+
 
 
 def _setting(business_id, key, default=""):
@@ -316,26 +352,58 @@ def load_campaign(campaign_id):
     return jsonify(ok=True, campaign=campaign)
 
 
+@bp.get("/advertcontrol/api/uploaded-images")
+@_require_developer
+def uploaded_ad_images():
+    """Return the fresh Denmart photo library before older catalogue image sources."""
+    library_path = Path(current_app.static_folder) / "advertising" / "uploads" / "library.json"
+    try:
+        payload = json.loads(library_path.read_text(encoding="utf-8"))
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        safe_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            image_url = str(item.get("image_url") or "")
+            if not image_url.startswith("/static/advertising/uploads/"):
+                continue
+            safe_items.append({
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or "Denmart store photo"),
+                "category": str(item.get("category") or "general"),
+                "image_url": image_url,
+                "source_name": str(item.get("source_name") or ""),
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
+                "clarity_score": float(item.get("clarity_score") or 0),
+            })
+        return jsonify(ok=True, items=safe_items, count=len(safe_items), priority="fresh-upload")
+    except FileNotFoundError:
+        return jsonify(ok=True, items=[], count=0, priority="fresh-upload")
+    except Exception:
+        current_app.logger.exception("Could not load fresh Denmart advert photos")
+        return jsonify(ok=False, error="The new photo library could not be loaded."), 500
+
+
 @bp.get("/advertcontrol/api/products")
 @_require_developer
 def search_ad_products():
-    """Search the real Denmart product database for the advertising studio."""
+    """Search active Denmart products, ranking usable photos first and exposing real KES prices."""
     query_text = " ".join(str(request.args.get("q") or "").split())[:120]
     query = Product.query.filter(Product.status == "ACTIVE")
     if query_text:
         pattern = "%" + query_text.replace("%", "\\%").replace("_", "\\_") + "%"
         query = query.filter(db.or_(Product.name.ilike(pattern), Product.brand.ilike(pattern), Product.barcode.ilike(pattern), Product.sku.ilike(pattern)))
-    products = query.order_by(Product.name.asc()).limit(60).all()
+    products = query.order_by(Product.name.asc()).limit(150).all()
     if not products and query_text:
-        # Partial-token fallback still searches saved products only; it never invents
-        # product names or package artwork.
+        # Partial-token fallback searches saved products only; no names or artwork are invented.
         words = [word for word in query_text.split() if len(word) > 1][:3]
         if words:
             query = Product.query.filter(Product.status == "ACTIVE")
             for word in words:
                 like = "%" + word + "%"
                 query = query.filter(db.or_(Product.name.ilike(like), Product.brand.ilike(like)))
-            products = query.order_by(Product.name.asc()).limit(40).all()
+            products = query.order_by(Product.name.asc()).limit(100).all()
     product_ids = [p.id for p in products]
     gallery_rows = (ProductImage.query.filter(ProductImage.product_id.in_(product_ids))
                     .order_by(ProductImage.is_primary.desc(), ProductImage.sort_order, ProductImage.created_at).all()) if product_ids else []
@@ -346,9 +414,44 @@ def search_ad_products():
             continue
         target = durable if getattr(row, "source_type", "") == "denmart-offline-cache" else gallery
         target.setdefault(str(row.product_id), []).append(str(row.image_url).strip())
-    # Let the saved feeder enrich selected product images when active. The saved local
-    # product remains the source of names, SKUs, stock and price.
-    store_rows = StoreProduct.query.filter(StoreProduct.product_id.in_(product_ids)).all() if product_ids else []
+
+    # Resolve online prices from the active Denmart store records only. A product photo
+    # without an exact catalogue match never receives an assumed or scraped price.
+    store_ids = []
+    store_names = {}
+    try:
+        business = _business()
+        if business:
+            active_store_rows = Store.query.filter_by(business_id=business.id, is_active=True).all()
+            active_store_rows.sort(key=lambda row: (0 if "main" in str(row.name or "").casefold() else 1, str(row.name or "").casefold()))
+            store_ids = [row.id for row in active_store_rows]
+            store_names = {row.id: row.name for row in active_store_rows}
+    except Exception:
+        current_app.logger.exception("Could not identify active Denmart stores for advert product prices")
+    price_by_product = {}
+    if product_ids and store_ids:
+        preferred_store_id = store_ids[0]
+        priced_rows = (StoreProduct.query.filter(
+                            StoreProduct.product_id.in_(product_ids),
+                            StoreProduct.store_id.in_(store_ids),
+                            StoreProduct.available_online.is_(True),
+                            StoreProduct.is_available.is_(True))
+                       .order_by(case((StoreProduct.store_id == preferred_store_id, 0), else_=1),
+                                 StoreProduct.stock_quantity.desc(), StoreProduct.updated_at.desc()).all())
+        for row in priced_rows:
+            price = row.selling_price
+            try:
+                amount = float(price or 0)
+            except (TypeError, ValueError):
+                amount = 0
+            if amount > 0 and str(row.product_id) not in price_by_product:
+                formatted = f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.2f}"
+                price_by_product[str(row.product_id)] = {"amount": amount, "label": "KES " + formatted,
+                                                         "store_name": store_names.get(row.store_id, "")}
+
+    # Let the saved feeder enrich product photos when active. Store catalogue data
+    # remains authoritative for the product name, barcode and selling price.
+    store_rows = StoreProduct.query.filter(StoreProduct.product_id.in_(product_ids), StoreProduct.store_id.in_(store_ids)).all() if product_ids and store_ids else []
     if store_rows:
         business_id = getattr(getattr(store_rows[0], "store", None), "business_id", None)
         try:
@@ -356,6 +459,7 @@ def search_ad_products():
             apply_online_feeder_overlay(store_rows, business_id)
         except Exception:
             current_app.logger.exception("Could not resolve product photos from the feeder for advert search")
+
     result = []
     for product in products:
         product._denmart_gallery_image_urls = gallery.get(str(product.id), [])
@@ -363,15 +467,29 @@ def search_ad_products():
         candidates = product_image_sources(product)
         image_urls = [f"/advertisement/product-photo/{quote(str(product.id), safe='')}/{i}.webp" for i in range(min(8, len(candidates)))]
         if not image_urls and str(product.barcode or "").strip():
-            # The endpoint performs an exact-barcode image lookup on demand; do not
-            # call an external API for every item on the search-results page.
+            # Exact-barcode image lookup is performed only after a shopper/editor asks for it.
             image_urls = [f"/advertisement/product-photo/{quote(str(product.id), safe='')}/0.webp"]
-        result.append({"id": str(product.id), "name": product.name, "brand": product.brand or "",
-                       "barcode": product.barcode or "", "sku": product.sku or "",
-                       "image_urls": image_urls, "image_count": len(candidates),
-                       "image_url": image_urls[0] if image_urls else ""})
+        has_local = any(is_data_image_url(value) or _local_static_image(value) for value in candidates)
+        has_durable = bool(durable.get(str(product.id)))
+        if has_local or has_durable:
+            image_rank, image_quality = 0, "Saved product photo"
+        elif candidates or (str(product.barcode or "").strip() and image_urls):
+            image_rank, image_quality = 1, "Image source / barcode lookup"
+        else:
+            image_rank, image_quality = 2, "Photo needed"
+        price_data = price_by_product.get(str(product.id), {})
+        result.append({
+            "id": str(product.id), "name": product.name, "brand": product.brand or "",
+            "barcode": product.barcode or "", "sku": product.sku or "",
+            "image_urls": image_urls, "image_count": len(candidates),
+            "image_url": image_urls[0] if image_urls else "",
+            "image_rank": image_rank, "image_quality": image_quality,
+            "price": price_data.get("amount"), "price_label": price_data.get("label", ""),
+            "currency": "KES" if price_data else "", "price_store": price_data.get("store_name", ""),
+        })
+    result.sort(key=lambda item: (item["image_rank"], item["name"].casefold()))
+    result = result[:60]
     return jsonify(ok=True, items=result, count=len(result))
-
 
 @bp.get("/advertisement/product-photo/<product_id>/<int:image_index>.webp")
 def advertisement_product_photo(product_id, image_index):

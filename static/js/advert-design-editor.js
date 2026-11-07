@@ -10,7 +10,7 @@
   const host = $('adStageHost');
   const advanced = $('adAdvancedDrawer');
   const advancedContent = $('adAdvancedContent');
-  const productDrawer = document.querySelector('.ad-product-drawer');
+  const productDrawer = $('adDesignProductSearch')?.closest('.ad-product-drawer');
   const upload = $('designImageUpload');
   let currentState = api.getState();
   let activeScene = 0;
@@ -19,6 +19,7 @@
   let dragState = null;
   let statusMessage = '';
   let searchTimer = 0;
+  let pendingUploadedPhoto = null;
   const undoStack = [];
   const redoStack = [];
   let historyFocusKey = '';
@@ -266,6 +267,43 @@
     if (!url) return;
     addLayer('image', { image_url: url, text: label || '', x: 1080, y: 190, w: 600, h: 650, fit: 'contain', shadow: true, effect: 'zoom', motion_duration: 1.3 });
   }
+  function addProductWithPrice(product, url) {
+    const selectedPhoto = pendingUploadedPhoto;
+    const chosenUrl = selectedPhoto ? selectedPhoto.image_url : url;
+    if (chosenUrl) addImageLayer(chosenUrl, product.name);
+    if (product.price_label) {
+      addLayer('badge', { text: product.price_label, x: 1390, y: 105, w: 390, h: 150, font_size: 54, fill: '#0d7544', color: '#ffffff', align: 'center', radius: 30, effect: 'pop' });
+      setStatus('Added ' + product.name + (selectedPhoto ? ' using the selected Denmart upload' : '') + ' with its saved catalogue price ' + product.price_label + '.', 'success');
+    } else if (chosenUrl) {
+      setStatus('Photo added for ' + product.name + '. No current online selling price is saved for this item.', 'success');
+    }
+    pendingUploadedPhoto = null;
+  }
+  async function loadUploadedPhotoLibrary() {
+    const host = $('adUploadedPhotoResults');
+    if (!host) return;
+    try {
+      const response = await fetch('/advertcontrol/api/uploaded-images', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+      const result = await response.json();
+      if (response.status === 401 && result.login_url) { location.href = result.login_url; return; }
+      if (!response.ok || !result.ok) throw new Error(result.error || 'Could not load the new photo library.');
+      host.replaceChildren();
+      if (!result.items || !result.items.length) { host.textContent = 'No new photos have been added yet. You can still upload images from the Image tool.'; return; }
+      result.items.forEach((item) => {
+        const card = document.createElement('article'); card.className = 'ad-design-product-card ad-uploaded-photo-card';
+        const image = document.createElement('img'); image.src = item.image_url; image.alt = safeText(item.label); image.loading = 'lazy'; image.draggable = false;
+        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(item.label);
+        const meta = document.createElement('small'); meta.textContent = 'NEW UPLOAD · ' + String(item.category || 'general').replace(/-/g, ' ').toUpperCase();
+        const actions = document.createElement('div'); actions.className = 'ad-uploaded-photo-actions';
+        const add = document.createElement('button'); add.type = 'button'; add.textContent = 'Add photo'; add.addEventListener('click', () => { pendingUploadedPhoto = null; addImageLayer(item.image_url, item.label); setStatus('New Denmart photo added. Use “Match product + price” to attach a catalogue price to this exact photo.', 'success'); });
+        const match = document.createElement('button'); match.type = 'button'; match.className = 'secondary'; match.textContent = 'Match product + price'; match.addEventListener('click', () => { pendingUploadedPhoto = item; if (productDrawer) productDrawer.open = true; const input = $('adDesignProductSearch'); setStatus('Selected “' + item.label + '”. Search the exact product name/barcode and choose the matching size or variant to attach its saved KES price.', 'success'); input?.focus(); if (input && input.value.trim()) searchProducts(); });
+        actions.append(add, match); details.append(title, meta, actions); card.append(image, details);
+        card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('application/x-denmart-image', item.image_url); event.dataTransfer.setData('application/x-denmart-name', safeText(item.label)); event.dataTransfer.setData('text/plain', item.image_url); event.dataTransfer.effectAllowed = 'copy'; });
+        host.appendChild(card);
+      });
+      setStatus(result.items.length + ' new Denmart photos loaded. These uploads are prioritised ahead of the catalogue search.');
+    } catch (error) { host.textContent = error.message || 'Could not load new photos.'; }
+  }
   function chooseTool(tool) {
     activeTool = tool;
     document.querySelectorAll('[data-ad-tool]').forEach((button) => button.classList.toggle('active', button.dataset.adTool === tool));
@@ -414,19 +452,27 @@
       host.replaceChildren();
       if (!result.items || !result.items.length) { host.textContent = 'No saved products match this search. Try a barcode, brand or shorter name.'; return; }
       result.items.forEach((product) => {
-        const card = document.createElement('article'); card.className = 'ad-design-product-card'; card.draggable = true;
-        const image = document.createElement('img'); const src = product.image_url || (product.image_urls && product.image_urls[0]) || '';
+        const card = document.createElement('article'); card.className = 'ad-design-product-card' + (product.image_rank === 2 ? ' no-product-photo' : ''); card.draggable = true;
+        const image = document.createElement('img'); const src = product.image_url || (product.image_urls && product.image_urls[0]) || ''; let usableSrc = src; const add = document.createElement('button'); add.type = 'button';
         image.alt = safeText(product.name) + ' product photo'; image.loading = 'lazy'; image.draggable = false;
-        if (src) image.src = src; else { image.src = '/static/images/product-unavailable.svg'; image.onerror = () => { image.onerror = null; image.removeAttribute('src'); image.alt = 'No verified photo'; }; }
-        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(product.name); const meta = document.createElement('small'); meta.textContent = [product.brand, product.barcode ? 'Barcode ' + product.barcode : ''].filter(Boolean).join(' · ') || 'Saved catalogue product';
-        const add = document.createElement('button'); add.type = 'button'; add.textContent = src ? 'Add image' : 'Add item'; add.disabled = !src; add.addEventListener('click', () => addImageLayer(src, product.name));
-        details.append(title, meta, add); card.append(image, details);
-        card.addEventListener('dragstart', (event) => { if (!src) { event.preventDefault(); return; } event.dataTransfer.setData('application/x-denmart-image', src); event.dataTransfer.setData('application/x-denmart-name', safeText(product.name)); event.dataTransfer.setData('text/plain', src); event.dataTransfer.effectAllowed = 'copy'; });
+        if (src) {
+          image.addEventListener('error', () => { usableSrc = ''; image.removeAttribute('src'); image.alt = 'Photo not available'; card.classList.add('no-product-photo'); add.disabled = !product.price_label && !pendingUploadedPhoto; add.textContent = pendingUploadedPhoto ? (product.price_label ? 'Use selected photo + price' : 'Use selected photo') : (product.price_label ? 'Add price tag' : 'Photo unavailable'); host.appendChild(card); }, { once: true });
+          image.src = src;
+        } else { image.src = '/static/images/product-unavailable.svg'; image.alt = 'No saved product photo'; }
+        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(product.name);
+        const meta = document.createElement('small'); meta.textContent = [product.brand, product.barcode ? 'Barcode ' + product.barcode : '', product.price_store ? 'Price from ' + product.price_store : ''].filter(Boolean).join(' · ') || 'Saved catalogue product';
+        const quality = document.createElement('small'); quality.className = 'ad-product-image-quality'; quality.textContent = product.image_quality || 'Photo status not checked';
+        const price = document.createElement('b'); price.className = 'ad-product-price'; price.textContent = product.price_label || 'No online price saved';
+        add.textContent = pendingUploadedPhoto ? (product.price_label ? 'Use selected photo + price' : 'Use selected photo') : (src ? (product.price_label ? 'Add image + price' : 'Add image') : (product.price_label ? 'Add price tag' : 'No photo to add')); add.disabled = !src && !product.price_label && !pendingUploadedPhoto;
+        add.addEventListener('click', () => addProductWithPrice(product, usableSrc));
+        details.append(title, meta, quality, price, add); card.append(image, details);
+        card.addEventListener('dragstart', (event) => { if (!usableSrc) { event.preventDefault(); return; } event.dataTransfer.setData('application/x-denmart-image', usableSrc); event.dataTransfer.setData('application/x-denmart-name', safeText(product.name)); event.dataTransfer.effectAllowed = 'copy'; });
         host.appendChild(card);
       });
-      setStatus('Found ' + result.items.length + ' authentic catalogue entries. Photos are loaded from saved images or exact-barcode lookups.');
+      setStatus('Found ' + result.items.length + ' catalogue entries. Saved photos appear first; KES prices come from the active online store price list.');
     } catch (error) { host.textContent = error.message || 'Could not search products.'; setStatus(error.message || 'Product lookup failed.', 'error'); }
   }
+  loadUploadedPhotoLibrary();
   $('adDesignProductSearchButton')?.addEventListener('click', searchProducts);
   $('adDesignProductSearch')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchProducts(); } });
   $('adDesignProductSearch')?.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 350); });
