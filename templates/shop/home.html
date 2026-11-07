@@ -1,4 +1,5 @@
 {% extends 'base.html' %}{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/denmart-new-arrivals.css') }}?v=20261107-new-arrivals">
 <div class="shop-home-layout denmart-home-v2">
   <div class="home-category-toolbar" aria-label="Shop categories">
     <div class="home-priority-categories">
@@ -31,6 +32,76 @@
           <img src="/app-qr.png" alt="{{business_name}} online shop QR code" loading="lazy" decoding="async" width="160" height="160">
           <span class="hero-qr-caption">Scan to open the shop</span>
         </a>
+      </div>
+    </section>
+    <section class="catalogue-section denmart-new-arrivals" aria-labelledby="denmart-new-arrivals-title">
+      <div class="section-head">
+        <div><span class="eyebrow">JUST ARRIVED</span><h2 id="denmart-new-arrivals-title">Fresh arrivals at Denmart</h2>
+        <p class="muted">Take a look at some of the latest items available in store.</p></div>
+        <a class="hero-pill solid" href="/shop">Explore the shop <span aria-hidden="true">→</span></a>
+      </div>
+      <div class="denmart-arrival-grid" aria-label="Newly added product photos">
+        {% set arrival_photos = [
+          'IMG-20261013-WA0003.webp',
+          'IMG-20261107-WA0000.webp',
+          'IMG-20261107-WA0001.webp',
+          'IMG-20261107-WA0002.webp',
+          'IMG-20261107-WA0003.webp',
+          'IMG-20261107-WA0004.webp',
+          'IMG-20261107-WA0005.webp',
+          'IMG-20261107-WA0006.webp',
+          'IMG-20261107-WA0007.webp',
+          'IMG-20261107-WA0008.webp',
+          'IMG-20261107-WA0009.webp',
+          'IMG-20261107-WA0010.webp',
+          'IMG-20261107-WA0011.webp',
+          'IMG-20261107-WA0012.webp',
+          'IMG-20261107-WA0013.webp',
+          'IMG-20261107-WA0014.webp',
+          'IMG-20261107-WA0015.webp',
+          'IMG-20261107-WA0016.webp',
+          'IMG-20261107-WA0017.webp',
+          'IMG-20261107-WA0018.webp',
+          'IMG-20261107-WA0019.webp',
+          'IMG-20261107-WA0020.webp',
+          'IMG-20261107-WA0021.webp',
+          'IMG-20261107-WA0022.webp',
+          'IMG-20261107-WA0023.webp',
+          'IMG-20261107-WA0024.webp',
+          'IMG-20261107-WA0025.webp',
+          'IMG-20261107-WA0026.webp',
+          'IMG-20261107-WA0027.webp',
+          'IMG-20261107-WA0028.webp',
+          'IMG-20261107-WA0029.webp',
+          'IMG-20261107-WA0030.webp',
+          'IMG-20261107-WA0031.webp',
+          'IMG-20261107-WA0032.webp',
+          'IMG-20261107-WA0033.webp',
+          'IMG-20261107-WA0034.webp',
+          'IMG-20261107-WA0035.webp',
+          'IMG-20261107-WA0036.webp',
+          'IMG-20261107-WA0037.webp',
+          'IMG-20261107-WA0038.webp',
+          'IMG-20261107-WA0039.webp',
+          'IMG-20261107-WA0040.webp',
+          'IMG-20261107-WA0041.webp',
+          'IMG-20261107-WA0042.webp',
+          'IMG-20261107-WA0043.webp',
+          'IMG-20261107-WA0044.webp',
+          'IMG-20261107-WA0045.webp',
+          'IMG-20261107-WA0046.webp',
+          'IMG-20261107-WA0047.webp',
+          'IMG-20261107-WA0048.webp',
+          'IMG-20261107-WA0049.webp',
+          'IMG-20261107-WA0050.webp',
+          'IMG-20261107-WA0051.webp',
+        ] %}
+        {% for photo in arrival_photos %}
+        <a class="denmart-arrival-tile" href="/shop" aria-label="Explore new arrivals at Denmart">
+          <img src="{{ url_for('static', filename='catalogue/new-arrivals/' ~ photo) }}" alt="New arrival at Denmart" loading="{{ 'eager' if loop.index <= 8 else 'lazy' }}" decoding="async">
+          <span>New arrival</span>
+        </a>
+        {% endfor %}
       </div>
     </section>
     <section class="catalogue-section home-all-products" aria-labelledby="home-all-products-title">
