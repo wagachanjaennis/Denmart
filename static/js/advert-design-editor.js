@@ -8,8 +8,9 @@
   const stage = $('adStageShell');
   const overlay = $('adLayerOverlay');
   const host = $('adStageHost');
-  const advanced = null; // The full campaign controls remain visible below the canvas.
-  const productDrawer = $('adDesignProductSearch')?.closest('.ad-product-drawer');
+  const advanced = $('adAdvancedDrawer');
+  const advancedContent = $('adAdvancedContent');
+  const productDrawer = document.querySelector('.ad-product-drawer');
   const upload = $('designImageUpload');
   let currentState = api.getState();
   let activeScene = 0;
@@ -18,16 +19,22 @@
   let dragState = null;
   let statusMessage = '';
   let searchTimer = 0;
-  let pendingUploadedPhoto = null;
   const undoStack = [];
   const redoStack = [];
   let historyFocusKey = '';
   const elementNames = { text: 'Text', number: 'Number', image: 'Image', rect: 'Rectangle', circle: 'Circle', line: 'Line', badge: 'Price badge', sticker: 'Sticker', qr: 'Shop QR' };
   const elementSymbols = { text: 'T', number: '12', image: '▧', rect: '▰', circle: '◯', line: '／', badge: '¤', sticker: '✦', qr: '▦' };
 
-  // Keep all original campaign panels, product library, storyboard, upload tools, AI helper,
-  // live preview and publish controls in their normal visible page layout. Nothing is hidden
-  // behind a collapsed drawer.
+  // Move the real preview, template/schedule controls and original upload/save controls into
+  // the visual workspace. They still use the existing campaign endpoints and database rows.
+  const oldFrame = $('advertPreviewFrame');
+  if (oldFrame && host) host.appendChild(oldFrame);
+  ['campaigns', 'settings', 'upload', 'ai'].forEach((key) => {
+    const section = document.querySelector(`[data-ad-legacy-panel="${key}"]`);
+    if (section && advancedContent) advancedContent.appendChild(section);
+  });
+  const actionsPanel = document.querySelector('.advert-actions-panel');
+  if (actionsPanel && advancedContent) advancedContent.appendChild(actionsPanel);
   // Keep original form fields as the durable interface used by the existing save/publish code.
   const visibleName = $('adDesignCampaignName');
   const originalName = $('campaignName');
@@ -139,11 +146,9 @@
   }
   function chooseScene(index) {
     activeScene = Math.max(0, Math.min(slides().length - 1, Number(index) || 0));
-    const sceneDesign = api.ensureDesign(activeScene);
-    selectedLayer = sceneDesign?.elements?.[0]?.id || null;
+    selectedLayer = null;
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, true);
     renderAll();
-    setStatus('Scene ready to edit. Select text, photos, shapes or prices and change them in the inspector.');
   }
   function renderLayers() {
     const list = $('adLayerList');
@@ -260,43 +265,6 @@
   function addImageLayer(url, label) {
     if (!url) return;
     addLayer('image', { image_url: url, text: label || '', x: 1080, y: 190, w: 600, h: 650, fit: 'contain', shadow: true, effect: 'zoom', motion_duration: 1.3 });
-  }
-  function addProductWithPrice(product, url) {
-    const selectedPhoto = pendingUploadedPhoto;
-    const chosenUrl = selectedPhoto ? selectedPhoto.image_url : url;
-    if (chosenUrl) addImageLayer(chosenUrl, product.name);
-    if (product.price_label) {
-      addLayer('badge', { text: product.price_label, x: 1390, y: 105, w: 390, h: 150, font_size: 54, fill: '#0d7544', color: '#ffffff', align: 'center', radius: 30, effect: 'pop' });
-      setStatus('Added ' + product.name + (selectedPhoto ? ' using the selected Denmart upload' : '') + ' with its saved catalogue price ' + product.price_label + '.', 'success');
-    } else if (chosenUrl) {
-      setStatus('Photo added for ' + product.name + '. No current online selling price is saved for this item.', 'success');
-    }
-    pendingUploadedPhoto = null;
-  }
-  async function loadUploadedPhotoLibrary() {
-    const host = $('adUploadedPhotoResults');
-    if (!host) return;
-    try {
-      const response = await fetch('/advertcontrol/api/uploaded-images', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
-      const result = await response.json();
-      if (response.status === 401 && result.login_url) { location.href = result.login_url; return; }
-      if (!response.ok || !result.ok) throw new Error(result.error || 'Could not load the new photo library.');
-      host.replaceChildren();
-      if (!result.items || !result.items.length) { host.textContent = 'No new photos have been added yet. You can still upload images from the Image tool.'; return; }
-      result.items.forEach((item) => {
-        const card = document.createElement('article'); card.className = 'ad-design-product-card ad-uploaded-photo-card';
-        const image = document.createElement('img'); image.src = item.image_url; image.alt = safeText(item.label); image.loading = 'lazy'; image.draggable = false;
-        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(item.label);
-        const meta = document.createElement('small'); meta.textContent = 'NEW UPLOAD · ' + String(item.category || 'general').replace(/-/g, ' ').toUpperCase();
-        const actions = document.createElement('div'); actions.className = 'ad-uploaded-photo-actions';
-        const add = document.createElement('button'); add.type = 'button'; add.textContent = 'Add photo'; add.addEventListener('click', () => { pendingUploadedPhoto = null; addImageLayer(item.image_url, item.label); setStatus('New Denmart photo added. Use “Match product + price” to attach a catalogue price to this exact photo.', 'success'); });
-        const match = document.createElement('button'); match.type = 'button'; match.className = 'secondary'; match.textContent = 'Match product + price'; match.addEventListener('click', () => { pendingUploadedPhoto = item; if (productDrawer) productDrawer.open = true; const input = $('adDesignProductSearch'); setStatus('Selected “' + item.label + '”. Search the exact product name/barcode and choose the matching size or variant to attach its saved KES price.', 'success'); input?.focus(); if (input && input.value.trim()) searchProducts(); });
-        actions.append(add, match); details.append(title, meta, actions); card.append(image, details);
-        card.addEventListener('dragstart', (event) => { event.dataTransfer.setData('application/x-denmart-image', item.image_url); event.dataTransfer.setData('application/x-denmart-name', safeText(item.label)); event.dataTransfer.setData('text/plain', item.image_url); event.dataTransfer.effectAllowed = 'copy'; });
-        host.appendChild(card);
-      });
-      setStatus(result.items.length + ' new Denmart photos loaded. These uploads are prioritised ahead of the catalogue search.');
-    } catch (error) { host.textContent = error.message || 'Could not load new photos.'; }
   }
   function chooseTool(tool) {
     activeTool = tool;
@@ -446,35 +414,27 @@
       host.replaceChildren();
       if (!result.items || !result.items.length) { host.textContent = 'No saved products match this search. Try a barcode, brand or shorter name.'; return; }
       result.items.forEach((product) => {
-        const card = document.createElement('article'); card.className = 'ad-design-product-card' + (product.image_rank === 2 ? ' no-product-photo' : ''); card.draggable = true;
-        const image = document.createElement('img'); const src = product.image_url || (product.image_urls && product.image_urls[0]) || ''; let usableSrc = src; const add = document.createElement('button'); add.type = 'button';
+        const card = document.createElement('article'); card.className = 'ad-design-product-card'; card.draggable = true;
+        const image = document.createElement('img'); const src = product.image_url || (product.image_urls && product.image_urls[0]) || '';
         image.alt = safeText(product.name) + ' product photo'; image.loading = 'lazy'; image.draggable = false;
-        if (src) {
-          image.addEventListener('error', () => { usableSrc = ''; image.removeAttribute('src'); image.alt = 'Photo not available'; card.classList.add('no-product-photo'); add.disabled = !product.price_label && !pendingUploadedPhoto; add.textContent = pendingUploadedPhoto ? (product.price_label ? 'Use selected photo + price' : 'Use selected photo') : (product.price_label ? 'Add price tag' : 'Photo unavailable'); host.appendChild(card); }, { once: true });
-          image.src = src;
-        } else { image.src = '/static/images/product-unavailable.svg'; image.alt = 'No saved product photo'; }
-        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(product.name);
-        const meta = document.createElement('small'); meta.textContent = [product.brand, product.barcode ? 'Barcode ' + product.barcode : '', product.price_store ? 'Price from ' + product.price_store : ''].filter(Boolean).join(' · ') || 'Saved catalogue product';
-        const quality = document.createElement('small'); quality.className = 'ad-product-image-quality'; quality.textContent = product.image_quality || 'Photo status not checked';
-        const price = document.createElement('b'); price.className = 'ad-product-price'; price.textContent = product.price_label || 'No online price saved';
-        add.textContent = pendingUploadedPhoto ? (product.price_label ? 'Use selected photo + price' : 'Use selected photo') : (src ? (product.price_label ? 'Add image + price' : 'Add image') : (product.price_label ? 'Add price tag' : 'No photo to add')); add.disabled = !src && !product.price_label && !pendingUploadedPhoto;
-        add.addEventListener('click', () => addProductWithPrice(product, usableSrc));
-        details.append(title, meta, quality, price, add); card.append(image, details);
-        card.addEventListener('dragstart', (event) => { if (!usableSrc) { event.preventDefault(); return; } event.dataTransfer.setData('application/x-denmart-image', usableSrc); event.dataTransfer.setData('application/x-denmart-name', safeText(product.name)); event.dataTransfer.effectAllowed = 'copy'; });
+        if (src) image.src = src; else { image.src = '/static/images/product-unavailable.svg'; image.onerror = () => { image.onerror = null; image.removeAttribute('src'); image.alt = 'No verified photo'; }; }
+        const details = document.createElement('div'); const title = document.createElement('strong'); title.textContent = safeText(product.name); const meta = document.createElement('small'); meta.textContent = [product.brand, product.barcode ? 'Barcode ' + product.barcode : ''].filter(Boolean).join(' · ') || 'Saved catalogue product';
+        const add = document.createElement('button'); add.type = 'button'; add.textContent = src ? 'Add image' : 'Add item'; add.disabled = !src; add.addEventListener('click', () => addImageLayer(src, product.name));
+        details.append(title, meta, add); card.append(image, details);
+        card.addEventListener('dragstart', (event) => { if (!src) { event.preventDefault(); return; } event.dataTransfer.setData('application/x-denmart-image', src); event.dataTransfer.setData('application/x-denmart-name', safeText(product.name)); event.dataTransfer.setData('text/plain', src); event.dataTransfer.effectAllowed = 'copy'; });
         host.appendChild(card);
       });
-      setStatus('Found ' + result.items.length + ' catalogue entries. Saved photos appear first; KES prices come from the active online store price list.');
+      setStatus('Found ' + result.items.length + ' authentic catalogue entries. Photos are loaded from saved images or exact-barcode lookups.');
     } catch (error) { host.textContent = error.message || 'Could not search products.'; setStatus(error.message || 'Product lookup failed.', 'error'); }
   }
-  loadUploadedPhotoLibrary();
   $('adDesignProductSearchButton')?.addEventListener('click', searchProducts);
   $('adDesignProductSearch')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchProducts(); } });
   $('adDesignProductSearch')?.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 350); });
 
   $('adDesignSave')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(false); });
   $('adDesignPublish')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(true); });
-  $('adUploadFinishedVideo')?.addEventListener('click', () => $('adVideoUpload')?.click());
-  $('adOpenAdvanced')?.addEventListener('click', () => $('legacyAdvertGrid')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  $('adUploadFinishedVideo')?.addEventListener('click', () => { if (advanced) advanced.open = true; window.setTimeout(() => $('adVideoUpload')?.click(), 50); });
+  $('adOpenAdvanced')?.addEventListener('click', () => { if (advanced) { advanced.open = !advanced.open; if (advanced.open) advanced.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } });
   $('adDesignExport')?.addEventListener('click', () => {
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, false);
     $('exportVideo')?.click();
@@ -497,8 +457,7 @@
     const before = activeScene; currentState = api.getState() || currentState;
     if (visibleName && originalName) visibleName.value = currentState.name || originalName.value || '';
     activeScene = Math.max(0, Math.min(activeScene, Math.max(0, slides().length - 1)));
-    const readyDesign = api.ensureDesign(activeScene);
-    if (before !== activeScene || !getLayer()) selectedLayer = readyDesign?.elements?.[0]?.id || null;
+    if (before !== activeScene || !getLayer()) selectedLayer = null;
     renderTimeline(); renderLayers(); renderOverlay(); renderInspector(); renderBackground();
     if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(activeScene, true);
   });
@@ -508,9 +467,6 @@
   // controls and secondary public-display links remain out of the everyday workspace.
   const publicLink = document.querySelector('.ad-studio-nav-actions a[href="/advertisement"]');
   if (publicLink) { publicLink.href = '/'; publicLink.target = '_blank'; publicLink.rel = 'noopener'; publicLink.textContent = 'Open public site ↗'; }
-  // Automatically expose the canvas tools for the current scene; no extra unlock step.
-  const initialDesign = api.ensureDesign(activeScene);
-  selectedLayer = initialDesign?.elements?.[0]?.id || null;
   renderAll();
   if (window.DenmartAdPlayer) window.DenmartAdPlayer.setEditorScene(0, true);
 })();

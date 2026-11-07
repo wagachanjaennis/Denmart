@@ -1,0 +1,18 @@
+{
+  "source_archive_sha256": "8f00448782248e5c1787fc29b2b4691393a82f4e0828a199c0bb99c46955eb77",
+  "restored_original_files": [
+    "routes/advertising.py",
+    "templates/advertising/studio.html",
+    "templates/advertising/screen.html",
+    "static/css/advert-studio.css",
+    "static/css/advert-player.css",
+    "static/js/advert-studio.js",
+    "static/js/advert-design-editor.js",
+    "static/js/advert-player.js"
+  ],
+  "cache_changed_files": [
+    "routes/shop.py",
+    "static/js/advert-player.js"
+  ],
+  "notes": "Advert studio template, stylesheet, studio JS, design editor JS, server routes and player stylesheet are restored from the first user-uploaded project. Player JS differs only by an immediate cache refresh call."
+}

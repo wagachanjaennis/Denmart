@@ -10,13 +10,10 @@
   let scheduledIds=new Set();try{scheduledIds=new Set(JSON.parse($('initialAdScheduled')?.textContent||'[]').map(String));}catch(_){}
   let liveCampaign=clone(published);
   const templates={
-    blank:{name:'Untitled Denmart Campaign',theme:'emerald',ticker:'',website:'denmart.co.ke',show_qr:false,slides:[{headline:'Your headline',body:'Write your message here.',cta:'Your call to action',image_url:'',show_qr:false,duration:6}]},
-    welcome:{name:'Denmart · Your Everyday Store, Online',theme:'emerald',ticker:'DENMART.CO.KE • MAIN BRANCH: TOLL, NEAR THIKA ROAD • KIMBO: EXIT 13 → MAANGI → EBENEZER CENTRE • EVERYDAY ESSENTIALS',website:'denmart.co.ke',show_qr:true,slides:[
-      {headline:'EVERYDAY ESSENTIALS. ONE EASY ONLINE STOP.',body:'Shop groceries, homeware, household essentials and personal care at Denmart — all in one convenient online catalogue.',cta:'SHOP ONLINE AT DENMART.CO.KE',image_url:'/static/advertising/uploads/IMG-20261107-WA0000.webp',show_qr:true,duration:7},
-      {headline:'GOOD THINGS FOR YOUR HOME',body:'Explore kitchen, storage, cleaning and everyday household favourites. Browse the catalogue and check current KES prices online.',cta:'EXPLORE THE DENMART CATALOGUE',image_url:'/static/advertising/uploads/IMG-20261107-WA0018.webp',show_qr:true,duration:7},
-      {headline:'A LITTLE TREAT FOR EVERY DAY',body:'Find chocolates, sweets, snacks and more everyday favourites at Denmart.',cta:'FIND YOUR FAVOURITES ONLINE',image_url:'/static/advertising/uploads/IMG-20261107-WA0039.webp',show_qr:false,duration:7},
-      {headline:'NEW ARRIVALS & EVERYDAY FAVOURITES',body:'Discover new additions and pantry favourites at Denmart. Visit the online catalogue for current details and prices.',cta:"SEE WHAT'S NEW",image_url:'/static/advertising/uploads/IMG-20261107-WA0043.webp',show_qr:true,duration:7},
-      {headline:'TWO CONVENIENT DENMART LOCATIONS',body:'Main Branch: Toll, close to Thika Road. Kimbo: Exit 13, Kimbo Maangi, then Ebenezer Centre. Shop online at denmart.co.ke.',cta:'VISIT DENMART.CO.KE',image_url:'/static/advertising/uploads/IMG-20261107-WA0050.webp',show_qr:true,duration:8}]},
+    welcome:{name:'Welcome to Denmart Online',theme:'emerald',ticker:'WELCOME TO DENMART • EVERYDAY ESSENTIALS • ONLINE ORDERING OPENS 5 NOVEMBER 2026 • DENMART.CO.KE',website:'denmart.co.ke',show_qr:true,slides:[
+      {headline:'WELCOME TO DENMART ONLINE',body:'Everyday essentials. A simpler way to shop.',cta:'VISIT DENMART.CO.KE',image_url:'',show_qr:true,duration:6},
+      {headline:'THE THINGS YOUR HOME NEEDS',body:'Discover groceries, laundry care, bathing essentials and everyday favourites in one convenient place.',cta:'YOUR EVERYDAY STORE, ONLINE',image_url:'',show_qr:false,duration:6},
+      {headline:"WE'RE GETTING READY FOR YOU",body:'Online ordering opens 5 November 2026.',cta:'SAVE THE DATE • DENMART.CO.KE',image_url:'',show_qr:true,duration:7}]},
     school:{name:'Back to School with Denmart',theme:'school',ticker:'BACK TO SCHOOL • MAKE THE NEXT SCHOOL DAY EASIER • DENMART.CO.KE',website:'denmart.co.ke',show_qr:true,slides:[
       {headline:'READY FOR THE NEXT SCHOOL DAY?',body:'Make the school routine easier with everyday family essentials.',cta:'GET SCHOOL-READY WITH DENMART',image_url:'',show_qr:true,duration:6},
       {headline:'THE LITTLE THINGS MATTER',body:'From lunchbox favourites to the household basics families reach for all week.',cta:'EXPLORE EVERYDAY ESSENTIALS',image_url:'',show_qr:true,duration:6},
