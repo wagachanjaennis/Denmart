@@ -353,6 +353,195 @@ def products():
     )
 
 
+@bp.get(f"{ADMIN_BASE}/new-arrivals")
+@admin_required("products.view")
+def new_arrivals():
+    """Review each bundled arrival photo and connect it to a searchable product."""
+    from services.new_arrivals import build_arrival_cards
+
+    q = request.args.get("q", "").strip()[:160].casefold()
+    store_id = request.args.get("store_id", "").strip()
+    stores = Store.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Store.name).all()
+    if not any(store.id == store_id for store in stores):
+        store_id = stores[0].id if stores else ""
+    all_cards = build_arrival_cards(current_app.root_path, current_user.business_id, store_id)
+    linked_count = sum(1 for card in all_cards if card["product"])
+    pending_count = sum(1 for card in all_cards if not card["product"])
+    cards = all_cards
+    if q:
+        cards = [card for card in all_cards if q in card["filename"].casefold()
+                 or q in f"new product {card['number']}"
+                 or (card["product"] and any(q in str(value or "").casefold() for value in
+                     (card["product"].name, card["product"].brand, card["product"].barcode, card["product"].sku)))]
+    return render_template(
+        "admin/new_arrivals.html", items=cards, stores=stores, categories=Category.query.filter_by(
+            business_id=current_user.business_id, is_active=True).order_by(Category.sort_order, Category.name).all(),
+        q=request.args.get("q", "").strip()[:160], store_id=store_id,
+        total_count=len(all_cards), linked_count=linked_count, pending_count=pending_count,
+    )
+
+
+@bp.post(f"{ADMIN_BASE}/new-arrivals/<filename>/create")
+@admin_required("products.create")
+def create_product_from_arrival(filename):
+    """Create or connect a real Product/StoreProduct record from a bundled photo."""
+    from services.new_arrivals import (
+        ARRIVAL_ALIAS_TYPE, ARRIVAL_STATIC_PREFIX, arrival_alias, list_arrival_photos,
+    )
+
+    if filename not in list_arrival_photos(current_app.root_path):
+        return "Not found", 404
+    name = request.form.get("name", "").strip()[:240]
+    brand = request.form.get("brand", "").strip()[:160] or None
+    barcode = re.sub(r"\s+", "", request.form.get("barcode", "")).strip()[:80] or None
+    sku = request.form.get("sku", "").strip()[:80] or None
+    category_id = request.form.get("category_id", "").strip() or None
+    store_id = request.form.get("store_id", "").strip()
+    raw_price = request.form.get("selling_price", "").strip()
+    raw_cost = request.form.get("cost_price", "").strip()
+    raw_stock = request.form.get("stock_quantity", "").strip()
+    if not name:
+        flash("Enter a product name before saving this arrival.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store_id))
+
+    store = Store.query.filter_by(id=store_id, business_id=current_user.business_id, is_active=True).first()
+    if not store:
+        flash("Choose an active mart before saving the product.", "error")
+        return redirect(url_for("admin.new_arrivals"))
+    if category_id and not Category.query.filter_by(
+        id=category_id, business_id=current_user.business_id, is_active=True
+    ).first():
+        flash("Choose a valid category.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    try:
+        price = Decimal(raw_price) if raw_price else Decimal("0")
+        cost = Decimal(raw_cost) if raw_cost else Decimal("0")
+        quantity = Decimal(raw_stock) if raw_stock else Decimal("0")
+    except (InvalidOperation, ValueError, TypeError):
+        flash("Enter valid numbers for selling price, cost and quantity.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    if not all(value.is_finite() for value in (price, cost, quantity)) or price < 0 or cost < 0 or quantity < 0:
+        flash("Prices and opening stock must be finite, non-negative numbers.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    if price > 0 and price < cost:
+        flash("Selling price cannot be below cost price.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    asset_alias = arrival_alias(filename)
+    asset_link = ProductAlias.query.filter_by(alias=asset_alias, alias_type=ARRIVAL_ALIAS_TYPE).first()
+    product = db.session.get(Product, asset_link.product_id) if asset_link else None
+    barcode_product = Product.query.filter_by(barcode=barcode).first() if barcode else None
+    if product and barcode_product and product.id != barcode_product.id:
+        flash("That barcode already belongs to a different product. Check the code before continuing.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    if not product:
+        product = barcode_product
+    if product and barcode_product and re.fullmatch(r"New Product \d+", name, flags=re.IGNORECASE):
+        name = product.name
+
+    if sku:
+        sku_product = Product.query.filter_by(sku=sku).first()
+        if sku_product and (product is None or sku_product.id != product.id):
+            flash("That SKU is already assigned to another product.", "error")
+            return redirect(url_for("admin.new_arrivals", store_id=store.id))
+
+    if product:
+        foreign_link = (StoreProduct.query.join(Store, Store.id == StoreProduct.store_id)
+                        .filter(StoreProduct.product_id == product.id, Store.business_id != current_user.business_id).first())
+        if foreign_link:
+            flash("That barcode is attached to another business catalogue and cannot be changed here.", "error")
+            return redirect(url_for("admin.new_arrivals", store_id=store.id))
+        # The administrator has explicitly supplied the correct name for this photo.
+        product.name = name
+        product.brand = brand or product.brand
+        if category_id:
+            product.category_id = category_id
+        if barcode:
+            conflict = Product.query.filter(Product.barcode == barcode, Product.id != product.id).first()
+            if conflict:
+                flash("That barcode already belongs to another product.", "error")
+                return redirect(url_for("admin.new_arrivals", store_id=store.id))
+            product.barcode = barcode
+        if sku:
+            product.sku = sku
+        if not product.image_url:
+            product.image_url = ARRIVAL_STATIC_PREFIX + filename
+        product.search_keywords = " ".join(x for x in [name.lower(), (product.brand or "").lower()] if x)
+    else:
+        from seed import slugify
+        base_slug = slugify(name) or "product"
+        slug, number = base_slug, 2
+        while Product.query.filter_by(slug=slug).first():
+            slug = f"{base_slug}-{number}"
+            number += 1
+        product = Product(
+            name=name, slug=slug, brand=brand, category_id=category_id, barcode=barcode, sku=sku,
+            unit="unit", pack_size="unit", image_url=ARRIVAL_STATIC_PREFIX + filename,
+            status="ACTIVE", search_keywords=" ".join(x for x in [name.lower(), (brand or "").lower()] if x),
+        )
+        db.session.add(product)
+        db.session.flush()
+
+    store_product = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
+    effective_cost = cost if raw_cost else (Decimal(str(store_product.cost_price or 0)) if store_product else cost)
+    effective_price = price if price > 0 else (Decimal(str(store_product.selling_price or 0)) if store_product else Decimal("0"))
+    if (effective_price > 0 and effective_price < effective_cost) or (effective_price == 0 and effective_cost > 0):
+        db.session.rollback()
+        flash("Selling price must be above this mart's cost price. Leave both price fields blank for an unpriced draft.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    if not store_product:
+        store_product = StoreProduct(
+            store_id=store.id, product_id=product.id, cost_price=cost, selling_price=price,
+            minimum_price=price, maximum_price=(price * Decimal("1.30") if price > 0 else None),
+            stock_quantity=Decimal("0"), reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
+            is_available=price > 0, available_online=price > 0, available_pos=price > 0,
+        )
+        db.session.add(store_product)
+        db.session.flush()
+    else:
+        old_price = Decimal(str(store_product.selling_price or 0))
+        if price > 0 and price != old_price:
+            db.session.add(PriceHistory(
+                store_product_id=store_product.id, old_price=old_price, new_price=price,
+                reason="Price set while identifying a new arrival", source="NEW_ARRIVAL_SETUP",
+                changed_by=current_user.id,
+            ))
+            store_product.selling_price = price
+            store_product.minimum_price = price
+            store_product.maximum_price = price * Decimal("1.30")
+            store_product.is_available = True
+            store_product.available_online = True
+            store_product.available_pos = True
+        if raw_cost:
+            store_product.cost_price = cost
+
+    if quantity > 0:
+        store_product.stock_quantity = Decimal(str(store_product.stock_quantity or 0)) + quantity
+        db.session.add(InventoryTransaction(
+            store_id=store.id, product_id=product.id, transaction_type="OPENING_STOCK" if store_product.stock_quantity == quantity else "ADJUSTMENT_IN",
+            quantity=quantity, unit_cost=store_product.cost_price, reference_type="NEW_ARRIVAL_SETUP",
+            reference_id=store_product.id, notes="Opening stock entered while identifying a new arrival",
+            created_by=current_user.id,
+        ))
+
+    if not ProductAlias.query.filter_by(product_id=product.id, alias=name, alias_type="SEARCH").first():
+        db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
+    if not ProductAlias.query.filter_by(product_id=product.id, alias=asset_alias, alias_type=ARRIVAL_ALIAS_TYPE).first():
+        db.session.add(ProductAlias(product_id=product.id, alias=asset_alias, alias_type=ARRIVAL_ALIAS_TYPE))
+    from services.catalogue_feeder import mark_local_override
+    mark_local_override(current_user.business_id, product.id)
+    db.session.commit()
+    audit("NEW_ARRIVAL_PRODUCT_LINKED", "Product", product.id, new_values={
+        "name": product.name, "barcode": product.barcode, "arrival_photo": filename,
+        "store_id": store.id, "selling_price": str(store_product.selling_price),
+        "stock_quantity_added": str(quantity),
+    })
+    if store_product.selling_price and store_product.selling_price > 0:
+        flash(f"{product.name} is now a searchable product. Its price and mart setup are saved.", "success")
+    else:
+        flash(f"{product.name} is saved as a draft with its photo and barcode. Add a selling price in Edit before enabling it for sale.", "success")
+    return redirect(url_for("admin.new_arrivals", store_id=store.id))
+
+
 @lru_cache(maxsize=1)
 def _product_catalogue_index():
     """Load the bundled product identity catalogue once per worker."""
@@ -999,8 +1188,11 @@ def save_product(product_id):
             numeric_values.append(sp.maximum_price)
         if not all(value.is_finite() for value in numeric_values):
             db.session.rollback(); flash("Cost, selling price, minimum/maximum price and stock must be finite numbers.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
-        if sp.cost_price < 0 or sp.selling_price <= 0 or sp.minimum_price < 0 or (sp.maximum_price is not None and sp.maximum_price < 0) or sp.reorder_level < 0:
-            db.session.rollback(); flash("Selling price must be positive; cost, price limits and reorder level cannot be negative.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.cost_price < 0 or sp.selling_price < 0 or sp.minimum_price < 0 or (sp.maximum_price is not None and sp.maximum_price < 0) or sp.reorder_level < 0:
+            db.session.rollback(); flash("Prices, price limits and reorder level cannot be negative.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        requested_enabled = request.form.get("enabled") == "1" and product.status == "ACTIVE"
+        if sp.selling_price == 0 and requested_enabled:
+            db.session.rollback(); flash("Add a positive selling price before enabling this product for online orders or POS sales.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         prices_changed = sp.cost_price != old_cost or sp.selling_price != old_selling_price
         if prices_changed and sp.selling_price < sp.cost_price:
             db.session.rollback(); flash(f"Selling price (KES {sp.selling_price:.2f}) cannot be below cost price (KES {sp.cost_price:.2f}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))

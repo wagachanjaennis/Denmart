@@ -295,6 +295,9 @@ def home():
     # First paint is intentionally bounded for mobile/free hosting; infinite scrolling
     # continues through the current database-backed catalogue without a giant query.
     products, total_products = catalogue_page(store, page=1, page_size=60) if store else ([], 0)
+    from services.new_arrivals import build_arrival_cards
+    arrivals = build_arrival_cards(current_app.root_path, store.business_id if store else None,
+                                   store.id if store else None)
     return render_template(
         "shop/home.html",
         stores=active_stores(),
@@ -302,6 +305,7 @@ def home():
         products=products,
         categories=categories,
         total_products=total_products,
+        arrivals=arrivals,
     )
 
 @bp.get("/shop")
