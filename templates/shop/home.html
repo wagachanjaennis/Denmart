@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block content %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/denmart-new-arrivals.css') }}?v=20261107-new-arrivals">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/denmart-new-arrivals.css') }}?v=20261111-arrivals-linked-v2">
 <div class="shop-home-layout denmart-home-v2">
   <div class="home-category-toolbar" aria-label="Shop categories">
     <div class="home-priority-categories">
@@ -42,13 +42,23 @@
       </div>
       <div class="denmart-arrival-grid" aria-label="New arrivals at Denmart">
         {% for arrival in arrivals %}
-          {% set item_name = arrival.product.name if arrival.product else 'New arrival' %}
-          {% set item_ready = arrival.store_product and arrival.store_product.is_available and arrival.store_product.available_online and arrival.store_product.selling_price and arrival.store_product.selling_price > 0 %}
-          <a class="denmart-arrival-tile" href="{{ url_for('shop.product', slug=arrival.product.slug) if item_ready else '/shop' }}" aria-label="{{item_name}}">
-            <img src="{{ url_for('static', filename='catalogue/new-arrivals/' ~ arrival.filename) }}" alt="{{item_name}}" loading="{{ 'eager' if loop.index <= 8 else 'lazy' }}" decoding="async">
-            <span>{{item_name}}</span>
-            {% if item_ready %}<small>KES {{'%.2f'|format(arrival.store_product.selling_price|float)}}</small>{% elif arrival.product %}<small>Price being updated</small>{% endif %}
-          </a>
+          {% set item_name = arrival.product.name if arrival.product else arrival.default_name %}
+          {% set sp = arrival.store_product %}
+          {% set item_ready = sp and sp.is_available and sp.available_online and sp.selling_price and sp.selling_price > 0 and (sp.stock_quantity|float) > (sp.reserved_quantity|float) %}
+          <article class="denmart-arrival-tile">
+            <a class="denmart-arrival-link" href="{{ url_for('shop.product', slug=arrival.product.slug) if arrival.product and arrival.store_product else '/shop' }}{% if store %}?store={{store.code}}{% endif %}" aria-label="View {{item_name}}">
+              <img src="{{ url_for('static', filename='catalogue/new-arrivals/' ~ arrival.filename) }}" alt="{{item_name}}" loading="{{ 'eager' if loop.index <= 8 else 'lazy' }}" decoding="async">
+              <span>{{item_name}}</span>
+            </a>
+            {% if item_ready %}
+              <strong class="arrival-shop-price">KES {{'%.2f'|format(sp.selling_price|float)}}</strong>
+              <button class="arrival-add-button" type="button" data-cart-id="{{sp.id}}" data-cart-name="{{item_name}}" data-cart-price="{{sp.selling_price}}">Add to basket</button>
+            {% elif sp and sp.selling_price and sp.selling_price > 0 %}
+              <small class="arrival-shop-status">Currently unavailable</small>
+            {% else %}
+              <small class="arrival-shop-status">Price being updated</small>
+            {% endif %}
+          </article>
         {% endfor %}
       </div>
     </section>
@@ -73,6 +83,9 @@
  opener.addEventListener('click',()=>drawer.classList.contains('open')?closeDrawer():openDrawer());closer.addEventListener('click',closeDrawer);backdrop.addEventListener('click',closeDrawer);
  function filter(value,label){const target=new URL(value==='all'?'/':'/shop',location.origin);if(value!=='all')target.searchParams.set('category',String(value));const store='{{store.code if store else ''}}';if(store)target.searchParams.set('store',store);location.href=target.pathname+target.search;}
  document.querySelectorAll('[data-category-filter]').forEach(b=>b.addEventListener('click',()=>filter(b.dataset.categoryFilter,b.textContent.trim())));
+ document.querySelectorAll('.arrival-add-button[data-cart-id]').forEach(button=>button.addEventListener('click',()=>{
+   if(typeof window.addToCart==='function') window.addToCart(button.dataset.cartId,button.dataset.cartName,Number(button.dataset.cartPrice||0));
+ }));
  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
 })();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){}); } catch (_) {}

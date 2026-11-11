@@ -2,7 +2,7 @@
 {% block body_class %}admin-page{% endblock %}
 {% block chrome %}{% endblock %}
 {% block content %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/admin-new-arrivals.css') }}?v=20261111-arrivals-manager">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/admin-new-arrivals.css') }}?v=20261111-arrivals-linked-v2">
 <div class="control-shell">
   {% set admin_sidebar_class='control-sidebar' %}
   {% include 'admin/_nav.html' %}
@@ -19,12 +19,19 @@
     </section>
 
     <section class="admin-panel arrival-help-panel">
-      <div><strong>How to process them</strong><p>Give the item a proper name, scan or type its barcode, and add its price. You can also save it as a draft with no price; drafts stay off the public shop and POS until a selling price is entered.</p></div>
+      <div><strong>How to process them</strong><p>Register the full photo set once to create real product records with starter names and attached photos. They will then appear in Admin → Products, where you can search, rename, barcode, price and edit stock. Drafts stay off the public shop until a real price and stock are entered and you enable them.</p></div>
       <form method="get" action="/control/new-arrivals" class="arrival-toolbar">
         <label>Mart for new products<select class="admin-input" name="store_id" required>{% for store in stores %}<option value="{{store.id}}" {% if store.id==store_id %}selected{% endif %}>{{store.name}}</option>{% endfor %}</select></label>
         <label>Find a photo or saved product<input class="admin-input" name="q" value="{{q}}" placeholder="Search New Product 1, name, brand, barcode…"></label>
         <button class="admin-action">Search</button>
       </form>
+      {% if pending_count %}
+      <form method="post" action="/control/new-arrivals/register-all" class="arrival-register-all-form" onsubmit="return confirm('Register all {{total_count}} arrival photos as searchable draft products? No prices or stock will be invented.');">
+        <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+        <input type="hidden" name="store_id" value="{{store_id}}">
+        <button class="admin-action arrival-save-button" type="submit">Register all {{total_count}} arrivals as products</button>
+      </form>
+      {% endif %}
     </section>
 
     <section class="arrival-gallery-section">
@@ -54,7 +61,7 @@
                 <form method="post" action="{{url_for('admin.create_product_from_arrival', filename=item.filename)}}" class="arrival-create-form">
                   <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
                   <input type="hidden" name="store_id" value="{{store_id}}">
-                  <label>Product name<input class="admin-input" name="name" value="New Product {{item.number}}" maxlength="240" required></label>
+                  <label>Product name<input class="admin-input" name="name" value="{{item.default_name}}" maxlength="240" required></label>
                   <label>Brand <input class="admin-input" name="brand" maxlength="160" placeholder="Optional"></label>
                   <label>Barcode <input class="admin-input" name="barcode" maxlength="80" inputmode="numeric" autocomplete="off" placeholder="Scan barcode or leave blank"></label>
                   <label>Category<select class="admin-input" name="category_id"><option value="">Choose later</option>{% for category in categories %}<option value="{{category.id}}">{{category.name}}</option>{% endfor %}</select></label>

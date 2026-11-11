@@ -365,12 +365,23 @@ def sitemap_xml():
 @bp.get("/product/<slug>")
 def product(slug):
     store = selected_store()
-    item = (StoreProduct.query.join(Product)
-            .filter(Product.slug == slug, StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True), Product.status == "ACTIVE")
-            .filter(StoreProduct.store_id == store.id if store else True).first_or_404())
+    if not store:
+        return ("", 404)
+    base_query = (StoreProduct.query.join(Product)
+                  .filter(Product.slug == slug, StoreProduct.store_id == store.id, Product.status == "ACTIVE"))
+    item = base_query.filter(StoreProduct.is_available.is_(True), StoreProduct.available_online.is_(True)).first()
+    if not item:
+        # A newly registered arrival can be viewed while its price/stock is being
+        # entered, but only when its source-photo marker belongs to this catalogue.
+        from services.new_arrivals import ARRIVAL_ALIAS_TYPE
+        item = (base_query.join(ProductAlias, ProductAlias.product_id == Product.id)
+                .filter(ProductAlias.alias_type == ARRIVAL_ALIAS_TYPE).first())
+    if not item:
+        return ("", 404)
     _attach_saved_product_images([item])
-    from services.catalogue_feeder import apply_online_feeder_overlay
-    apply_online_feeder_overlay([item], store.business_id if store else None)
+    if item.is_available and item.available_online and item.selling_price and item.selling_price > 0:
+        from services.catalogue_feeder import apply_online_feeder_overlay
+        apply_online_feeder_overlay([item], store.business_id)
     return render_template("shop/product.html", item=item, store=store)
 
 

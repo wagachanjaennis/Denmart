@@ -353,6 +353,100 @@ def products():
     )
 
 
+@bp.post(f"{ADMIN_BASE}/new-arrivals/register-all")
+@admin_required("products.create")
+def register_all_new_arrivals():
+    """Create searchable, disabled Product + StoreProduct drafts for all bundled arrival photos."""
+    from services.new_arrivals import (
+        ARRIVAL_ALIAS_TYPE, ARRIVAL_STATIC_PREFIX, arrival_alias,
+        default_arrival_name, list_arrival_photos,
+    )
+
+    store_id = request.form.get("store_id", "").strip()
+    store = Store.query.filter_by(id=store_id, business_id=current_user.business_id, is_active=True).first()
+    if not store:
+        flash("Choose an active mart before registering the arrival products.", "error")
+        return redirect(url_for("admin.new_arrivals"))
+
+    created = 0
+    linked = 0
+    photos = list_arrival_photos(current_app.root_path)
+    try:
+        for number, filename in enumerate(photos, start=1):
+            marker = arrival_alias(filename)
+            asset_link = (ProductAlias.query.join(Product, Product.id == ProductAlias.product_id)
+                          .join(StoreProduct, StoreProduct.product_id == Product.id)
+                          .join(Store, Store.id == StoreProduct.store_id)
+                          .filter(Store.business_id == current_user.business_id,
+                                  ProductAlias.alias == marker,
+                                  ProductAlias.alias_type == ARRIVAL_ALIAS_TYPE).first())
+            product = db.session.get(Product, asset_link.product_id) if asset_link else None
+
+            # Recognise a product already linked by its exact bundled photo.
+            if not product:
+                product = (Product.query.join(StoreProduct, StoreProduct.product_id == Product.id)
+                           .join(Store, Store.id == StoreProduct.store_id)
+                           .filter(Store.business_id == current_user.business_id,
+                                   Product.image_url == ARRIVAL_STATIC_PREFIX + filename).first())
+
+            if not product:
+                name = default_arrival_name(filename, number)
+                base = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or f"new-arrival-{number}"
+                slug = f"{base}-arrival-{number}"
+                suffix = 2
+                while Product.query.filter_by(slug=slug).first():
+                    slug = f"{base}-arrival-{number}-{suffix}"
+                    suffix += 1
+                product = Product(
+                    name=name, slug=slug, image_url=ARRIVAL_STATIC_PREFIX + filename,
+                    unit="unit", pack_size="unit", status="ACTIVE",
+                    search_keywords=f"{name.casefold()} new product {number} new arrival",
+                )
+                db.session.add(product)
+                db.session.flush()
+                created += 1
+            else:
+                linked += 1
+                if not product.image_url:
+                    product.image_url = ARRIVAL_STATIC_PREFIX + filename
+
+            store_product = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
+            if not store_product:
+                store_product = StoreProduct(
+                    store_id=store.id, product_id=product.id,
+                    cost_price=Decimal("0"), selling_price=Decimal("0"),
+                    minimum_price=Decimal("0"), maximum_price=None,
+                    stock_quantity=Decimal("0"), reserved_quantity=Decimal("0"),
+                    reorder_level=Decimal("0"), is_available=False,
+                    available_online=False, available_pos=False,
+                )
+                db.session.add(store_product)
+
+            # A permanent asset marker links this exact image to its DB product.
+            if not ProductAlias.query.filter_by(product_id=product.id, alias=marker, alias_type=ARRIVAL_ALIAS_TYPE).first():
+                db.session.add(ProductAlias(product_id=product.id, alias=marker, alias_type=ARRIVAL_ALIAS_TYPE))
+            # Preserve the former generic identifiers as searchable aliases, too.
+            generic_aliases = (f"New Product {number}", f"New Arrival {number}")
+            for generic_alias in generic_aliases:
+                if not ProductAlias.query.filter_by(product_id=product.id, alias=generic_alias, alias_type="SEARCH").first():
+                    db.session.add(ProductAlias(product_id=product.id, alias=generic_alias, alias_type="SEARCH"))
+            if product.name and not ProductAlias.query.filter_by(product_id=product.id, alias=product.name, alias_type="SEARCH").first():
+                db.session.add(ProductAlias(product_id=product.id, alias=product.name, alias_type="SEARCH"))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not register all new-arrival products")
+        flash("The arrival import could not be completed. No partial changes were saved; check the application log.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+
+    audit("NEW_ARRIVALS_REGISTERED", "Store", store.id, new_values={
+        "photos": len(photos), "created_products": created, "already_linked": linked,
+    })
+    flash(f"Registered {len(photos)} arrival photos: {created} new product records created and {linked} already linked. All are drafts with no invented price or stock. Search by the product name or ‘New Product 1’ in Products.", "success")
+    return redirect(url_for("admin.products", q="New arrival", store_id=store.id))
+
+
 @bp.get(f"{ADMIN_BASE}/new-arrivals")
 @admin_required("products.view")
 def new_arrivals():
@@ -1191,10 +1285,13 @@ def save_product(product_id):
         if sp.cost_price < 0 or sp.selling_price < 0 or sp.minimum_price < 0 or (sp.maximum_price is not None and sp.maximum_price < 0) or sp.reorder_level < 0:
             db.session.rollback(); flash("Prices, price limits and reorder level cannot be negative.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         requested_enabled = request.form.get("enabled") == "1" and product.status == "ACTIVE"
+        wants_enabled = requested_enabled
+        wants_online = request.form.get("online") == "1"
+        wants_pos = request.form.get("pos") == "1"
         if sp.selling_price == 0 and requested_enabled:
             db.session.rollback(); flash("Add a positive selling price before enabling this product for online orders or POS sales.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         prices_changed = sp.cost_price != old_cost or sp.selling_price != old_selling_price
-        if prices_changed and sp.selling_price < sp.cost_price:
+        if prices_changed and sp.selling_price > 0 and sp.selling_price < sp.cost_price:
             db.session.rollback(); flash(f"Selling price (KES {sp.selling_price:.2f}) cannot be below cost price (KES {sp.cost_price:.2f}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         if new_stock < 0 or new_stock < Decimal(str(sp.reserved_quantity or 0)):
             db.session.rollback(); flash(f"Stock cannot fall below reserved quantity ({sp.reserved_quantity}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
@@ -1209,9 +1306,9 @@ def save_product(product_id):
                 notes=("Stock increased in product editor" if stock_delta > 0 else "Stock reduced in product editor"),
                 created_by=current_user.id,
             ))
-        sp.is_available = request.form.get("enabled") == "1" and product.status == "ACTIVE"
-        sp.available_online = request.form.get("online") == "1" and sp.is_available
-        sp.available_pos = request.form.get("pos") == "1" and sp.is_available
+        sp.is_available = wants_enabled and product.status == "ACTIVE" and sp.selling_price > 0
+        sp.available_online = wants_online and sp.is_available
+        sp.available_pos = wants_pos and sp.is_available
     alias = ProductAlias.query.filter_by(product_id=product.id, alias=product.name).first()
     if not alias: db.session.add(ProductAlias(product_id=product.id, alias=product.name, alias_type="SEARCH"))
     if product.barcode != old["barcode"] or product.image_url != old["image_url"]:
