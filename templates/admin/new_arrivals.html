@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block body_class %}admin-page{% endblock %}
+{% block chrome %}{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/admin-new-arrivals.css') }}?v=20261111-arrivals-manager">
+<div class="control-shell">
+  {% set admin_sidebar_class='control-sidebar' %}
+  {% include 'admin/_nav.html' %}
+  <main class="control-main arrivals-admin-main">
+    <header class="control-header">
+      <div><span class="eyebrow">CATALOGUE ENRICHMENT</span><h1>New arrivals</h1><p>Turn each of the new-arrival photos into a real, searchable Denmart product.</p></div>
+      <a class="admin-action secondary-action" href="/control/products">Open full product catalogue</a>
+    </header>
+
+    <section class="arrival-stats" aria-label="New arrival progress">
+      <div class="arrival-stat"><span>Photos found</span><strong>{{total_count}}</strong></div>
+      <div class="arrival-stat"><span>Linked to products</span><strong>{{linked_count}}</strong></div>
+      <div class="arrival-stat"><span>Waiting for names</span><strong>{{pending_count}}</strong></div>
+    </section>
+
+    <section class="admin-panel arrival-help-panel">
+      <div><strong>How to process them</strong><p>Give the item a proper name, scan or type its barcode, and add its price. You can also save it as a draft with no price; drafts stay off the public shop and POS until a selling price is entered.</p></div>
+      <form method="get" action="/control/new-arrivals" class="arrival-toolbar">
+        <label>Mart for new products<select class="admin-input" name="store_id" required>{% for store in stores %}<option value="{{store.id}}" {% if store.id==store_id %}selected{% endif %}>{{store.name}}</option>{% endfor %}</select></label>
+        <label>Find a photo or saved product<input class="admin-input" name="q" value="{{q}}" placeholder="Search New Product 1, name, brand, barcode…"></label>
+        <button class="admin-action">Search</button>
+      </form>
+    </section>
+
+    <section class="arrival-gallery-section">
+      <div class="arrival-gallery-heading"><div><h2>Photo-by-photo editor</h2><p class="muted">{{items|length}} results · unregistered photos can be named below</p></div><a class="admin-action secondary-action" href="/control/new-arrivals?store_id={{store_id}}">Show all photos</a></div>
+      <div class="arrival-admin-grid">
+        {% for item in items %}
+          <article class="arrival-admin-card {% if item.product %}is-registered{% else %}is-pending{% endif %}">
+            <div class="arrival-photo-wrap"><img src="{{item.image_url}}" alt="Arrival photo {{item.number}}" loading="lazy"><span class="arrival-photo-number">PHOTO {{'%02d'|format(item.number)}}</span></div>
+            {% if item.product %}
+              <div class="arrival-card-body">
+                <span class="arrival-state registered">Already in catalogue</span>
+                <h3>{{item.product.name}}</h3>
+                <p class="arrival-product-meta">{{item.product.brand or 'Unbranded'}}{% if item.product.barcode %} · {{item.product.barcode}}{% elif item.product.sku %} · {{item.product.sku}}{% endif %}</p>
+                {% if item.store_product %}
+                  {% if item.store_product.selling_price and item.store_product.selling_price > 0 %}<strong class="arrival-price">KES {{'%.2f'|format(item.store_product.selling_price|float)}}</strong>{% else %}<strong class="arrival-price missing">Price not set</strong>{% endif %}
+                  <small class="arrival-product-meta">{{item.store_product.store.name}} · {{'Available' if item.store_product.is_available else 'Draft / disabled'}}</small>
+                  <a class="admin-action arrival-edit-link" href="{{url_for('admin.product_edit', product_id=item.product.id, store_id=item.store_product.store_id)}}">Edit name, barcode, price & stock</a>
+                {% else %}
+                  <strong class="arrival-price missing">No mart link</strong>
+                  <a class="admin-action arrival-edit-link" href="{{url_for('admin.product_edit', product_id=item.product.id)}}">Open product editor</a>
+                {% endif %}
+              </div>
+            {% else %}
+              <div class="arrival-card-body">
+                <span class="arrival-state pending">Needs product details</span>
+                <h3>New Product {{item.number}}</h3>
+                <form method="post" action="{{url_for('admin.create_product_from_arrival', filename=item.filename)}}" class="arrival-create-form">
+                  <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+                  <input type="hidden" name="store_id" value="{{store_id}}">
+                  <label>Product name<input class="admin-input" name="name" value="New Product {{item.number}}" maxlength="240" required></label>
+                  <label>Brand <input class="admin-input" name="brand" maxlength="160" placeholder="Optional"></label>
+                  <label>Barcode <input class="admin-input" name="barcode" maxlength="80" inputmode="numeric" autocomplete="off" placeholder="Scan barcode or leave blank"></label>
+                  <label>Category<select class="admin-input" name="category_id"><option value="">Choose later</option>{% for category in categories %}<option value="{{category.id}}">{{category.name}}</option>{% endfor %}</select></label>
+                  <div class="arrival-price-fields">
+                    <label>Selling price (KES)<input class="admin-input" name="selling_price" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Optional"></label>
+                    <label>Cost (KES)<input class="admin-input" name="cost_price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Optional"></label>
+                  </div>
+                  <label>Opening stock <input class="admin-input" name="stock_quantity" type="number" min="0" step="0.001" inputmode="decimal" placeholder="Optional"></label>
+                  <button class="admin-action arrival-save-button" type="submit">Save product from photo</button>
+                  <small class="arrival-form-note">Leave price blank to save as a disabled draft. Add the correct price before making it available.</small>
+                </form>
+              </div>
+            {% endif %}
+          </article>
+        {% else %}
+          <div class="arrival-no-results">No arrival photos or products match that search. Try a different name or barcode.</div>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+</div>
+{% endblock %}
