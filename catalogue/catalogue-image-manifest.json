@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-25-no-fake-assets-v3",
+  "version": "2026-11-11-denmart-neutral-v2",
   "image_prefix": "/static/catalogue/products/",
   "products": {
     "25596c5d-1a4c-4cf8-bdf8-966ff0f8b834": {
@@ -6818,9 +6818,10 @@
       "url": "",
       "file": "",
       "type": "pending_real_photo",
-      "source_url": "https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720",
+      "source_url": "",
       "local_cached": true,
-      "needs_real_photo": true
+      "needs_real_photo": true,
+      "source_kind": ""
     },
     "bf0dcad7-6e7d-4198-9725-9f7aa3903fda": {
       "name": "Kericho Gold Tea Bags 25s",
@@ -8311,215 +8312,6 @@
       "name": "Mwea Rice 5kg",
       "brand": "Various",
       "barcode": "290664653285",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "47022229-a1b7-4321-8e46-e4660c745337": {
-      "name": "Naivas Brown Bread 400g",
-      "brand": "Naivas",
-      "barcode": "290683353104",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "d6087d32-1734-478f-9594-592c57feae73": {
-      "name": "Naivas Brown Bread 600g",
-      "brand": "Naivas",
-      "barcode": "290786572675",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "e9beac2e-5bac-49ee-8c9b-37cc93729f26": {
-      "name": "Naivas Brown Bread 800g",
-      "brand": "Naivas",
-      "barcode": "290366557006",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "cbde5850-6f68-4ac4-a759-38e63d9a23c0": {
-      "name": "Naivas Corn Flakes 1kg",
-      "brand": "Naivas",
-      "barcode": "290263611219",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "e0d21f7f-48e2-4e2c-ad68-79ad185328f5": {
-      "name": "Naivas Corn Flakes 250g",
-      "brand": "Naivas",
-      "barcode": "290176641214",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "629e1082-6b0d-4200-ab19-837536e799a6": {
-      "name": "Naivas Corn Flakes 500g",
-      "brand": "Naivas",
-      "barcode": "290826134688",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "bc15f8fa-8b8b-43d5-938f-6db5f0164ad1": {
-      "name": "Naivas Fresh White Bread 800g",
-      "brand": "Naivas",
-      "barcode": "290170119838",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "61709069-67a0-41e8-9da3-a1cfb2403141": {
-      "name": "Naivas Milk Buns 4s",
-      "brand": "Naivas",
-      "barcode": "290609720896",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "cd34ab26-0ef1-4299-80ee-6066374b66bb": {
-      "name": "Naivas Milk Buns 6s",
-      "brand": "Naivas",
-      "barcode": "290142239236",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "1d09325f-f9af-47e9-8e38-24e960e2a805": {
-      "name": "Naivas Milk Buns 8s",
-      "brand": "Naivas",
-      "barcode": "290574376519",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "ea461455-ac38-4bce-b213-8cdab3bf1e3b": {
-      "name": "Naivas Muesli 1kg",
-      "brand": "Naivas",
-      "barcode": "290246311825",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "43522135-dc81-46d3-b905-5f0dcdede384": {
-      "name": "Naivas Muesli 2kg",
-      "brand": "Naivas",
-      "barcode": "290409875978",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "bcdf4e6a-15db-4efc-8b9c-f954a8915737": {
-      "name": "Naivas Muesli 500g",
-      "brand": "Naivas",
-      "barcode": "290206694631",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "5011b006-dcda-4d0e-8214-a1c17baa4cf2": {
-      "name": "Naivas White Beans 1kg",
-      "brand": "Naivas",
-      "barcode": "290946374016",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "cf9f4b3d-f7dc-4d2f-8f97-cab28c380114": {
-      "name": "Naivas White Beans 2kg",
-      "brand": "Naivas",
-      "barcode": "290926879666",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "b8bf8ca9-e72c-47fb-92a1-cf8c8f40ed7e": {
-      "name": "Naivas White Beans 500g",
-      "brand": "Naivas",
-      "barcode": "290731155874",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "c91bc66c-58df-4c47-813e-7a17eeb46df1": {
-      "name": "Naivas White Bread 400g",
-      "brand": "Naivas",
-      "barcode": "290370162808",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "9042e198-ef95-44a5-97d7-4dcb75eebbbe": {
-      "name": "Naivas White Bread 600g",
-      "brand": "Naivas",
-      "barcode": "290301794601",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "3decd172-d53b-4f46-b55a-679b1f4a13ef": {
-      "name": "Naivas White Bread 800g",
-      "brand": "Naivas",
-      "barcode": "290800743229",
       "url": "",
       "file": "",
       "type": "pending_real_photo",
@@ -12762,28 +12554,6 @@
       "local_cached": false,
       "needs_real_photo": true
     },
-    "93382222-b6a6-456e-8473-538869a6f2ad": {
-      "name": "Tuskys Brown Bread 400g",
-      "brand": "Tuskys",
-      "barcode": "290976246087",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
-    "fa1d39f0-2a8e-4d80-bd52-a51456783589": {
-      "name": "Tuskys White Bread 400g",
-      "brand": "Tuskys",
-      "barcode": "290457599321",
-      "url": "",
-      "file": "",
-      "type": "pending_real_photo",
-      "source_url": "",
-      "local_cached": false,
-      "needs_real_photo": true
-    },
     "aa480623-68d2-4d7a-b352-173ff5c935b0": {
       "name": "Tuzo Fresh Milk 1L",
       "brand": "Tuzo",
@@ -14511,5 +14281,6 @@
       "local_cached": false,
       "needs_real_photo": true
     }
-  }
+  },
+  "priority_count": 1298
 }

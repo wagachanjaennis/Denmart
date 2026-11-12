@@ -91,7 +91,6 @@ Products with a curated real-image link are marked `type: photo` in the manifest
 | Kericho Gold Loose Leaf Tea 100g | Kericho Gold | https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg |
 | Kericho Gold Loose Leaf Tea 250g | Kericho Gold | https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg |
 | Kericho Gold Loose Leaf Tea 500g | Kericho Gold | https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg |
-| Kericho Gold Tea Bags 100s | Kericho Gold | https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720 |
 | Kericho Gold Tea Bags 25s | Kericho Gold | https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg |
 | Kericho Gold Tea Bags 50s | Kericho Gold | https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg |
 | Listerine Mouthwash 250ml | Listerine | https://images.openbeautyfacts.org/images/products/357/466/127/6496/front_en.8.400.jpg |
