@@ -6,7 +6,7 @@ This is deliberately a REAL-PHOTO-ONLY pipeline.
 Order of discovery:
   1) exact curated source URL already attached to the exact SKU
   2) OpenFoodFacts / OpenBeautyFacts / OpenPetFoodFacts / OpenProductsFacts text search
-  3) Kenyan retailer page discovery (Carrefour Kenya, Naivas, Owino, Artcaffe)
+  3) Exact product-facts database matches and curated manufacturer sources
 
 A source is accepted only when its page/data matches the product identity strongly enough.
 The script NEVER invents a product illustration and NEVER assigns one SKU another SKU's
@@ -45,12 +45,7 @@ BATCH_SIZE = 100
 TIMEOUT = float(os.getenv("PRODUCT_IMAGE_BUILD_TIMEOUT", "8"))
 MAX_BYTES = int(os.getenv("PRODUCT_IMAGE_MAX_BYTES", str(8 * 1024 * 1024)))
 USER_AGENT = "DenmartCatalogueImageCache/2026.09"
-RETAILERS = (
-    "carrefour.ke",
-    "naivas.online",
-    "owinosupermarket.com",
-    "artcaffemarket.co.ke",
-)
+RETAILERS: tuple[str, ...] = ()  # Retailer-page scraping is disabled; prefer product-facts registries.
 FACTS = (
     "https://world.openfoodfacts.org",
     "https://world.openbeautyfacts.org",
@@ -167,27 +162,8 @@ def unwrap_search_url(href: str) -> str:
 
 
 def retailer_search_urls(product: dict) -> list[tuple[str, str]]:
-    """Use one search-engine request per SKU, then keep only Kenyan retailer pages."""
-    query = f'"{product.get("brand", "")}" "{product.get("name", "")}" Kenya supermarket'
-    out: list[tuple[str, str]] = []
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}&kl=ke-en"
-    try:
-        r = http_get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
-        html = r.text
-        for raw in re.findall(r'<a[^>]+class=["\']result__a["\'][^>]+href=["\']([^"\']+)', html, re.I):
-            target = unwrap_search_url(raw)
-            host = urlparse(target).netloc.lower()
-            for domain in RETAILERS:
-                if host.endswith(domain):
-                    out.append((target, domain))
-                    break
-    except Exception:
-        return []
-    seen=set(); result=[]
-    for item in out:
-        if item[0] in seen: continue
-        seen.add(item[0]); result.append(item)
-    return result[:8]
+    """Retailer-page crawling is disabled; use exact public product-facts sources."""
+    return []
 
 
 def extract_page_images(page_url: str, product: dict) -> list[tuple[str, float, dict]]:
@@ -287,8 +263,7 @@ def source_candidates(product: dict, sources: dict, curated_owner: dict[str, str
         except Exception:
             pass
 
-    # Open Food Facts-family text search verifies name/brand/pack size. Only fall back
-    # to retailer page crawling if the facts catalogs return no credible candidate.
+    # Open Food Facts-family text search verifies name/brand/pack size.
     result=facts_search(product)
     if result:
         return result
