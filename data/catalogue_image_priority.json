@@ -1,7 +1,7 @@
 {
-  "version": "2026-09-22-priority-v5",
+  "version": "2026-11-11-image-priority-denmart-neutral-v2",
   "description": "First 500 high-expectation grocery and household SKUs; diversified first 300 with explicit priority for everyday Kenyan essentials. Real-photo cache, no fake catalogue fallback.",
-  "target_real_photos": 350,
+  "target_real_photos": 497,
   "priority_products": [
     {
       "product_id": "bd6c8982-1202-42dd-a165-46d14df43221",
@@ -1302,36 +1302,6 @@
       "pack_size": "bag",
       "category": "Rice, Flour, Pasta & Grains",
       "rank": 130
-    },
-    {
-      "product_id": "61709069-67a0-41e8-9da3-a1cfb2403141",
-      "name": "Naivas Milk Buns 4s",
-      "brand": "Naivas",
-      "barcode": "290609720896",
-      "slug": "naivas-milk-buns-4s",
-      "pack_size": "pack",
-      "category": "Bakery & Bread",
-      "rank": 131
-    },
-    {
-      "product_id": "cd34ab26-0ef1-4299-80ee-6066374b66bb",
-      "name": "Naivas Milk Buns 6s",
-      "brand": "Naivas",
-      "barcode": "290142239236",
-      "slug": "naivas-milk-buns-6s",
-      "pack_size": "pack",
-      "category": "Bakery & Bread",
-      "rank": 132
-    },
-    {
-      "product_id": "1d09325f-f9af-47e9-8e38-24e960e2a805",
-      "name": "Naivas Milk Buns 8s",
-      "brand": "Naivas",
-      "barcode": "290574376519",
-      "slug": "naivas-milk-buns-8s",
-      "pack_size": "pack",
-      "category": "Bakery & Bread",
-      "rank": 133
     },
     {
       "product_id": "e462658f-8f53-43a5-bd45-875947f18638",

@@ -23,6 +23,7 @@ from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryT
 from services.audit import audit
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
 from services.search import forgiving_rank
+from services.product_images import is_data_image_url
 
 bp = Blueprint("admin", __name__)
 ADMIN_BASE = "/control"
@@ -1252,11 +1253,11 @@ def save_product(product_id):
     try:
         if uploaded_image:
             _set_product_image(product, uploaded_image)
-        elif submitted_image_url:
-            _set_product_image(product, submitted_image_url, source_type="ADMIN_URL")
         elif request.form.get("remove_image") == "1":
             product.image_url = None
             ProductImage.query.filter_by(product_id=product.id).delete(synchronize_session=False)
+        elif submitted_image_url:
+            _set_product_image(product, submitted_image_url, source_type="ADMIN_URL")
     except ValueError as exc:
         db.session.rollback(); flash(str(exc), "error")
         return redirect(url_for("admin.product_edit", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
@@ -1392,8 +1393,32 @@ def update_price(store_product_id):
 
 
 
+@bp.get(f"{ADMIN_BASE}/stock")
+@bp.get(f"{ADMIN_BASE}/stock-room")
+@admin_required("inventory.view")
+def inventory_legacy_alias():
+    """Keep older Stock links working; Inventory is the canonical page."""
+    return redirect(url_for("admin.inventory", **request.args))
+
+
+@bp.get(f"{ADMIN_BASE}/orders")
+@bp.get(f"{ADMIN_BASE}/payments")
+@admin_required()
+def legacy_orders_alias():
+    """Send legacy order/payment menu links to the current unified Pay workspace."""
+    return redirect(url_for("pay.admin_pay"))
+
+
+@bp.get(f"{ADMIN_BASE}/payment-gateway")
+@admin_required()
+def legacy_gateway_alias():
+    """Keep old gateway bookmarks working with the current Android Gateway page."""
+    return redirect(url_for("admin.android_gateway_settings"))
+
+
 @bp.get(f"{ADMIN_BASE}/inventory")
 @bp.post(f"{ADMIN_BASE}/inventory/adjust")
+@bp.post(f"{ADMIN_BASE}/stock/adjust")
 @admin_required("inventory.view")
 def inventory():
     business_id = current_user.business_id

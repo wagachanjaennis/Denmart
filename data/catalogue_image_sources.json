@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-21-source-manifest-v2",
+  "version": "2026-11-11-image-sources-denmart-neutral-v2",
   "by_product_id": {
     "bd6c8982-1202-42dd-a165-46d14df43221": "https://cdn.mafrservices.com/sys-master-root/hb4/h24/12681202991134/82690_main.jpg?im=Resize%3D376",
     "8f829733-1d3f-41fd-9a5a-e8733b59c115": "https://cdn.mafrservices.com/sys-master-root/hb4/h24/12681202991134/82690_main.jpg?im=Resize%3D376",
@@ -57,7 +57,6 @@
     "fae61e02-c93e-458e-aa44-ea35e0eaa702": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
     "d45c5b47-f248-4087-829c-37ad0ae4a934": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
     "4aeba94c-a5a2-4d8d-baa2-ff68650164cf": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
-    "7c3db852-96f5-4bd2-90b4-72753f177788": "https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720",
     "0e958bdb-ba37-46eb-8e5b-994a72c86ded": "https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg",
     "b6e83e34-2d82-4068-a049-10ae1aef4243": "https://images.openfoodfacts.org/images/products/761/303/191/8737/front_en.3.400.jpg",
     "e5daa93a-cb5e-4433-a715-8a372b8301e5": "https://images.openfoodfacts.org/images/products/761/303/366/4199/front_el.3.400.jpg",
@@ -189,7 +188,6 @@
     "290725664541": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
     "290774677930": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
     "290241490359": "https://cdn.mafrservices.com/pim-content/KEN/media/product/31962/1720080003/31962_main.jpg?im=Resize%3D480",
-    "290500287192": "https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720",
     "290127367211": "https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg",
     "290143384479": "https://images.openfoodfacts.org/images/products/761/303/191/8737/front_en.3.400.jpg",
     "290192506825": "https://images.openfoodfacts.org/images/products/761/303/366/4199/front_el.3.400.jpg",

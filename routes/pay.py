@@ -254,6 +254,7 @@ def save_pay_settings():
 
 
 @bp.post("/control/pay/<order_id>/approve")
+@bp.post("/control/orders/<order_id>/payment/approve")
 @_admin_required
 def manual_approve_order(order_id):
     order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).first_or_404()
@@ -271,10 +272,11 @@ def manual_approve_order(order_id):
 
 
 @bp.post("/control/pay/<order_id>/fulfillment")
+@bp.post("/control/orders/<order_id>/fulfillment")
 @_admin_required
 def fulfillment(order_id):
     order = PayOrder.query.filter_by(id=order_id, business_id=current_user.business_id).first_or_404()
-    status = request.form.get("status", "").upper()
+    status = (request.form.get("status") or request.form.get("fulfillment_status") or "").upper()
     try:
         set_fulfillment(order, status, current_user.id)
         flash(f"{order.reference} moved to {status}.", "success")

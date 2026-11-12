@@ -98,7 +98,6 @@ REAL_PRODUCT_IMAGES = {
     'Kericho Gold Loose Leaf Tea 100g': 'https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg',
     'Kericho Gold Loose Leaf Tea 250g': 'https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg',
     'Kericho Gold Loose Leaf Tea 500g': 'https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg',
-    'Kericho Gold Tea Bags 100s': 'https://owinosupermarket.com/cdn/shop/files/rn-image_picker_lib_temp_d2b467a9-75d4-433d-99b6-2b86d6b6807f.jpg?v=1779035646&width=720',
     'Kericho Gold Tea Bags 25s': 'https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg',
     'Kericho Gold Tea Bags 50s': 'https://cdn.mafrservices.com/pim-content/QAT/media/product/1060856/1749999603/1060856_main.jpg',
     'Listerine Mouthwash 250ml': 'https://images.openbeautyfacts.org/images/products/357/466/127/6496/front_en.8.400.jpg',
