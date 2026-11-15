@@ -1,0 +1,13 @@
+/* Owner-controlled storefront preview and touch-friendly sorting. */
+.storefront-order-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
+.storefront-order-toolbar h2{margin:0 0 5px}.storefront-order-toolbar p{margin:0;max-width:680px}
+.storefront-order-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.storefront-order-card{position:relative;min-width:0;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border,#dce5e1);border-radius:14px;background:var(--panel,#fff);box-shadow:0 3px 12px rgba(20,50,35,.05);transition:opacity .12s,border-color .12s,transform .12s}
+.storefront-order-card img,.storefront-order-no-image{width:100%;height:132px;object-fit:contain;border-radius:10px;background:#f7f9f8}
+.storefront-order-no-image{display:grid;place-items:center;color:#718078;font-size:12px}
+.storefront-order-card-copy{display:grid;gap:4px}.storefront-order-card-copy strong{font-size:13px;line-height:1.35;min-height:34px}.storefront-order-card-copy span{font-size:13px;font-weight:800}.storefront-order-card-copy small{font-size:11px;color:var(--muted,#6b7971)}
+.storefront-drag-handle{position:absolute;z-index:2;top:14px;left:14px;width:38px;height:38px;border:1px solid #d9e2dd;border-radius:10px;background:#fff;color:#1b5942;font-size:23px;line-height:1;cursor:grab;touch-action:none;box-shadow:0 2px 8px rgba(0,0,0,.10)}
+.storefront-drag-handle:active{cursor:grabbing}.storefront-order-card.is-dragging{opacity:.4;border:2px dashed #19835d}.storefront-order-card.is-over{outline:2px solid #19835d;outline-offset:2px}
+.storefront-order-arrows{display:flex;justify-content:flex-end;gap:6px}.storefront-order-arrows button{width:34px;height:32px;border:1px solid var(--border,#dce5e1);border-radius:8px;background:#fff;font-size:17px;cursor:pointer}
+.storefront-order-footnote{margin:16px 0 0}.storefront-order-toolbar .primary-btn{white-space:nowrap}
+@media(max-width:640px){.storefront-order-toolbar{align-items:flex-start;flex-direction:column}.storefront-order-toolbar .primary-btn{width:100%}.storefront-order-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.storefront-order-card{padding:8px}.storefront-order-card img,.storefront-order-no-image{height:112px}}
