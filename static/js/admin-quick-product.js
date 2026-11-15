@@ -15,7 +15,7 @@
     feedback.className = `quick-product-feedback ${good ? 'success' : 'error'}`;
   }
   function clearForNext() {
-    for (const key of ['barcode','name','selling_price','cost_price','stock_quantity','brand','sku','pack_size','weight_kg','description']) {
+    for (const key of ['barcode','name','selling_price','cost_price','minimum_price','maximum_price','stock_quantity','brand','sku','pack_size','weight_kg','description']) {
       const field = form.elements.namedItem(key);
       if (field) field.value = key === 'pack_size' || key === 'brand' || key === 'sku' || key === 'description' ? '' : '';
     }

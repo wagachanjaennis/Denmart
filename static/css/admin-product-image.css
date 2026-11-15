@@ -39,3 +39,5 @@
 @media (max-width: 640px) {
   .product-photo-preview { width: 100%; max-width: 280px; height: 210px; }
 }
+
+.product-photo-editor .admin-form-grid{margin-top:10px}.product-photo-editor h2{margin:4px 0}.product-photo-editor .primary-btn{width:max-content}

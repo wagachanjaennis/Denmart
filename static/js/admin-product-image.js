@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const form = document.getElementById("productEditForm");
+  const form = document.getElementById("productImageForm");
   const input = document.getElementById("productImageInput");
   const preview = document.getElementById("productImagePreview");
   const empty = document.getElementById("productImageEmpty");
@@ -37,7 +37,7 @@
     preview.hidden = false;
     empty.hidden = true;
     if (remove) remove.checked = false;
-    status.textContent = `${file.name} — preview only; press Save product to store it.`;
+    status.textContent = `${file.name} — preview only; press Save photo only to store it.`;
   });
 
   if (remove) {
@@ -58,6 +58,19 @@
         empty.hidden = false;
         status.textContent = "Choose a photo to preview it here";
       }
+    });
+  }
+  const urlInput = document.getElementById("productImageUrl");
+  if (urlInput) {
+    urlInput.addEventListener("change", () => {
+      const value = urlInput.value.trim();
+      if (!value) return;
+      clearTemporaryUrl();
+      preview.src = value;
+      preview.hidden = false;
+      empty.hidden = true;
+      status.textContent = "Image URL preview — press Save photo only to store it.";
+      preview.onerror = () => { status.textContent = "The preview could not be loaded. The URL will be checked when saved."; };
     });
   }
   form.addEventListener("submit", clearTemporaryUrl);
