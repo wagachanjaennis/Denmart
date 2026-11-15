@@ -122,6 +122,10 @@ def catalogue_query(store=None, q="", category="", max_rows=2000):
     from services.catalogue_feeder import apply_online_feeder_overlay
     rows = apply_online_feeder_overlay(rows, store.business_id if store else None)
     if not q:
+        if _has_custom_storefront_order(store):
+            return sorted(rows, key=lambda row: (row.storefront_sort_order is None,
+                                                 row.storefront_sort_order if row.storefront_sort_order is not None else 10**9,
+                                                 (row.product.name or "").casefold()))
         return sorted(rows, key=lambda row: (0 if has_public_product_image(row.product) else 1, row.product.name.lower()))
     product_ids = [row.product_id for row in rows]
     aliases_by_product = {}
@@ -200,9 +204,21 @@ def _catalogue_priority_ranks():
         return {}
 
 
-def _storefront_catalogue_order(query, q="", category=""):
-    """Put saved photos and the curated everyday essentials first on the home page."""
-    if q or category:
+def _has_custom_storefront_order(store):
+    if not store:
+        return False
+    return (StoreProduct.query.filter_by(store_id=store.id)
+            .filter(StoreProduct.storefront_sort_order.isnot(None)).limit(1).first() is not None)
+
+
+def _storefront_catalogue_order(query, store=None, q="", category=""):
+    """Use owner-arranged order when saved; otherwise preserve curated first-load order."""
+    if q:
+        return query.order_by(Product.name, Product.id)
+    if _has_custom_storefront_order(store):
+        return query.order_by(StoreProduct.storefront_sort_order.is_(None),
+                              StoreProduct.storefront_sort_order.asc(), Product.name, Product.id)
+    if category:
         return query.order_by(Product.name, Product.id)
     ranks = _catalogue_priority_ranks()
     # Prefer already-saved photos. If a database row is missing a direct image URL,
@@ -236,12 +252,12 @@ def catalogue_page(store=None, q="", category="", page=1, page_size=60):
     page = max(1, min(int(page or 1), 10000))
     page_size = max(12, min(int(page_size or 60), 72))
     total = query.count()
-    query = _storefront_catalogue_order(query, q=q, category=category)
+    query = _storefront_catalogue_order(query, store=store, q=q, category=category)
     rows = (query.offset((page - 1) * page_size).limit(page_size).all())
     rows = _attach_saved_product_images(rows)
     from services.catalogue_feeder import apply_online_feeder_overlay
     rows = apply_online_feeder_overlay(rows, store.business_id if store else None)
-    return _interleave_catalogue(rows), total
+    return (rows if (not q and _has_custom_storefront_order(store)) else _interleave_catalogue(rows)), total
 
 
 @bp.get("/shop/api/products")
@@ -320,6 +336,12 @@ def shop():
     categories = (Category.query.filter_by(business_id=store.business_id, is_active=True)
                   .order_by(Category.sort_order, Category.name).all()) if store else []
     return render_template("shop/shop.html", products=products, q=q, store=store, stores=active_stores(), categories=categories, product_count=total)
+
+
+@bp.get("/contact")
+def contact():
+    # The locations page carries the currently configured mart phone and address.
+    return redirect(url_for("shop.locations"))
 
 
 @bp.get("/locations")

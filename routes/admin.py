@@ -13,7 +13,7 @@ from functools import wraps, lru_cache
 import requests
 from flask import Blueprint, flash, redirect, render_template, request, url_for, Response, current_app, session, send_file, jsonify, after_this_request
 from flask_login import current_user, login_required
-from sqlalchemy import or_
+from sqlalchemy import or_, tuple_
 from extensions import db
 from services.branding import brand_display_name, brand_display_copy
 from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryTransaction, User,
@@ -354,6 +354,65 @@ def products():
     )
 
 
+@bp.route(f"{ADMIN_BASE}/storefront-order", methods=["GET", "POST"])
+@admin_required("products.edit")
+def storefront_order():
+    """Preview the live online catalogue and save its per-mart drag/drop order."""
+    stores = Store.query.filter_by(business_id=current_user.business_id, is_active=True).order_by(Store.name).all()
+    store_id = (request.form.get("store_id") if request.method == "POST" else request.args.get("store_id")) or ""
+    store = next((item for item in stores if item.id == store_id), None) or (stores[0] if stores else None)
+    if not store:
+        flash("Create an active mart before arranging the online catalogue.", "error")
+        return redirect(url_for("admin.products"))
+
+    from routes.shop import (_storefront_catalogue_order, _has_custom_storefront_order,
+                             _attach_saved_product_images, _interleave_catalogue)
+    base_query = (StoreProduct.query.join(Product)
+                  .filter(StoreProduct.store_id == store.id, StoreProduct.is_available.is_(True),
+                          StoreProduct.available_online.is_(True), Product.status == "ACTIVE"))
+
+    if request.method == "POST":
+        try:
+            submitted = json.loads(request.form.get("ordered_ids", "[]"))
+            if not isinstance(submitted, list) or len(submitted) > 2000 or any(not isinstance(value, str) for value in submitted):
+                raise ValueError
+        except (ValueError, TypeError, json.JSONDecodeError):
+            flash("The new catalogue order could not be read. Please arrange the cards again.", "error")
+            return redirect(url_for("admin.storefront_order", store_id=store.id))
+        current_rows = base_query.all()
+        row_by_id = {row.id: row for row in current_rows}
+        clean_ids = []
+        seen = set()
+        for value in submitted:
+            if value in row_by_id and value not in seen:
+                clean_ids.append(value); seen.add(value)
+        # New products created in another tab are retained at the end, never lost.
+        missing_rows = [row for row in current_rows if row.id not in seen]
+        missing_rows.sort(key=lambda row: (row.product.name or "").casefold())
+        clean_ids.extend(row.id for row in missing_rows)
+        for position, row_id in enumerate(clean_ids, start=1):
+            row_by_id[row_id].storefront_sort_order = position
+        db.session.commit()
+        audit("STOREFRONT_PRODUCT_ORDER_UPDATED", "Store", store.id,
+              new_values={"ordered_products": len(clean_ids)})
+        flash(f"Online catalogue order saved for {store.name}: {len(clean_ids)} products.", "success")
+        return redirect(url_for("admin.storefront_order", store_id=store.id))
+
+    rows = _storefront_catalogue_order(base_query, store=store).limit(2000).all()
+    if not _has_custom_storefront_order(store):
+        # Match the current customer catalogue exactly before its first manual save:
+        # product-image attachments + feeder overlays, then the same family mix used
+        # on each 60-item storefront page and the infinite-scroll endpoint.
+        rows = _attach_saved_product_images(rows)
+        from services.catalogue_feeder import apply_online_feeder_overlay
+        rows = apply_online_feeder_overlay(rows, store.business_id)
+        storefront_sequence = []
+        for offset in range(0, len(rows), 60):
+            storefront_sequence.extend(_interleave_catalogue(rows[offset:offset + 60]))
+        rows = storefront_sequence
+    return render_template("admin/storefront_order.html", stores=stores, store=store, rows=rows)
+
+
 @bp.post(f"{ADMIN_BASE}/new-arrivals/register-all")
 @admin_required("products.create")
 def register_all_new_arrivals():
@@ -518,8 +577,11 @@ def create_product_from_arrival(filename):
     if not all(value.is_finite() for value in (price, cost, quantity)) or price < 0 or cost < 0 or quantity < 0:
         flash("Prices and opening stock must be finite, non-negative numbers.", "error")
         return redirect(url_for("admin.new_arrivals", store_id=store.id))
-    if price > 0 and price < cost:
-        flash("Selling price cannot be below cost price.", "error")
+    if price > 0 and cost > 0 and price <= cost:
+        flash("Selling price must be above cost price.", "error")
+        return redirect(url_for("admin.new_arrivals", store_id=store.id))
+    if price == 0 and cost > 0:
+        flash("Enter a selling price before saving a cost price. Leave both blank for an unpriced draft.", "error")
         return redirect(url_for("admin.new_arrivals", store_id=store.id))
     asset_alias = arrival_alias(filename)
     asset_link = ProductAlias.query.filter_by(alias=asset_alias, alias_type=ARRIVAL_ALIAS_TYPE).first()
@@ -579,7 +641,7 @@ def create_product_from_arrival(filename):
     store_product = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
     effective_cost = cost if raw_cost else (Decimal(str(store_product.cost_price or 0)) if store_product else cost)
     effective_price = price if price > 0 else (Decimal(str(store_product.selling_price or 0)) if store_product else Decimal("0"))
-    if (effective_price > 0 and effective_price < effective_cost) or (effective_price == 0 and effective_cost > 0):
+    if (effective_price > 0 and effective_cost > 0 and effective_price <= effective_cost) or (effective_price == 0 and effective_cost > 0):
         db.session.rollback()
         flash("Selling price must be above this mart's cost price. Leave both price fields blank for an unpriced draft.", "error")
         return redirect(url_for("admin.new_arrivals", store_id=store.id))
@@ -821,8 +883,8 @@ def create_product():
     if not all(value.is_finite() for value in (price, cost, stock)):
         flash("Selling price, cost and stock must be valid finite numbers.", "error")
         return redirect(url_for("admin.products"))
-    if price <= 0:
-        flash("Selling price must be greater than zero.", "error")
+    if price < 0:
+        flash("Selling price cannot be negative. Leave it at zero to save an unpriced draft.", "error")
         return redirect(url_for("admin.products"))
     if cost < 0:
         flash("Cost price cannot be negative.", "error")
@@ -830,8 +892,11 @@ def create_product():
     if stock < 0:
         flash("Opening stock cannot be negative.", "error")
         return redirect(url_for("admin.products"))
-    if price < cost:
-        flash(f"Selling price (KES {price:.2f}) cannot be below cost price (KES {cost:.2f}).", "error")
+    if price > 0 and cost > 0 and price <= cost:
+        flash(f"Selling price (KES {price:.2f}) must be above cost price (KES {cost:.2f}).", "error")
+        return redirect(url_for("admin.products"))
+    if price == 0 and cost > 0:
+        flash("Enter a positive selling price before saving a cost price. Leave both blank for an unpriced draft.", "error")
         return redirect(url_for("admin.products"))
     if category_id and not Category.query.filter_by(id=category_id, business_id=current_user.business_id).first():
         flash("Select a valid category.", "error"); return redirect(url_for("admin.products"))
@@ -865,9 +930,9 @@ def create_product():
             sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
             if not sp:
                 sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost,
-                    selling_price=price, minimum_price=price, maximum_price=price * Decimal("1.30"),
+                    selling_price=price, minimum_price=price, maximum_price=(price * Decimal("1.30") if price > 0 else None),
                     stock_quantity=stock, reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
-                    is_available=True, available_online=True, available_pos=True)
+                    is_available=price > 0, available_online=price > 0, available_pos=price > 0)
                 db.session.add(sp); db.session.flush()
                 if stock > 0:
                     db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
@@ -884,7 +949,7 @@ def create_product():
             if store_id:
                 old_price = Decimal(str(sp.selling_price or 0))
                 old_cost = Decimal(str(sp.cost_price or 0))
-                if price != old_price:
+                if price > 0 and price != old_price:
                     sp.selling_price = price
                     sp.minimum_price = price
                     sp.maximum_price = price * Decimal("1.30")
@@ -892,6 +957,13 @@ def create_product():
                         new_price=price, reason="Price set from barcode product form",
                         source="PRODUCT_SCAN_SETUP", changed_by=current_user.id))
                 if cost_raw and cost != old_cost:
+                    effective_selling = price if price > 0 else old_price
+                    if effective_selling <= 0 and cost > 0:
+                        db.session.rollback(); flash("Set a positive selling price before saving a cost price.", "error")
+                        return redirect(url_for("admin.products"))
+                    if effective_selling > 0 and cost > 0 and cost >= effective_selling:
+                        db.session.rollback(); flash("Cost price must be below the existing selling price.", "error")
+                        return redirect(url_for("admin.products"))
                     sp.cost_price = cost
                 if stock > 0:
                     sp.stock_quantity = Decimal(str(sp.stock_quantity or 0)) + stock
@@ -940,8 +1012,8 @@ def create_product():
             db.session.rollback(); flash(str(exc), "error"); return redirect(url_for("admin.products"))
     for store in stores:
         sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost, selling_price=price,
-                          minimum_price=price, maximum_price=price * Decimal("1.30"), stock_quantity=stock,
-                          reorder_level=5, is_available=True, available_online=True, available_pos=True)
+                          minimum_price=price, maximum_price=(price * Decimal("1.30") if price > 0 else None), stock_quantity=stock,
+                          reorder_level=5, is_available=price > 0, available_online=price > 0, available_pos=price > 0)
         db.session.add(sp)
         if stock > 0:
             db.session.add(InventoryTransaction(store_id=store.id, product_id=product.id,
@@ -953,7 +1025,8 @@ def create_product():
     mark_local_override(current_user.business_id, product.id)
     db.session.commit()
     audit("PRODUCT_CREATED", "Product", product.id, new_values={"name": name, "sku": sku, "barcode": barcode, "stores": len(stores), "opening_stock": str(stock)})
-    flash(f"{name} added to {len(stores)} mart(s).", "success")
+    flash((f"{name} added to {len(stores)} mart(s)." if price > 0 else
+           f"{name} saved as an unpriced draft in {len(stores)} mart(s). Add a selling price before enabling it online or at POS."), "success")
     return redirect(url_for("admin.product_edit", product_id=product.id, store_id=stores[0].id))
 
 
@@ -982,18 +1055,22 @@ def quick_create_product():
     try:
         raw_price = str(data.get("selling_price") or "").strip()
         raw_cost = str(data.get("cost_price") or "").strip()
+        raw_minimum = str(data.get("minimum_price") or "").strip()
+        raw_maximum = str(data.get("maximum_price") or "").strip()
         raw_stock = str(data.get("stock_quantity") or "").strip()
         price = Decimal(raw_price) if raw_price else None
         cost = Decimal(raw_cost) if raw_cost else None
+        minimum = Decimal(raw_minimum) if raw_minimum else None
+        maximum = Decimal(raw_maximum) if raw_maximum else None
         quantity = Decimal(raw_stock) if raw_stock else Decimal("0")
         weight = Decimal(raw_weight) if raw_weight else None
     except (InvalidOperation, ValueError, TypeError):
-        return jsonify(ok=False, error="invalid_number", message="Check selling price, cost, weight and quantity."), 400
-    vals = [x for x in (price, cost, quantity, weight) if x is not None]
-    if not all(x.is_finite() for x in vals) or quantity < 0 or (price is not None and price < 0) or (cost is not None and cost < 0) or (weight is not None and weight < 0):
-        return jsonify(ok=False, error="invalid_number", message="Prices, weight and stock must be finite non-negative numbers."), 400
-    if price is not None and price > 0 and cost is not None and price < cost:
-        return jsonify(ok=False, error="selling_below_cost", message=f"Selling price (KES {price:.2f}) is below cost price (KES {cost:.2f})."), 400
+        return jsonify(ok=False, error="invalid_number", message="Check selling price, cost, minimum/maximum price, weight and quantity."), 400
+    vals = [x for x in (price, cost, minimum, maximum, quantity, weight) if x is not None]
+    if not all(x.is_finite() for x in vals) or quantity < 0 or any(x < 0 for x in (price, cost, minimum, maximum, weight) if x is not None):
+        return jsonify(ok=False, error="invalid_number", message="Prices, price limits, weight and stock must be finite non-negative numbers."), 400
+    if price is not None and price > 0 and cost is not None and cost > 0 and price <= cost:
+        return jsonify(ok=False, error="selling_below_cost", message=f"Selling price (KES {price:.2f}) must be above cost price (KES {cost:.2f})."), 400
     if price is not None and price == 0 and cost is not None and cost > 0:
         return jsonify(ok=False, error="selling_price_required", message="Enter a selling price or leave both price fields blank for identity-only capture."), 400
     if sku:
@@ -1047,13 +1124,29 @@ def quick_create_product():
             if not product.pack_size: product.pack_size = pack_size
             if weight is not None: product.weight = weight
         sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).with_for_update().first()
+        existing_selling = Decimal(str(sp.selling_price or 0)) if sp else Decimal("0")
+        existing_cost = Decimal(str(sp.cost_price or 0)) if sp else Decimal("0")
+        effective_selling = price if price is not None and price > 0 else existing_selling
+        effective_cost = cost if cost is not None else existing_cost
+        if effective_selling <= 0 and effective_cost > 0:
+            db.session.rollback()
+            return jsonify(ok=False, error="selling_price_required", message="Cost price must be below a positive selling price. Leave both blank to capture the product before pricing it."), 400
+        if effective_selling <= 0 and (minimum is not None or maximum is not None):
+            db.session.rollback()
+            return jsonify(ok=False, error="selling_price_required", message="Set a selling price before setting minimum or maximum price limits."), 400
+        if effective_selling > 0 and effective_cost > 0 and effective_cost >= effective_selling:
+            db.session.rollback()
+            return jsonify(ok=False, error="cost_above_selling", message=f"Cost price (KES {effective_cost:.2f}) must be below selling price (KES {effective_selling:.2f})."), 400
+
         if sp is None:
-            sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=cost or Decimal("0"),
-                              selling_price=price or Decimal("0"), minimum_price=price or Decimal("0"),
-                              maximum_price=(price * Decimal("1.30") if price and price > 0 else None),
-                              stock_quantity=Decimal("0"), reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
-                              is_available=bool(price and price > 0), available_online=bool(price and price > 0),
-                              available_pos=bool(price and price > 0))
+            initial_minimum = minimum if minimum is not None else (effective_selling if effective_selling > 0 else Decimal("0"))
+            initial_maximum = maximum if maximum is not None else (effective_selling * Decimal("1.30") if effective_selling > 0 else None)
+            sp = StoreProduct(store_id=store.id, product_id=product.id, cost_price=effective_cost,
+                              selling_price=effective_selling, minimum_price=initial_minimum,
+                              maximum_price=initial_maximum, stock_quantity=Decimal("0"),
+                              reserved_quantity=Decimal("0"), reorder_level=Decimal("5"),
+                              is_available=effective_selling > 0, available_online=effective_selling > 0,
+                              available_pos=effective_selling > 0)
             db.session.add(sp); db.session.flush()
         else:
             if price is not None and price > 0:
@@ -1061,9 +1154,34 @@ def quick_create_product():
                 if old_price != price:
                     db.session.add(PriceHistory(store_product_id=sp.id, old_price=old_price, new_price=price,
                                                 reason="Quick product entry", source="QUICK_ENTRY", changed_by=current_user.id))
-                sp.selling_price = price; sp.minimum_price = price; sp.maximum_price = price * Decimal("1.30")
+                sp.selling_price = price
+                # When a new selling price is entered, the default floor equals it and
+                # the default ceiling is 30% above it; explicit values below override.
+                sp.minimum_price = price if minimum is None else minimum
+                sp.maximum_price = price * Decimal("1.30") if maximum is None else maximum
                 sp.is_available = True; sp.available_pos = True; sp.available_online = True
-            if cost is not None: sp.cost_price = cost
+            else:
+                if minimum is not None:
+                    sp.minimum_price = minimum
+                if maximum is not None:
+                    sp.maximum_price = maximum
+            if cost is not None:
+                sp.cost_price = cost
+
+        effective_minimum = Decimal(str(sp.minimum_price or 0))
+        effective_maximum = Decimal(str(sp.maximum_price)) if sp.maximum_price is not None else None
+        if effective_selling > 0 and effective_minimum > effective_selling:
+            db.session.rollback()
+            return jsonify(ok=False, error="minimum_above_selling", message="Minimum price must be at or below the selling price."), 400
+        if effective_selling > 0 and effective_maximum is not None and effective_maximum < effective_selling:
+            db.session.rollback()
+            return jsonify(ok=False, error="maximum_below_selling", message="Maximum price must be at or above the selling price."), 400
+        if effective_minimum > 0 and effective_cost > 0 and effective_minimum <= effective_cost:
+            db.session.rollback()
+            return jsonify(ok=False, error="minimum_below_cost", message="Minimum price must be above cost price. Leave it blank for the default floor."), 400
+        if effective_maximum is not None and effective_minimum > effective_maximum:
+            db.session.rollback()
+            return jsonify(ok=False, error="minimum_above_maximum", message="Minimum price cannot be higher than maximum price."), 400
         if created or replaced_placeholder:
             from services.catalogue_feeder import mark_local_override
             mark_local_override(current_user.business_id, product.id)
@@ -1116,7 +1234,7 @@ def import_products():
                 raise InvalidOperation
         except (InvalidOperation, ValueError, TypeError):
             errors.append(f"Line {line_no}: invalid numeric values"); continue
-        if price < cost:
+        if cost > 0 and price <= cost:
             errors.append(f"Line {line_no}: selling price is below cost price"); continue
         category = None
         category_name = row.get("category", "")
@@ -1189,6 +1307,58 @@ def export_products_csv():
         writer.writerow([p.name,p.brand or "",p.sku or "",p.barcode or "",cat.name if cat else "",p.unit or "",p.pack_size or "",p.description or "",p.image_url or "",sp.store.name,sp.store.code,sp.cost_price,sp.selling_price,sp.stock_quantity,int(sp.available_online),int(sp.available_pos),int(sp.is_available)])
     audit("CATALOGUE_CSV_EXPORTED", "Business", current_user.business_id, new_values={"rows": len(rows)})
     return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment; filename=denmart-catalogue.csv"})
+
+
+@bp.get(f"{ADMIN_BASE}/products/<product_id>/image")
+@bp.post(f"{ADMIN_BASE}/products/<product_id>/image")
+@admin_required("products.edit")
+def save_product_image(product_id):
+    """Update only the product photograph; never parse or modify prices/stock."""
+    product = db.session.get(Product, product_id)
+    if not product:
+        return "Not found", 404
+    links = StoreProduct.query.filter_by(product_id=product.id).all()
+    if not links or not any(link.store.business_id == current_user.business_id for link in links):
+        return "Forbidden", 403
+    if any(link.store.business_id != current_user.business_id for link in links):
+        return "Forbidden", 403
+
+    if request.method == "GET":
+        linked_store_ids = [link.store_id for link in links]
+        stores = Store.query.filter(Store.business_id == current_user.business_id,
+                                    Store.id.in_(linked_store_ids)).order_by(Store.name).all()
+        requested_store_id = request.args.get("store_id", "").strip()
+        selected_store = next((store for store in stores if store.id == requested_store_id), None) or (stores[0] if stores else None)
+        return render_template("admin/product_image_edit.html", product=product,
+                               stores=stores, selected_store=selected_store)
+
+    old_image = product.image_url
+    try:
+        uploaded = _uploaded_product_image(request.files.get("product_image"), product.name)
+        image_url = request.form.get("image_url", "").strip()
+        remove_image = request.form.get("remove_image") == "1"
+        if uploaded:
+            _set_product_image(product, uploaded, source_type="ADMIN_UPLOAD")
+        elif remove_image:
+            product.image_url = None
+            ProductImage.query.filter_by(product_id=product.id).delete(synchronize_session=False)
+        elif image_url:
+            _set_product_image(product, image_url, source_type="ADMIN_URL")
+        else:
+            flash("Choose a replacement photo, enter an image URL, or select Remove photo.", "error")
+            return redirect(url_for("admin.save_product_image", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
+    except ValueError as exc:
+        db.session.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("admin.save_product_image", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
+
+    from services.catalogue_feeder import mark_local_override
+    mark_local_override(current_user.business_id, product.id)
+    db.session.commit()
+    audit("PRODUCT_IMAGE_UPDATED", "Product", product.id, old_values={"image_url": old_image},
+          new_values={"image_url": product.image_url})
+    flash(f"Photo for {product.name} was saved. Prices and stock were not changed.", "success")
+    return redirect(url_for("admin.save_product_image", product_id=product.id, store_id=request.form.get("store_id", "").strip()))
 
 
 @bp.get(f"{ADMIN_BASE}/products/<product_id>/edit")
@@ -1270,14 +1440,21 @@ def save_product(product_id):
         old_cost = Decimal(str(sp.cost_price or 0))
         old_selling_price = Decimal(str(sp.selling_price or 0))
         try:
-            sp.cost_price = Decimal(request.form.get("cost_price", str(sp.cost_price)))
-            sp.selling_price = Decimal(request.form.get("selling_price", str(sp.selling_price)))
-            sp.minimum_price = Decimal(request.form.get("minimum_price", str(sp.minimum_price or sp.selling_price)))
-            maxv = request.form.get("maximum_price", "").strip(); sp.maximum_price = Decimal(maxv) if maxv else None
-            new_stock = Decimal(request.form.get("stock_quantity", str(sp.stock_quantity)))
-            sp.reorder_level = Decimal(request.form.get("reorder_level", str(sp.reorder_level or 0)))
+            def _decimal_field(field, current, default=None):
+                raw = request.form.get(field)
+                if raw is None or not str(raw).strip():
+                    return Decimal(str(current if current is not None else (default if default is not None else 0)))
+                return Decimal(str(raw).strip())
+
+            sp.cost_price = _decimal_field("cost_price", sp.cost_price, 0)
+            sp.selling_price = _decimal_field("selling_price", sp.selling_price, 0)
+            sp.minimum_price = _decimal_field("minimum_price", sp.minimum_price, sp.selling_price)
+            maxv = request.form.get("maximum_price", "").strip()
+            sp.maximum_price = Decimal(maxv) if maxv else None
+            new_stock = _decimal_field("stock_quantity", sp.stock_quantity, 0)
+            sp.reorder_level = _decimal_field("reorder_level", sp.reorder_level, 0)
         except (InvalidOperation, ValueError, TypeError):
-            db.session.rollback(); flash("Check the numeric mart values.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+            db.session.rollback(); flash("Enter valid decimal values for cost, selling, price limits and stock.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         numeric_values = [sp.cost_price, sp.selling_price, sp.minimum_price, new_stock, sp.reorder_level]
         if sp.maximum_price is not None:
             numeric_values.append(sp.maximum_price)
@@ -1292,8 +1469,18 @@ def save_product(product_id):
         if sp.selling_price == 0 and requested_enabled:
             db.session.rollback(); flash("Add a positive selling price before enabling this product for online orders or POS sales.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         prices_changed = sp.cost_price != old_cost or sp.selling_price != old_selling_price
-        if prices_changed and sp.selling_price > 0 and sp.selling_price < sp.cost_price:
-            db.session.rollback(); flash(f"Selling price (KES {sp.selling_price:.2f}) cannot be below cost price (KES {sp.cost_price:.2f}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.selling_price > 0 and sp.cost_price > 0 and sp.cost_price >= sp.selling_price:
+            db.session.rollback(); flash(f"Cost price (KES {sp.cost_price:.2f}) must be below selling price (KES {sp.selling_price:.2f}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.selling_price <= 0 and (sp.minimum_price > 0 or sp.maximum_price is not None):
+            db.session.rollback(); flash("Set a selling price before adding minimum or maximum price limits.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.selling_price > 0 and sp.minimum_price > sp.selling_price:
+            db.session.rollback(); flash("Minimum price must be at or below the selling price.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.selling_price > 0 and sp.maximum_price is not None and sp.maximum_price < sp.selling_price:
+            db.session.rollback(); flash("Maximum price must be at or above the selling price.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.maximum_price is not None and sp.minimum_price > sp.maximum_price:
+            db.session.rollback(); flash("Minimum price cannot be higher than maximum price.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
+        if sp.minimum_price > 0 and sp.cost_price > 0 and sp.cost_price >= sp.minimum_price:
+            db.session.rollback(); flash("Minimum price must be above cost price. Set it to zero to leave the floor unset.", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         if new_stock < 0 or new_stock < Decimal(str(sp.reserved_quantity or 0)):
             db.session.rollback(); flash(f"Stock cannot fall below reserved quantity ({sp.reserved_quantity}).", "error"); return redirect(url_for("admin.product_edit", product_id=product.id, store_id=sp_store_id))
         sp.stock_quantity = new_stock
@@ -1380,8 +1567,14 @@ def update_price(store_product_id):
     if not new_price.is_finite() or new_price <= 0:
         flash("Price must be a valid number greater than zero.", "error"); return redirect(url_for("admin.products"))
     item_cost = Decimal(str(item.cost_price or 0))
-    if new_price < item_cost:
-        flash(f"Selling price (KES {new_price:.2f}) cannot be below cost price (KES {item_cost:.2f}).", "error"); return redirect(url_for("admin.products"))
+    if item_cost > 0 and new_price <= item_cost:
+        flash(f"Selling price (KES {new_price:.2f}) must be above cost price (KES {item_cost:.2f}).", "error"); return redirect(url_for("admin.products"))
+    minimum = Decimal(str(item.minimum_price or 0))
+    maximum = Decimal(str(item.maximum_price)) if item.maximum_price is not None else None
+    if minimum > 0 and new_price < minimum:
+        flash(f"Selling price cannot be below the configured minimum (KES {minimum:.2f}).", "error"); return redirect(url_for("admin.products"))
+    if maximum is not None and new_price > maximum:
+        flash(f"Selling price cannot exceed the configured maximum (KES {maximum:.2f}).", "error"); return redirect(url_for("admin.products"))
     old = Decimal(str(item.selling_price))
     item.selling_price = new_price
     db.session.add(PriceHistory(store_product_id=item.id, old_price=old, new_price=new_price,
@@ -1428,18 +1621,19 @@ def inventory():
     if selected_store and selected_store.business_id != business_id:
         selected_store = None
         store_id = ""
+
     if request.method == "POST":
         if not current_user.has_permission("inventory.adjust") and current_user.role.name != "OWNER":
             return "Forbidden", 403
         product_id = request.form.get("product_id", "").strip()
         try:
-            delta = Decimal(request.form.get("quantity_delta", "0"))
-            unit_cost = Decimal(request.form.get("unit_cost", "0") or "0")
-        except InvalidOperation:
-            flash("Quantity and cost must be valid numbers.", "error")
+            delta = Decimal(request.form.get("quantity_delta", "0").strip() or "0")
+            unit_cost = Decimal(request.form.get("unit_cost", "0").strip() or "0")
+        except (InvalidOperation, ValueError, TypeError):
+            flash("Quantity and cost must be valid decimal numbers.", "error")
             return redirect(url_for("admin.inventory", store_id=store_id))
-        if not selected_store or not product_id or delta == 0 or unit_cost < 0:
-            flash("Choose a mart, product and a non-zero quantity change.", "error")
+        if not selected_store or not product_id or delta == 0 or not delta.is_finite() or not unit_cost.is_finite() or unit_cost < 0:
+            flash("Choose a mart and product, enter a non-zero quantity and a valid non-negative cost.", "error")
             return redirect(url_for("admin.inventory", store_id=store_id))
         product = db.session.get(Product, product_id)
         if not product:
@@ -1449,8 +1643,8 @@ def inventory():
         if not sp:
             sp = StoreProduct(store_id=selected_store.id, product_id=product.id, cost_price=unit_cost, selling_price=Decimal("0"), stock_quantity=0, reserved_quantity=0)
             db.session.add(sp); db.session.flush()
-        current_stock = Decimal(sp.stock_quantity or 0)
-        reserved = Decimal(sp.reserved_quantity or 0)
+        current_stock = Decimal(str(sp.stock_quantity or 0))
+        reserved = Decimal(str(sp.reserved_quantity or 0))
         new_stock = current_stock + delta
         if new_stock < 0 or new_stock < reserved:
             flash(f"Stock cannot fall below reserved quantity ({reserved}).", "error")
@@ -1470,44 +1664,53 @@ def inventory():
         flash(f"{product.name}: stock is now {sp.stock_quantity} at {selected_store.name}.", "success")
         return redirect(url_for("admin.inventory", store_id=selected_store.id))
 
-    q = (request.args.get("q") or "").strip()
+    q = (request.args.get("q") or "").strip()[:160]
     low = request.args.get("low") == "1"
     query = StoreProduct.query.join(Store).join(Product).filter(Store.business_id == business_id)
     if selected_store:
         query = query.filter(StoreProduct.store_id == selected_store.id)
     if low:
         query = query.filter(StoreProduct.stock_quantity <= StoreProduct.reorder_level)
-    rows = query.order_by((StoreProduct.stock_quantity - StoreProduct.reorder_level).asc(), Product.name.asc()).limit(10000).all()
-    if q and rows:
-        aliases_by_product = {}
-        ids = [row.product_id for row in rows]
-        for alias in ProductAlias.query.filter(ProductAlias.product_id.in_(ids)).all():
-            aliases_by_product.setdefault(alias.product_id, []).append(alias.alias)
-        rows = forgiving_rank(rows, q, aliases_by_product=aliases_by_product, limit=400, minimum=0.48)
-    else:
-        rows = rows[:400]
-    total_cost = sum((Decimal(r.stock_quantity or 0) * Decimal(r.cost_price or 0) for r in rows), Decimal("0"))
-    total_retail = sum((Decimal(r.stock_quantity or 0) * Decimal(r.selling_price or 0) for r in rows), Decimal("0"))
-    low_count = sum(1 for r in rows if Decimal(r.stock_quantity or 0) <= Decimal(r.reorder_level or 0))
+    if q:
+        pattern = f"%{q}%"
+        alias_ids = db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(pattern))
+        query = query.filter(or_(Product.name.ilike(pattern), Product.brand.ilike(pattern), Product.sku.ilike(pattern),
+                                 Product.barcode.ilike(pattern), Product.search_keywords.ilike(pattern), Product.id.in_(alias_ids)))
+    rows = query.order_by((StoreProduct.stock_quantity - StoreProduct.reorder_level).asc(), Product.name.asc()).limit(400).all()
+    total_cost = sum((Decimal(str(r.stock_quantity or 0)) * Decimal(str(r.cost_price or 0)) for r in rows), Decimal("0"))
+    total_retail = sum((Decimal(str(r.stock_quantity or 0)) * Decimal(str(r.selling_price or 0)) for r in rows), Decimal("0"))
+    low_count = sum(1 for r in rows if Decimal(str(r.stock_quantity or 0)) <= Decimal(str(r.reorder_level or 0)))
+
+    # Load the ledger in one query for the displayed pairs instead of issuing one
+    # transaction-history query per product row. This keeps large catalogues usable.
+    txn_map = {}
+    history_available = True
+    pairs = {(r.store_id, r.product_id) for r in rows}
+    if pairs:
+        try:
+            txn_rows = (InventoryTransaction.query
+                        .filter(tuple_(InventoryTransaction.store_id, InventoryTransaction.product_id).in_(list(pairs)))
+                        .order_by(InventoryTransaction.created_at.asc(), InventoryTransaction.id.asc()).all())
+            for txn in txn_rows:
+                txn_map.setdefault((txn.store_id, txn.product_id), []).append(txn)
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception("Inventory ledger could not be loaded; displaying current stock without layer history")
+            history_available = False
 
     def stock_layers(sp):
-        # Inventory transactions form a lightweight FIFO ledger without a schema
-        # migration. Existing unlogged stock is treated as the oldest/opening layer;
-        # each later positive receipt/adjustment becomes a new layer. Sales consume
-        # the oldest layer first, so the newest layer remains visually distinct.
-        txns = (InventoryTransaction.query.filter_by(store_id=sp.store_id, product_id=sp.product_id)
-                .order_by(InventoryTransaction.created_at.asc(), InventoryTransaction.id.asc()).all())
-        net_tx = sum((Decimal(t.quantity or 0) for t in txns), Decimal("0"))
-        opening = Decimal(sp.stock_quantity or 0) - net_tx
+        txns = txn_map.get((sp.store_id, sp.product_id), [])
+        net_tx = sum((Decimal(str(t.quantity or 0)) for t in txns), Decimal("0"))
+        opening = Decimal(str(sp.stock_quantity or 0)) - net_tx
         layers = []
         if opening > 0:
             layers.append({"qty": opening, "remaining": opening, "when": sp.created_at, "label": "Opening stock", "source": "OLD"})
         for t in txns:
-            qty = Decimal(t.quantity or 0)
+            qty = Decimal(str(t.quantity or 0))
             if qty > 0:
                 layers.append({"qty": qty, "remaining": qty, "when": t.created_at,
                                "label": (t.notes or t.transaction_type or "Stock received").strip()[:80],
-                               "source": "NEW" if t.transaction_type in {"PURCHASE", "ADJUSTMENT", "ADJUSTMENT_IN", "RECEIVE", "SCAN_STOCK"} else "OLD"})
+                               "source": "NEW" if t.transaction_type in {"PURCHASE", "ADJUSTMENT", "ADJUSTMENT_IN", "RECEIVE", "SCAN_STOCK", "OPENING_STOCK"} else "OLD"})
             elif qty < 0:
                 to_consume = -qty
                 for layer in layers:
@@ -1517,16 +1720,23 @@ def inventory():
                     layer["remaining"] -= take
                     to_consume -= take
         remaining = [x for x in layers if x["remaining"] > 0]
-        remaining.sort(key=lambda x: (x["when"] or sp.created_at), reverse=True)
-        # The newest surviving inbound layer is the visible NEW STOCK layer. Everything
-        # underneath it is older stock; when those layers are exhausted the divider vanishes.
+        def _sort_timestamp(layer):
+            when = layer.get("when")
+            if not when:
+                return 0.0
+            try:
+                return when.timestamp()
+            except (AttributeError, OSError, ValueError):
+                return 0.0
+        remaining.sort(key=_sort_timestamp, reverse=True)
         for i, layer in enumerate(remaining):
             layer["is_newest"] = i == 0 and layer["source"] == "NEW"
         return remaining
 
     display_rows = [{"item": r, "layers": stock_layers(r)} for r in rows]
     return render_template("admin/inventory.html", rows=rows, display_rows=display_rows, stores=stores, store_id=store_id, selected_store=selected_store,
-                           q=q, low=low, total_cost=total_cost, total_retail=total_retail, low_count=low_count)
+                           q=q, low=low, total_cost=total_cost, total_retail=total_retail, low_count=low_count,
+                           history_available=history_available)
 
 
 @bp.route(f"{ADMIN_BASE}/categories", methods=["GET", "POST"])
