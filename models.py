@@ -205,6 +205,8 @@ class StoreProduct(db.Model):
     is_available = db.Column(db.Boolean, default=True, nullable=False)
     available_online = db.Column(db.Boolean, default=True, nullable=False)
     available_pos = db.Column(db.Boolean, default=True, nullable=False)
+    # Nullable until an owner explicitly saves a storefront order.
+    storefront_sort_order = db.Column(db.Integer, nullable=True)
     pricing_rule_id = db.Column(db.String(36), db.ForeignKey("pricing_rules.id"))
     created_at = db.Column(db.DateTime(timezone=True), default=now, nullable=False)
     updated_at = db.Column(db.DateTime(timezone=True), default=now, onupdate=now, nullable=False)

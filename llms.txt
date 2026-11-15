@@ -1,0 +1,7 @@
+# Denmart
+
+Denmart is an online retail catalogue and ordering service.
+
+Public pages: /, /shop, /locations, /sitemap.xml, /robots.txt.
+
+Private administration, staff, payment, customer and operational pages are not public documentation.

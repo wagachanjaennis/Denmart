@@ -1,0 +1,24 @@
+{% extends 'base.html' %}{% block body_class %}admin-page{% endblock %}{% block chrome %}{% endblock %}{% block content %}
+<link rel="stylesheet" href="{{url_for('static', filename='css/admin-product-image.css')}}?v=20261114-image-only-v3">
+<div class="control-shell">{% set admin_sidebar_class = 'control-sidebar' %}{% include 'admin/_nav.html' %}
+<main class="control-main">
+  <header class="control-header"><div><span class="eyebrow">IMAGE-ONLY EDITOR</span><h1>Change product photograph</h1><p>{{product.name}} · Photo changes are saved independently of all prices and stock fields.</p></div><a class="admin-action" href="{{url_for('admin.product_edit', product_id=product.id, store_id=(selected_store.id if selected_store else ''))}}">Back to product</a></header>
+  {% if stores|length > 1 %}<section class="admin-panel"><form method="get" class="toolbar"><label>Mart<select class="admin-input" name="store_id" onchange="this.form.submit()">{% for store in stores %}<option value="{{store.id}}" {% if selected_store and store.id==selected_store.id %}selected{% endif %}>{{store.name}}</option>{% endfor %}</select></label></form></section>{% endif %}
+  {% set image = product_image_url(product) %}
+  <section class="admin-panel product-photo-editor" aria-labelledby="productPhotoHeading">
+    <div><span class="eyebrow">CURRENT PHOTO</span><h2 id="productPhotoHeading">{{product.name}}</h2><p class="muted">Upload a replacement, use an image URL, or remove the current picture. This form has no price, stock or availability fields.</p></div>
+    <form id="productImageForm" method="post" action="{{url_for('admin.save_product_image', product_id=product.id)}}" enctype="multipart/form-data" class="admin-form-grid">
+      <input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="store_id" value="{{selected_store.id if selected_store else ''}}">
+      <div class="product-photo-preview-wrap span-2">
+        <img id="productImagePreview" class="product-photo-preview" src="{{image}}" alt="{{product.name}}" {% if not image %}hidden{% endif %} referrerpolicy="no-referrer">
+        <div id="productImageEmpty" class="product-photo-empty" {% if image %}hidden{% endif %}>No product photo saved yet</div>
+        <small id="productImageStatus" class="muted">{% if image %}Current saved product photo{% else %}Choose a photo to preview it here{% endif %}</small>
+      </div>
+      <label class="span-2">Upload / replace photograph<input id="productImageInput" class="admin-input wide" type="file" name="product_image" accept="image/jpeg,image/png,image/webp,image/gif,image/avif"><small class="muted">JPG, PNG, WebP, GIF or AVIF, up to 8 MB.</small></label>
+      <label class="span-2">Or use an image URL<input id="productImageUrl" class="admin-input wide" name="image_url" value="" placeholder="https://... or /static/catalogue/..."><small class="muted">Remote images are cached into Denmart when saved.</small></label>
+      <label class="check-row span-2"><input id="removeProductImage" type="checkbox" name="remove_image" value="1"> Remove current photo</label>
+      <div class="form-actions span-2"><button class="primary-btn" type="submit">Save photo only</button></div>
+    </form>
+  </section>
+</main></div>
+{% endblock %}{% block scripts %}<script src="{{url_for('static',filename='js/admin-product-image.js')}}?v=20261114-image-only-v3"></script>{% endblock %}

@@ -64,9 +64,37 @@ def _ensure_payment_columns():
                 db.session.execute(text(f'ALTER TABLE pay_orders ADD COLUMN "{column}" {sql_type}'))
     db.session.commit()
 
+
+def _ensure_storefront_order_column():
+    """Add the per-mart storefront order to existing databases safely."""
+    inspector = inspect(db.engine)
+    if "store_products" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("store_products")}
+    if "storefront_sort_order" in columns:
+        return
+    dialect = db.engine.url.get_backend_name()
+    try:
+        if dialect == "postgresql":
+            db.session.execute(text('ALTER TABLE store_products ADD COLUMN IF NOT EXISTS storefront_sort_order INTEGER'))
+        else:
+            db.session.execute(text('ALTER TABLE store_products ADD COLUMN storefront_sort_order INTEGER'))
+        db.session.commit()
+    except Exception:
+        # Multiple web workers may run first-boot checks at the same time. If a
+        # different worker completed this exact additive migration first, accept
+        # the now-present column; otherwise re-raise the real schema failure.
+        db.session.rollback()
+        refreshed = inspect(db.engine)
+        refreshed_columns = {column["name"] for column in refreshed.get_columns("store_products")}
+        if "storefront_sort_order" not in refreshed_columns:
+            raise
+
+
 def bootstrap_database():
     db.create_all()
     _ensure_payment_columns()
+    _ensure_storefront_order_column()
     _ensure_gateway_secret()
     try:
         seed_defaults()

@@ -49,6 +49,14 @@ def create_app():
     app.register_blueprint(feeder_bp)
     app.register_blueprint(advertising_bp)
 
+    @app.get("/llms.txt")
+    def llms_txt():
+        return ("# Denmart\n\nDenmart is an online retail catalogue and ordering service.\n\nPublic pages: /, /shop, /locations, /sitemap.xml, /robots.txt.\n\nPrivate administration, customer and payment pages are not public documentation.\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600"})
+
+    @app.get("/ai.txt")
+    def ai_txt():
+        return ("Denmart is an online retail catalogue and ordering service.\nPublic pages: /, /shop, /locations, /sitemap.xml, /robots.txt.\nDo not crawl private administration, customer or payment pages.\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600"})
+
     @app.get("/robots.txt")
     def robots_txt():
         # Discourage indexing of private control routes; this is not a substitute for auth.
@@ -200,8 +208,22 @@ def create_app():
 
     @app.errorhandler(404)
     def not_found(exc):
-        # A browser probing for /favicon.ico should not turn the health screen into noise.
-        if request.path != "/favicon.ico":
+        # Common internet-wide vulnerability scans should receive the same 404 but
+        # not drown actionable application failures in the owner health dashboard.
+        path = request.path.casefold()
+        scan_exact = {"/.env", "/.git", "/.git/head", "/.git/config", "/.ds_store",
+                      "/wp-admin/install.php", "/wp-login.php", "/xmlrpc.php",
+                      "/server-status", "/server", "/info.php", "/trace.axd",
+                      "/actuator/env", "/telescope/requests", "/@vite/env",
+                      "/api/gql", "/api/graphql", "/graphql", "/graphql/api",
+                      "/v2/_catalog", "/.vscode/sftp.json", "/.well-known/security.txt",
+                      "/config.json", "/login.action", "/console", "/console/",
+                      "/debug/default/view", "/___proxy_subdomain_cpanel", "/___proxy_subdomain_whm/login"}
+        scan_prefixes = ("/wp-content/", "/wp-includes/", "/cms/wp-includes/",
+                         "/site/wp-includes/", "/sito/wp-includes/", "/wp2/wp-includes/",
+                         "/ecp/current/exporttool/")
+        is_scan = path in scan_exact or any(path.startswith(prefix) for prefix in scan_prefixes)
+        if request.path != "/favicon.ico" and not is_scan:
             _record_system_error(exc, level="WARN", code="NOT_FOUND")
         return render_template("errors/not_found.html"), 404
 
@@ -212,7 +234,10 @@ def create_app():
 
     @app.errorhandler(HTTPException)
     def handle_http_error(exc):
-        if exc.code and exc.code >= 400 and request.path not in {"/healthz", "/pulse_receiver", "/favicon.ico"}:
+        # Public crawlers sometimes POST to the homepage; return 405 but do not
+        # treat that unsupported verb as an application-health incident.
+        ignored_probe = exc.code == 405 and request.path == "/" and request.method not in {"GET", "HEAD"}
+        if exc.code and exc.code >= 400 and request.path not in {"/healthz", "/pulse_receiver", "/favicon.ico"} and not ignored_probe:
             _record_system_error(exc, level="WARN" if exc.code < 500 else "ERROR", code=f"HTTP_{exc.code}")
         return exc
 
