@@ -34,9 +34,6 @@ def expand_catalog(catalog):
         ("Eros", "Brown Bread", ["400g", "600g", "800g"], "loaf"),
         ("Fresh Queen", "White Bread", ["400g", "600g", "800g"], "loaf"),
         ("Fresh Queen", "Brown Bread", ["400g", "600g", "800g"], "loaf"),
-        ("Naivas", "White Bread", ["400g", "600g", "800g"], "loaf"),
-        ("Naivas", "Brown Bread", ["400g", "600g", "800g"], "loaf"),
-        ("Naivas", "Milk Buns", ["4s", "6s", "8s"], "pack"),
         ("Fresh Queen", "Vanilla Cookies", ["200g", "400g", "800g"], "pack"),
         ("Fresh Queen", "Tea Scones", ["4s", "6s", "12s"], "pack"),
     ])
@@ -75,8 +72,6 @@ def expand_catalog(catalog):
         ("Unga", "Porridge Oats", ["500g", "1kg", "2kg"], "pack"),
         ("BIDCO", "Porridge Mix", ["500g", "1kg", "2kg"], "pack"),
         ("Mum's", "Granola", ["250g", "500g", "1kg"], "pack"),
-        ("Naivas", "Corn Flakes", ["250g", "500g", "1kg"], "box"),
-        ("Naivas", "Muesli", ["500g", "1kg", "2kg"], "pack"),
     ])
 
     _variants(catalog, "Rice, Flour, Pasta & Grains", [
@@ -163,7 +158,6 @@ def expand_catalog(catalog):
         ("Nutrameal", "Yellow Beans", ["500g", "1kg", "2kg"], "pack"),
         ("Nutrameal", "Ndengu", ["500g", "1kg", "2kg"], "pack"),
         ("Nutrameal", "Njahi Beans", ["500g", "1kg", "2kg"], "pack"),
-        ("Naivas", "White Beans", ["500g", "1kg", "2kg"], "pack"),
     ])
 
     _variants(catalog, "Snacks, Biscuits & Confectionery", [

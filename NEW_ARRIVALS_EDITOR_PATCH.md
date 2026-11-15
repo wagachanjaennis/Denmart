@@ -1,26 +1,19 @@
-# Denmart New Arrivals Product Editor
+# Denmart arrivals-to-catalogue integration
 
-## What changed
+This release makes the 53 bundled arrival photos real, searchable catalogue products.
 
-- Added `/control/new-arrivals`, an owner-only catalogue screen that lists the bundled photos in `static/catalogue/new-arrivals/` and shows whether each photo is connected to a database product.
-- Each unregistered photo can be turned into a normal searchable product with name, brand, barcode, category, selling price, cost and opening stock.
-- Saving without a selling price creates a disabled draft. It can be named and assigned a barcode first, then completed through the existing product editor. A zero-price draft cannot be enabled for online or POS sales.
-- Each product keeps a source-asset alias so the manager remembers which arrival photo belongs to it, even if an administrator later replaces the product image.
-- The public homepage's Fresh Arrivals strip now reads those photos dynamically. Once a product is named and has a positive enabled online price, the homepage shows the product name and KES price and links to its product page; unfinished items remain marked as new arrivals / price being updated.
-- Added the New arrivals link under Catalogue and stock in the admin navigation.
+## Deployment workflow
 
-## Database impact
-
-No existing table or column is added. The feature uses the current `products`, `store_products`, and `product_aliases` tables, so no database migration is required. The source photo itself remains in the project under `static/catalogue/new-arrivals/`.
-
-## Admin workflow
-
-1. Open **Control Centre → Catalogue and stock → New arrivals**.
-2. Choose the mart where the item belongs.
-3. Name each item, scan/type the barcode, and optionally add its brand, category, price, cost and opening quantity.
-4. If the price is not known yet, leave both price fields blank. The product is saved as a disabled draft.
-5. Use **Edit name, barcode, price & stock** on a registered item, or search it under **Products**, to finish or update it.
+1. Back up the live SQLite database before deploying. The database is intentionally not bundled in this ZIP.
+2. Deploy the complete project ZIP.
+3. Sign in as an owner with `products.create` permission and open **Catalogue and stock → New arrivals**.
+4. Select the target mart and use **Register all 53 arrivals as products** once. This idempotent action creates a `Product` and mart-specific `StoreProduct` draft for each photo, attaches the photo, and stores “New Product N” / “New Arrival N” as searchable aliases. Repeating it does not create duplicates.
+5. Open **Products** and search `New arrival` to find the whole set, or search a product name / `New Product N`. Edit names, barcode, category, selling price, cost and stock in the existing product editor. Drafts can be saved with a zero price while disabled.
+6. To publish an item, enter a real selling price and stock, then enable it and tick Online in its mart settings. Once available and in stock, its homepage arrival tile links to its product detail and has an Add to basket button using the normal Denmart cart ID.
 
 ## Notes
 
-The editor discovers photos directly from the bundled folder rather than depending on a hardcoded 52-item list. The uploaded source currently contains 53 WebP arrival photos.
+- Initial product names are photo-based starter descriptions. Where a package label or exact variant is not legible, the name is deliberately generic and should be confirmed during stock-taking. No barcode, price or stock quantity is fabricated.
+- The storefront displays “Price being updated” for unpriced drafts. Unpriced or out-of-stock items cannot be added to the basket.
+- Existing product, basket, barcode, inventory and checkout tables are reused. No schema migration is required.
+- This release changes backend routes, the homepage/product templates, admin navigation and the arrivals CSS. Deploy the full project ZIP rather than only static/templates.

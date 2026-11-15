@@ -9,7 +9,6 @@ CATALOG = {
         ("Broadways White Bread 400g", "Broadways", "loaf"), ("Broadways Brown Bread 400g", "Broadways", "loaf"),
         ("Broadways Premium White Bread 600g", "Broadways", "loaf"), ("Broadways Premium Brown Bread 600g", "Broadways", "loaf"),
         ("Festive White Bread 400g", "Festive", "loaf"), ("Festive Brown Bread 400g", "Festive", "loaf"),
-        ("Tuskys White Bread 400g", "Tuskys", "loaf"), ("Tuskys Brown Bread 400g", "Tuskys", "loaf"),
         ("Soko Brown Bread 400g", "Soko", "loaf"), ("Soko White Bread 400g", "Soko", "loaf"),
         ("Kings Muffins 6 Pack", "Kings", "pack"), ("Blue Band Buns 6 Pack", "Blue Band", "pack"),
         ("Hamburger Buns 4 Pack", "Bakery", "pack"), ("Hot Dog Buns 6 Pack", "Bakery", "pack"),
@@ -215,7 +214,6 @@ CATALOG = {_CATEGORY_RENAMES.get(k, k): v for k, v in CATALOG.items()}
 
 CATALOG["Bakery & Bread"].extend([
     ("Tupike Fresh White Bread 600g", "Tupike", "loaf"),
-    ("Naivas Fresh White Bread 800g", "Naivas", "loaf"),
 ])
 
 CATALOG["Dairy, Eggs & Chilled"].extend([
