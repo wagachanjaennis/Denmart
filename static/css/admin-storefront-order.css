@@ -11,3 +11,5 @@
 .storefront-order-arrows{display:flex;justify-content:flex-end;gap:6px}.storefront-order-arrows button{width:34px;height:32px;border:1px solid var(--border,#dce5e1);border-radius:8px;background:#fff;font-size:17px;cursor:pointer}
 .storefront-order-footnote{margin:16px 0 0}.storefront-order-toolbar .primary-btn{white-space:nowrap}
 @media(max-width:640px){.storefront-order-toolbar{align-items:flex-start;flex-direction:column}.storefront-order-toolbar .primary-btn{width:100%}.storefront-order-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.storefront-order-card{padding:8px}.storefront-order-card img,.storefront-order-no-image{height:112px}}
+
+.storefront-photo-edit{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:7px 10px;border:1px solid #dce5e1;border-radius:9px;color:#176746;background:#f5faf7;text-decoration:none;font-size:12px;font-weight:800}.storefront-photo-edit:hover{background:#e8f6ee}

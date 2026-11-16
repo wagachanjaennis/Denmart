@@ -27,11 +27,43 @@
   if(isIos&&!isStandalone()&&installPrompt&&!sessionStorage.getItem('denmart-install-dismissed'))setTimeout(()=>{installPrompt.hidden=false;installButton.textContent='How to install'},4500);
   if(isStandalone()){let touchStartY=0;document.addEventListener('touchstart',e=>{if(e.touches.length===1)touchStartY=e.touches[0].clientY},{passive:true});document.addEventListener('touchmove',e=>{if(e.touches.length!==1||window.scrollY>0)return;if(e.touches[0].clientY-touchStartY>8)e.preventDefault()},{passive:false});}
   if('serviceWorker' in navigator)navigator.serviceWorker.ready.then(reg=>reg.update?.().catch(()=>{})).catch(()=>{});
+  // Product sharing: native mobile share sheet includes installed social apps;
+  // copy-link remains available as a reliable fallback.
+  document.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-copy-product-link]');
+    if(!button)return;
+    event.preventDefault();
+    const url=button.dataset.copyProductLink||location.href;
+    try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(url);toast('Product link copied');}
+      else{const field=document.createElement('textarea');field.value=url;document.body.appendChild(field);field.select();document.execCommand('copy');field.remove();toast('Product link copied');}}
+    catch(_){window.prompt('Copy product link',url);}
+    const menu=button.closest('details');if(menu)menu.open=false;
+  });
+  document.addEventListener('click',async event=>{
+    const summary=event.target.closest('.product-share-menu > summary');
+    if(!summary||!navigator.share)return;
+    const detail=summary.parentElement;
+    const copy=detail.querySelector('[data-copy-product-link]');
+    if(!copy)return;
+    event.preventDefault();
+    try{await navigator.share({title:detail.closest('.product-card')?.dataset.productName||'Denmart product',url:copy.dataset.copyProductLink});}
+    catch(_){detail.open=true;}
+  });
   // Live public-catalogue search. Results are returned by the same ranked search
   // endpoint used by the rest of Denmart; relevance is never reordered by photos.
   const searchForms=[...document.querySelectorAll('.live-search-form')];
   const searchEsc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const searchMoney=n=>Number(n||0).toLocaleString('en-KE',{minimumFractionDigits:0,maximumFractionDigits:2});
+  const addShareMenu=(container,title,url)=>{
+    const details=document.createElement('details');details.className='product-share-menu';
+    const summary=document.createElement('summary');summary.textContent='Share ↗';summary.setAttribute('aria-label','Share '+(title||'product'));
+    const options=document.createElement('div');options.className='product-share-options';
+    const copy=document.createElement('button');copy.type='button';copy.textContent='Copy link';copy.dataset.copyProductLink=new URL(url,location.origin).href;
+    const link=(label,href)=>{const a=document.createElement('a');a.textContent=label;a.href=href;a.target='_blank';a.rel='noopener';return a;};
+    const absolute=new URL(url,location.origin).href;
+    options.append(copy,link('WhatsApp','https://wa.me/?text='+encodeURIComponent((title||'Denmart product')+' '+absolute)),link('Facebook','https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(absolute)),link('Telegram','https://t.me/share/url?url='+encodeURIComponent(absolute)+'&text='+encodeURIComponent(title||'Denmart product')));
+    details.append(summary,options);container.appendChild(details);
+  };
   searchForms.forEach(form=>{
     const input=form.querySelector('input[name="q"]'), dropdown=form.querySelector('.live-search-dropdown');
     if(!input||!dropdown)return;
@@ -69,7 +101,7 @@
         const title=document.createElement('a');title.className='product-title';title.href=productUrl(item);title.textContent=item.name||'Product';
         const bottom=document.createElement('div');bottom.className='product-bottom';const price=document.createElement('strong');price.textContent='KES '+searchMoney(item.price);
         const inStock=item.in_stock!==false;const add=document.createElement('button');add.type='button';add.textContent=inStock?'Add':'Unavailable';add.disabled=!inStock;add.setAttribute('aria-label',inStock?'Add '+(item.name||'product')+' to basket':'Out of stock');if(inStock)add.addEventListener('click',()=>window.addToCart(String(item.id),item.name||'Product',Number(item.price||0)));if(!inStock){const stock=document.createElement('span');stock.className='product-stock-status';stock.textContent='Out of stock';info.append(brand,title,stock)}else info.append(brand,title);
-        bottom.append(price,add);info.append(bottom);article.append(link,info);grid.appendChild(article);
+        bottom.append(price,add);addShareMenu(bottom,item.name||'Denmart product',productUrl(item));info.append(bottom);article.append(link,info);grid.appendChild(article);
       });
     };
     const search=async()=>{

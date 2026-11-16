@@ -53,7 +53,18 @@
     else add.addEventListener('click', () => {
       if (typeof window.addToCart === 'function') window.addToCart(String(product.id), String(product.name || 'Product'), Number(product.price || 0));
     });
-    bottom.append(price, add); info.appendChild(bottom); card.append(imageLink, info);
+    bottom.append(price, add);
+    const share = document.createElement('details'); share.className = 'product-share-menu';
+    const summary = document.createElement('summary'); summary.textContent = 'Share ↗'; summary.setAttribute('aria-label', 'Share ' + (product.name || 'product'));
+    const options = document.createElement('div'); options.className = 'product-share-options';
+    const shareUrl = new URL(href, location.origin).href;
+    const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = 'Copy link'; copy.dataset.copyProductLink = shareUrl;
+    const makeLink = (label, destination) => { const link = document.createElement('a'); link.textContent = label; link.href = destination; link.target = '_blank'; link.rel = 'noopener'; return link; };
+    options.append(copy, makeLink('WhatsApp', 'https://wa.me/?text=' + encodeURIComponent((product.name || 'Denmart product') + ' ' + shareUrl)),
+      makeLink('Facebook', 'https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(shareUrl)),
+      makeLink('Telegram', 'https://t.me/share/url?url=' + encodeURIComponent(shareUrl) + '&text=' + encodeURIComponent(product.name || 'Denmart product')));
+    share.append(summary, options); bottom.appendChild(share);
+    info.appendChild(bottom); card.append(imageLink, info);
     return card;
   }
 
