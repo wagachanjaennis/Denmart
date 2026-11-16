@@ -34,6 +34,11 @@
         </a>
       </div>
     </section>
+
+    <section class="home-search-panel" aria-label="Search Denmart products">
+      <div class="home-search-visual" aria-hidden="true"><span class="search-visual-label">DENMART PICKS</span><strong>Find your everyday favourites.</strong><span class="search-visual-caption">Fresh finds · Home essentials · Groceries</span></div>
+      <div class="home-search-content"><span class="eyebrow">WHAT ARE YOU LOOKING FOR?</span><form class="home-main-search live-search-form" action="/shop" method="get" data-store-id="{{store.id if store else ''}}" data-store-code="{{store.code if store else ''}}"><input name="q" placeholder="Search products, brands or barcode…" autocomplete="off" inputmode="search" aria-label="Search products"><button type="submit">Search</button><div class="live-search-dropdown" hidden role="listbox" aria-label="Product matches"></div></form><a class="home-advertise-link" href="/advertisement?view=advertise">Advertise with Denmart <span aria-hidden="true">→</span></a></div>
+    </section>
     <section class="catalogue-section denmart-new-arrivals" aria-labelledby="denmart-new-arrivals-title">
       <div class="section-head">
         <div><span class="eyebrow">JUST ARRIVED</span><h2 id="denmart-new-arrivals-title">Fresh arrivals at Denmart</h2>
@@ -58,6 +63,7 @@
             {% else %}
               <small class="arrival-shop-status">Price being updated</small>
             {% endif %}
+            {% if arrival.product %}<details class="product-share-menu arrival-share-menu"><summary>Share ↗</summary><div class="product-share-options"><button type="button" data-copy-product-link="{{url_for('shop.product',slug=arrival.product.slug,_external=True)}}">Copy link</button><a target="_blank" rel="noopener" href="https://wa.me/?text={{(item_name ~ ' ' ~ url_for('shop.product',slug=arrival.product.slug,_external=True))|urlencode}}">WhatsApp</a><a target="_blank" rel="noopener" href="https://www.facebook.com/sharer/sharer.php?u={{url_for('shop.product',slug=arrival.product.slug,_external=True)|urlencode}}">Facebook</a></div></details>{% endif %}
           </article>
         {% endfor %}
       </div>
@@ -90,5 +96,5 @@
 })();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){}); } catch (_) {}
 </script>
-<script src="{{url_for('static',filename='js/shop-infinite.js')}}?v=20261025-photo-cache-v4"></script>
+<script src="{{url_for('static',filename='js/shop-infinite.js')}}?v=20261116-share-contained-gallery-v1"></script>
 {% endblock %}

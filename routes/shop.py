@@ -248,7 +248,8 @@ def catalogue_page(store=None, q="", category="", page=1, page_size=60):
         needle = f"%{q[:100]}%"
         alias_ids = db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(needle))
         query = query.filter(or_(Product.name.ilike(needle), Product.brand.ilike(needle),
-                                 Product.barcode.ilike(needle), Product.sku.ilike(needle), Product.id.in_(alias_ids)))
+                                 Product.barcode.ilike(needle), Product.sku.ilike(needle),
+                                 Product.search_keywords.ilike(needle), Product.id.in_(alias_ids)))
     page = max(1, min(int(page or 1), 10000))
     page_size = max(12, min(int(page_size or 60), 72))
     total = query.count()
@@ -691,14 +692,23 @@ def _icon_bytes(size):
         pad = int(size * 0.14)
         draw = ImageDraw.Draw(canvas)
         draw.rounded_rectangle((pad, pad, size - pad, size - pad), radius=int(size * .18), fill=(255,255,255,255))
+        mark_path = Path(current_app.root_path) / "static" / "brand-denmart-mark.png"
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(size * .30))
+            if mark_path.is_file():
+                mark = Image.open(mark_path).convert("RGBA")
+                mark.thumbnail((int(size * .72), int(size * .72)), Image.Resampling.LANCZOS)
+                canvas.alpha_composite(mark, ((size-mark.width)//2, (size-mark.height)//2))
+            else:
+                raise FileNotFoundError(mark_path)
         except Exception:
-            font = ImageFont.load_default()
-        words = [part for part in brand_name.split() if part]
-        text = "".join(part[0] for part in words[:2]).upper() if len(words) > 1 else brand_name[:2].upper()
-        bbox = draw.textbbox((0,0), text, font=font)
-        draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(39,200,120,255), font=font)
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(size * .30))
+            except Exception:
+                font = ImageFont.load_default()
+            words = [part for part in brand_name.split() if part]
+            text = "".join(part[0] for part in words[:2]).upper() if len(words) > 1 else brand_name[:2].upper()
+            bbox = draw.textbbox((0,0), text, font=font)
+            draw.text(((size-(bbox[2]-bbox[0]))/2, (size-(bbox[3]-bbox[1]))/2-int(size*.03)), text, fill=(39,200,120,255), font=font)
     out = BytesIO()
     canvas.convert("RGB").save(out, format="PNG", optimize=True)
     out.seek(0)
@@ -820,8 +830,14 @@ async function savePage(request, response, url) {
   try {
     const cache = await caches.open(PAGE_CACHE);
     await cache.put(request, response.clone());
-    const canonical = new Request(url.origin + url.pathname);
-    await cache.put(canonical, response.clone());
+    // Keep the advertiser contact view separate from the full-screen ad player.
+    // Both use /advertisement with different query strings, so never let the
+    // contact page overwrite the canonical offline player cache.
+    const advertiserInfo = url.pathname === "/advertisement" && url.searchParams.get("view") === "advertise";
+    if (!advertiserInfo) {
+      const canonical = new Request(url.origin + url.pathname);
+      await cache.put(canonical, response.clone());
+    }
   } catch (_) {}
 }
 

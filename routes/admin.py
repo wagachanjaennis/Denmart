@@ -23,7 +23,7 @@ from models import (Product, StoreProduct, PricingRule, PriceHistory, InventoryT
 from services.audit import audit
 from services.backup_restore import export_database_json, create_sqlite_snapshot, restore_database_json, restore_sqlite_snapshot
 from services.search import forgiving_rank
-from services.product_images import is_data_image_url
+from services.product_images import is_data_image_url, IMAGE_REMOVED_SENTINEL
 
 bp = Blueprint("admin", __name__)
 ADMIN_BASE = "/control"
@@ -242,7 +242,7 @@ def dashboard():
     sales_total=db.session.query(db.func.coalesce(db.func.sum(Sale.total),0)).filter(Sale.business_id==business_id,Sale.status=="COMPLETED").scalar() or 0
     expenses_today=db.session.query(db.func.coalesce(db.func.sum(Expense.amount),0)).filter(Expense.business_id==business_id,db.func.date(Expense.incurred_at)==db.func.current_date()).scalar() or 0
     cogs_today=db.session.query(db.func.coalesce(db.func.sum((-InventoryTransaction.quantity)*InventoryTransaction.unit_cost),0)).join(Store,Store.id==InventoryTransaction.store_id).filter(Store.business_id==business_id,InventoryTransaction.transaction_type=="SALE",InventoryTransaction.quantity<0,today).scalar() or 0
-    low_stock=(StoreProduct.query.filter(StoreProduct.stock_quantity<=StoreProduct.reorder_level).join(Product).join(Store).filter(Store.business_id==business_id).count())
+    low_stock=(StoreProduct.query.filter(StoreProduct.stock_quantity<=db.func.coalesce(StoreProduct.reorder_level, 0)).join(Product).join(Store).filter(Store.business_id==business_id).count())
     products_online=(StoreProduct.query.join(Store).filter(Store.business_id==business_id,StoreProduct.is_available.is_(True),StoreProduct.available_online.is_(True)).count())
     unresolved_errors=SystemError.query.filter_by(business_id=business_id,resolved=False).count()
     customers_count=Customer.query.filter_by(business_id=business_id,is_active=True).count()
@@ -355,6 +355,7 @@ def products():
 
 
 @bp.route(f"{ADMIN_BASE}/storefront-order", methods=["GET", "POST"])
+@bp.route(f"{ADMIN_BASE}/storefront-editor", methods=["GET", "POST"])
 @admin_required("products.edit")
 def storefront_order():
     """Preview the live online catalogue and save its per-mart drag/drop order."""
@@ -1340,7 +1341,7 @@ def save_product_image(product_id):
         if uploaded:
             _set_product_image(product, uploaded, source_type="ADMIN_UPLOAD")
         elif remove_image:
-            product.image_url = None
+            product.image_url = IMAGE_REMOVED_SENTINEL
             ProductImage.query.filter_by(product_id=product.id).delete(synchronize_session=False)
         elif image_url:
             _set_product_image(product, image_url, source_type="ADMIN_URL")
@@ -1424,7 +1425,7 @@ def save_product(product_id):
         if uploaded_image:
             _set_product_image(product, uploaded_image)
         elif request.form.get("remove_image") == "1":
-            product.image_url = None
+            product.image_url = IMAGE_REMOVED_SENTINEL
             ProductImage.query.filter_by(product_id=product.id).delete(synchronize_session=False)
         elif submitted_image_url:
             _set_product_image(product, submitted_image_url, source_type="ADMIN_URL")
@@ -1670,13 +1671,13 @@ def inventory():
     if selected_store:
         query = query.filter(StoreProduct.store_id == selected_store.id)
     if low:
-        query = query.filter(StoreProduct.stock_quantity <= StoreProduct.reorder_level)
+        query = query.filter(StoreProduct.stock_quantity <= db.func.coalesce(StoreProduct.reorder_level, 0))
     if q:
         pattern = f"%{q}%"
         alias_ids = db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(pattern))
         query = query.filter(or_(Product.name.ilike(pattern), Product.brand.ilike(pattern), Product.sku.ilike(pattern),
                                  Product.barcode.ilike(pattern), Product.search_keywords.ilike(pattern), Product.id.in_(alias_ids)))
-    rows = query.order_by((StoreProduct.stock_quantity - StoreProduct.reorder_level).asc(), Product.name.asc()).limit(400).all()
+    rows = query.order_by((StoreProduct.stock_quantity - db.func.coalesce(StoreProduct.reorder_level, 0)).asc(), Product.name.asc()).limit(400).all()
     total_cost = sum((Decimal(str(r.stock_quantity or 0)) * Decimal(str(r.cost_price or 0)) for r in rows), Decimal("0"))
     total_retail = sum((Decimal(str(r.stock_quantity or 0)) * Decimal(str(r.selling_price or 0)) for r in rows), Decimal("0"))
     low_count = sum(1 for r in rows if Decimal(str(r.stock_quantity or 0)) <= Decimal(str(r.reorder_level or 0)))
@@ -1758,6 +1759,35 @@ def categories():
     cats = Category.query.filter_by(business_id=business_id).order_by(Category.sort_order, Category.name).all()
     usage = {c.id: Product.query.filter_by(category_id=c.id).count() for c in cats}
     return render_template("admin/categories.html", categories=cats, usage=usage)
+
+
+@bp.post(f"{ADMIN_BASE}/categories/<category_id>/edit")
+@admin_required("products.edit")
+def edit_category(category_id):
+    category = Category.query.filter_by(id=category_id, business_id=current_user.business_id).first_or_404()
+    name = (request.form.get("name") or "").strip()[:160]
+    if not name:
+        flash("Category name is required.", "error")
+        return redirect(url_for("admin.categories"))
+    duplicate = Category.query.filter(Category.business_id == current_user.business_id,
+                                      db.func.lower(Category.name) == name.lower(),
+                                      Category.id != category.id).first()
+    if duplicate:
+        flash("Another category already uses that name.", "error")
+        return redirect(url_for("admin.categories"))
+    try:
+        order = int(request.form.get("sort_order") or 0)
+    except (TypeError, ValueError):
+        flash("Sort order must be a whole number.", "error")
+        return redirect(url_for("admin.categories"))
+    old = {"name": category.name, "sort_order": category.sort_order}
+    category.name = name
+    category.description = (request.form.get("description") or "").strip() or None
+    category.sort_order = order
+    db.session.commit()
+    audit("CATEGORY_UPDATED", "Category", category.id, old_values=old, new_values={"name": name, "sort_order": order})
+    flash("Category updated.", "success")
+    return redirect(url_for("admin.categories"))
 
 
 @bp.post(f"{ADMIN_BASE}/categories/<category_id>/toggle")
@@ -2211,6 +2241,8 @@ def settings():
     sidebar_ad_body_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_body").first()
     sidebar_ad_link_setting=SystemSetting.query.filter_by(business_id=business_id,key="storefront_sidebar_ad_link").first()
     control2_approval_setting=SystemSetting.query.filter_by(business_id=business_id,key="control2_can_approve_payments").first()
+    advertising_phone_setting=SystemSetting.query.filter_by(business_id=business_id,key="advertising_contact_phone").first()
+    advertising_email_setting=SystemSetting.query.filter_by(business_id=business_id,key="advertising_contact_email").first()
     if request.method=="POST":
         name=(request.form.get("business_name") or "").strip()[:200]
         brand_name=(request.form.get("brand_name") or "").strip()[:100]
@@ -2218,6 +2250,11 @@ def settings():
         sidebar_ad_title=(request.form.get("sidebar_ad_title") or "").strip()[:100]
         sidebar_ad_body=(request.form.get("sidebar_ad_body") or "").strip()[:300]
         sidebar_ad_link=(request.form.get("sidebar_ad_link") or "").strip()[:300]
+        advertising_phone=(request.form.get("advertising_contact_phone") or "").strip()[:40]
+        advertising_email=(request.form.get("advertising_contact_email") or "").strip()[:160]
+        if advertising_email and ("@" not in advertising_email or " " in advertising_email):
+            flash("Enter a valid advertising contact email address.", "error")
+            return redirect(url_for("admin.settings"))
         control2_can_approve = "1" if request.form.get("control2_can_approve_payments") == "1" else "0"
         if sidebar_ad_link and not (sidebar_ad_link.startswith("/") or sidebar_ad_link.startswith("https://")):
             sidebar_ad_link = ""
@@ -2235,6 +2272,10 @@ def settings():
         sidebar_ad_link_setting.value=sidebar_ad_link
         control2_approval_setting=control2_approval_setting or SystemSetting(business_id=business_id,key="control2_can_approve_payments")
         control2_approval_setting.value=control2_can_approve
+        advertising_phone_setting=advertising_phone_setting or SystemSetting(business_id=business_id,key="advertising_contact_phone")
+        advertising_phone_setting.value=advertising_phone
+        advertising_email_setting=advertising_email_setting or SystemSetting(business_id=business_id,key="advertising_contact_email")
+        advertising_email_setting.value=advertising_email
         footer_setting=footer_setting or SystemSetting(business_id=business_id,key="footer_text")
         footer_setting.value=footer
         try: lp=max(0,int(request.form.get("loyalty_points_per_100","1") or "1"))
@@ -2256,6 +2297,8 @@ def settings():
                            sidebar_ad_body=brand_display_copy(sidebar_ad_body_setting.value, brand_display_name(brand_setting.value if brand_setting else "")) if sidebar_ad_body_setting else "",
                            sidebar_ad_link=sidebar_ad_link_setting.value if sidebar_ad_link_setting else "",
                            control2_can_approve_payments=(control2_approval_setting.value if control2_approval_setting else "0") == "1",
+                           advertising_contact_phone=advertising_phone_setting.value if advertising_phone_setting else "",
+                           advertising_contact_email=advertising_email_setting.value if advertising_email_setting else "",
                            loyalty_points_per_100=loyalty_setting.value if loyalty_setting else "1")
 
 def _reports_payload(days):
@@ -2390,6 +2433,13 @@ def audit_page():
 def system_errors():
     business_id = current_user.business_id
     if request.method == "POST":
+        if request.form.get("action") == "clear_all":
+            count = SystemError.query.filter_by(business_id=business_id).count()
+            SystemError.query.filter_by(business_id=business_id).delete(synchronize_session=False)
+            audit("SYSTEM_ERROR_LOG_CLEARED", "Business", business_id, new_values={"deleted_errors": count})
+            db.session.commit()
+            flash(f"Cleared {count} historical system-error entries. New incidents will be recorded normally.", "success")
+            return redirect(url_for("admin.system_errors"))
         error_id = request.form.get("error_id") or ""
         row = db.session.get(SystemError, error_id)
         if row and row.business_id == business_id:

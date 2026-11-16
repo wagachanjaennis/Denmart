@@ -5,6 +5,7 @@ import re
 import hashlib
 from flask import Blueprint, current_app, jsonify, request, url_for
 from flask_login import current_user, login_required
+from sqlalchemy import or_
 from extensions import csrf, db
 from models import Product, ProductAlias, StoreProduct, Sale, SaleItem, InventoryTransaction, now, Store, Customer, Business, SystemSetting, GatewaySmsMessage
 from services.search import forgiving_rank
@@ -191,7 +192,18 @@ def product_search():
     if store_id: query = query.filter(StoreProduct.store_id == store_id)
     category_id = request.args.get("category_id", "").strip()
     if category_id: query = query.filter(Product.category_id == category_id)
-    rows = query.order_by(Product.name).limit(2000).all()
+    if q and len(q) >= 2:
+        needle = f"%{q[:100]}%"
+        alias_ids = db.session.query(ProductAlias.product_id).filter(ProductAlias.alias.ilike(needle)).limit(800)
+        narrowed = query.filter(or_(Product.name.ilike(needle), Product.brand.ilike(needle),
+                                    Product.barcode.ilike(needle), Product.sku.ilike(needle),
+                                    Product.search_keywords.ilike(needle), Product.id.in_(alias_ids)))
+        rows = narrowed.order_by(Product.name).limit(500).all()
+        # Keep typo-tolerant search for unusual misspellings if SQL matching found none.
+        if not rows:
+            rows = query.order_by(Product.name).limit(1200).all()
+    else:
+        rows = query.order_by(Product.name).limit(300).all()
     from services.catalogue_feeder import apply_online_feeder_overlay
     # This is the public online product API. The /api/pos/* endpoints intentionally
     # do not call the feeder so local scanning and offline stock remain unchanged.

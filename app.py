@@ -222,7 +222,16 @@ def create_app():
         scan_prefixes = ("/wp-content/", "/wp-includes/", "/cms/wp-includes/",
                          "/site/wp-includes/", "/sito/wp-includes/", "/wp2/wp-includes/",
                          "/ecp/current/exporttool/")
-        is_scan = path in scan_exact or any(path.startswith(prefix) for prefix in scan_prefixes)
+        scan_markers = ("/.env", "/.git", "/.vscode/", "/wp-", "/wp/", "/actuator", "/debug", "/__debug__",
+                        "/_debugbar", "/_profiler", "/_ignition", "/telescope", "/graphql", "/api/config",
+                        "/api/v1/keys", "/api/v1/models", "/phpinfo", "/server-status", "/.well-known/security.txt",
+                        "/openapi", "/swagger", "/api/session/properties", "/playground", "/api-keys",
+                        "/webhooks", "/settings/developer", "/settings/integrations", "/settings/billing",
+                        "/settings/security", "/settings/team", "/billing", "/pricing", "/onboarding",
+                        "/organization", "/invite", "/checkout", "/integrations", "/docs", "/admin/")
+        is_scan = (path in scan_exact or any(path.startswith(prefix) for prefix in scan_prefixes)
+                   or any(marker in path for marker in scan_markers)
+                   or path.endswith((".env", ".php", ".axd")))
         if request.path != "/favicon.ico" and not is_scan:
             _record_system_error(exc, level="WARN", code="NOT_FOUND")
         return render_template("errors/not_found.html"), 404
@@ -230,6 +239,10 @@ def create_app():
     @app.errorhandler(CSRFError)
     def handle_csrf_error(exc):
         _record_system_error(exc, level="SECURITY", code="CSRF_ERROR")
+        if request.path.startswith("/control") and request.method == "POST":
+            from flask import flash
+            flash("Your admin security token expired. The action was not submitted; refresh the page and try again.", "warning")
+            return redirect(url_for("admin.dashboard"))
         return render_template("errors/server_error.html"), 400
 
     @app.errorhandler(HTTPException)

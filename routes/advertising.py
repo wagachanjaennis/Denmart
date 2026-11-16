@@ -24,7 +24,7 @@ from flask import Blueprint, current_app, jsonify, redirect, render_template, re
 
 from extensions import db
 from flask_login import current_user
-from models import SystemSetting, Product, ProductImage, StoreProduct, now
+from models import SystemSetting, Product, ProductImage, StoreProduct, Business, now
 from services.product_images import product_image_sources, product_image_source, data_url_to_bytes, is_data_image_url, _local_static_image, real_product_image_url
 from routes.dev_admin import _dev_ok, _business, _audit
 
@@ -720,6 +720,26 @@ def current_public_campaign():
 @bp.get("/advertisement")
 @bp.get("/advertisement/screen")
 def public_screen():
+    if request.args.get("view") == "advertise":
+        business = Business.query.order_by(Business.created_at).first()
+        def _setting(keys):
+            if not business:
+                return ""
+            for key in keys:
+                row = SystemSetting.query.filter_by(business_id=business.id, key=key).first()
+                if row and str(row.value or "").strip():
+                    return str(row.value).strip()
+            return ""
+        phone = (business.phone if business else "") or _setting(("advertising_contact_phone", "advertisement_contact_phone", "public_contact_phone")) or current_app.config.get("PUBLIC_CONTACT_PHONE", "")
+        email = (business.email if business else "") or _setting(("advertising_contact_email", "advertisement_contact_email", "public_contact_email")) or current_app.config.get("PUBLIC_CONTACT_EMAIL", "")
+        phone_digits = re.sub(r"\D", "", str(phone or ""))
+        if phone_digits.startswith("0") and len(phone_digits) >= 9:
+            phone_digits = "254" + phone_digits[1:]
+        elif phone_digits and not phone_digits.startswith("254"):
+            phone_digits = "254" + phone_digits
+        response = current_app.make_response(render_template("advertising/advertise_info.html", business=business, phone=phone, whatsapp_phone=phone_digits, email=email))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
     campaign = _campaign_for_public()
     response = current_app.make_response(render_template("advertising/screen.html", campaign=campaign))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
