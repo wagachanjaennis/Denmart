@@ -400,13 +400,16 @@ def storefront_order():
         return redirect(url_for("admin.storefront_order", store_id=store.id))
 
     rows = _storefront_catalogue_order(base_query, store=store).limit(2000).all()
+    # Resolve the same saved gallery images and feeder image overrides used by the
+    # public catalogue even when a custom order already exists. The visual editor's
+    # photo-first automation must not classify a product as imageless merely because
+    # its primary photo lives in ProductImage or the active feeder cache.
+    rows = _attach_saved_product_images(rows)
+    from services.catalogue_feeder import apply_online_feeder_overlay
+    rows = apply_online_feeder_overlay(rows, store.business_id)
     if not _has_custom_storefront_order(store):
-        # Match the current customer catalogue exactly before its first manual save:
-        # product-image attachments + feeder overlays, then the same family mix used
-        # on each 60-item storefront page and the infinite-scroll endpoint.
-        rows = _attach_saved_product_images(rows)
-        from services.catalogue_feeder import apply_online_feeder_overlay
-        rows = apply_online_feeder_overlay(rows, store.business_id)
+        # Before the first manual save, match the same family mix used on each
+        # 60-item storefront page and the infinite-scroll endpoint.
         storefront_sequence = []
         for offset in range(0, len(rows), 60):
             storefront_sequence.extend(_interleave_catalogue(rows[offset:offset + 60]))

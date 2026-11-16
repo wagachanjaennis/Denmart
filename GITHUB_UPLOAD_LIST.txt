@@ -1,0 +1,28 @@
+Replace/add these files at the repository root using the exact relative paths below.
+The database is not part of this code update. Do not replace SQLite/JSON backups or the live database.
+
+app.py
+routes/admin.py
+routes/advertising.py
+routes/api.py
+routes/shop.py
+services/product_images.py
+static/brand-denmart-mark.png
+static/css/admin-storefront-order.css
+static/css/app.css
+static/js/app.js
+static/js/shop-infinite.js
+static/js/admin-storefront-order.js
+templates/admin/_nav.html
+templates/admin/categories.html
+templates/admin/inventory.html
+templates/admin/settings.html
+templates/admin/storefront_order.html
+templates/admin/system_errors.html
+templates/advertising/advertise_info.html
+templates/base.html
+templates/shop/_card.html
+templates/shop/home.html
+templates/shop/product.html
+templates/shop/shop.html
+DENMART_SCROLL_MOBILE_SORT_FIXES_2026-11-16.md

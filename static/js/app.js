@@ -25,7 +25,8 @@
   const startInstall=async()=>{if(deferredInstallPrompt){deferredInstallPrompt.prompt();const choice=await deferredInstallPrompt.userChoice.catch(()=>({outcome:'dismissed'}));if(choice.outcome==='accepted')hideInstallUi();deferredInstallPrompt=null;return;}if(isIos&&!isStandalone()){toast('On iPhone/iPad: tap Share, then Add to Home Screen');return;}toast('Use your browser menu and choose Install app or Add to Home Screen.')};
   installButton?.addEventListener('click',startInstall);installLink?.addEventListener('click',startInstall);installDismiss?.addEventListener('click',()=>{if(installPrompt)installPrompt.hidden=true;sessionStorage.setItem('denmart-install-dismissed','1')});
   if(isIos&&!isStandalone()&&installPrompt&&!sessionStorage.getItem('denmart-install-dismissed'))setTimeout(()=>{installPrompt.hidden=false;installButton.textContent='How to install'},4500);
-  if(isStandalone()){let touchStartY=0;document.addEventListener('touchstart',e=>{if(e.touches.length===1)touchStartY=e.touches[0].clientY},{passive:true});document.addEventListener('touchmove',e=>{if(e.touches.length!==1||window.scrollY>0)return;if(e.touches[0].clientY-touchStartY>8)e.preventDefault()},{passive:false});}
+  // Leave vertical movement to the browser so normal page swiping works in installed mode too.
+  // overscroll-behavior-y on the document prevents unwanted pull-to-refresh without cancelling touchmove.
   if('serviceWorker' in navigator)navigator.serviceWorker.ready.then(reg=>reg.update?.().catch(()=>{})).catch(()=>{});
   // Product sharing: native mobile share sheet includes installed social apps;
   // copy-link remains available as a reliable fallback.

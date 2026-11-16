@@ -391,3 +391,19 @@ html,body{max-width:100%;overflow-x:hidden}.denmart-home-v2{width:100%;max-width
 .home-main-search .catalogue-search{position:relative;width:100%;min-width:0}.shop-search-panel{margin-top:10px}.shop-search-panel .home-search-content{gap:7px}.shop-search-panel .live-search-feedback{font-size:.72rem;color:#68796d}.arrival-share-menu{align-self:flex-start;margin-top:4px}.product-detail-share{align-self:flex-start;margin-top:8px}.product-detail-share .product-share-options{bottom:auto;top:calc(100% + 6px)}@media(max-width:700px){.catalogue-head .mini-qr{display:none!important}.shop-search-panel{margin-top:6px}.shop-search-panel .home-search-visual{min-height:62px}}
 
 .product-big-photo-open{display:block;position:relative}.product-big-photo-open .image-unavailable-label{position:absolute;left:12px;bottom:12px;padding:6px 9px;border-radius:8px;background:#ffffffdc;color:#1c533b;font-size:12px;font-weight:800}
+
+/* 16 Nov launch-readiness fixes: keep the document itself scrollable on touch and wheel. */
+html{height:auto!important;min-height:100%;overflow-y:auto!important;-webkit-overflow-scrolling:touch}
+body:not(.agent-page):not(.pos-page){height:auto!important;min-height:100vh;overflow-y:visible!important}
+html,body{overscroll-behavior-y:auto!important}
+body.pwa-standalone{overscroll-behavior-y:contain!important}
+
+/* Final responsive guard after legacy catalogue overrides: a phone gets two or three columns, never a desktop grid. */
+@media(max-width:900px){
+  .product-grid,.shop-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:10px!important}
+  .denmart-home-v2 .shop-home-main .home-grid,.shop-home-main .home-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:9px!important}
+}
+@media(max-width:560px){
+  .product-grid,.shop-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important}
+  .denmart-home-v2 .shop-home-main .home-grid,.shop-home-main .home-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important}
+}

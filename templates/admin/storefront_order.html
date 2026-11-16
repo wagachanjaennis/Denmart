@@ -1,15 +1,20 @@
 {% extends 'base.html' %}{% block body_class %}admin-page{% endblock %}{% block chrome %}{% endblock %}{% block content %}
-<link rel="stylesheet" href="{{url_for('static', filename='css/admin-storefront-order.css')}}?v=20261116-visual-shop-editor-v1">
+<link rel="stylesheet" href="{{url_for('static', filename='css/admin-storefront-order.css')}}?v=20261116-photo-first-drag-v2">
 <div class="control-shell">{% set admin_sidebar_class = 'control-sidebar' %}{% include 'admin/_nav.html' %}
 <main class="control-main">
   <header class="control-header"><div><span class="eyebrow">STOREFRONT VISUAL EDITOR</span><h1>Visual shop editor</h1><p>This is the customer-facing product grid, with admin-only photo controls. Dragging inserts a product at a new position; it never replaces another product. Prices, stock and availability are unchanged.</p></div><div class="control-user">{{rows|length}} products<small>online in this mart</small></div></header>
   <section class="admin-panel"><form method="get" class="toolbar"><label>Mart<select class="admin-input" name="store_id" onchange="this.form.submit()">{% for s in stores %}<option value="{{s.id}}" {% if s.id==store.id %}selected{% endif %}>{{s.name}}</option>{% endfor %}</select></label><span class="muted">This is the live online catalogue order for {{store.name}}.</span></form></section>
-  <section class="admin-panel storefront-order-panel"><div class="storefront-order-toolbar"><div><h2>Customer view preview</h2><p class="muted">Press and hold the grip to drag. On a computer, you can also drag with the mouse. Use the arrows for precise movement.</p></div><form id="storefrontOrderForm" method="post" action="{{url_for('admin.storefront_order')}}"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="store_id" value="{{store.id}}"><input type="hidden" name="ordered_ids" id="orderedProductIds" value=""></form><button class="primary-btn" type="submit" form="storefrontOrderForm">Save display order</button></div>
+  <section class="admin-panel storefront-order-panel"><div class="storefront-order-toolbar"><div><h2>Customer view preview</h2><p class="muted">On a phone, drag using the grip so the page still scrolls normally. On a computer, drag any card and drop it exactly where it should go. Dropping inserts it there and shifts the other products along.</p></div><form id="storefrontOrderForm" method="post" action="{{url_for('admin.storefront_order')}}"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="store_id" value="{{store.id}}"><input type="hidden" name="ordered_ids" id="orderedProductIds" value=""></form><button class="primary-btn" type="submit" form="storefrontOrderForm">Save display order</button></div>
     {% if not rows %}<p>No enabled online products are currently available for this mart.</p>{% else %}
+    <div class="storefront-order-automation">
+      <div class="storefront-order-automation-copy"><strong>Automatic photo arrangement</strong><span>Move every product with an available photo to the top, while keeping the existing order within each group. Products without photos will be placed together after the photo section.</span><small id="storefrontPhotoSummary" class="storefront-photo-summary" aria-live="polite">Checking product photos…</small></div>
+      <div class="storefront-order-automation-actions"><button type="button" class="admin-action" data-sort-photos-first>Put products with photos first</button><button type="button" class="secondary-action" data-reset-storefront-order>Undo unsaved changes</button></div>
+      <p id="storefrontOrderStatus" class="storefront-order-status" role="status" aria-live="polite"></p>
+    </div>
     <div id="storefrontOrderGrid" class="storefront-order-grid" aria-label="Reorder products shown in the online shop">
-      {% for row in rows %}<article class="storefront-order-card" data-product-id="{{row.id}}" draggable="false">
+      {% for row in rows %}{% set image = product_image_url(row.product) %}<article class="storefront-order-card" data-product-id="{{row.id}}" data-has-image="{{ '1' if image else '0' }}" draggable="false">
         <button class="storefront-drag-handle" type="button" aria-label="Drag {{row.product.name}} to reposition" title="Drag to reposition"><span>⠿</span></button>
-        {% set image = product_image_url(row.product) %}{% if image %}<img src="{{image}}" alt="{{row.product.name}}" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="storefront-order-no-image">No photo</div>{% endif %}
+        {% if image %}<img src="{{image}}" alt="{{row.product.name}}" loading="lazy" referrerpolicy="no-referrer">{% else %}<div class="storefront-order-no-image">No photo</div>{% endif %}
         <div class="storefront-order-card-copy"><strong>{{row.product.name}}</strong><span>KES {{'%.2f'|format(row.selling_price|float)}}</span><small>{{row.product.brand or 'Unbranded'}}</small></div>
         <a class="storefront-photo-edit" href="{{url_for('admin.save_product_image', product_id=row.product.id, store_id=store.id)}}">Edit / replace photo</a>
         <div class="storefront-order-arrows"><button type="button" data-move="up" aria-label="Move {{row.product.name}} up">↑</button><button type="button" data-move="down" aria-label="Move {{row.product.name}} down">↓</button></div>
@@ -19,4 +24,4 @@
     {% endif %}
   </section>
 </main></div>
-{% endblock %}{% block scripts %}<script src="{{url_for('static',filename='js/admin-storefront-order.js')}}?v=20261116-visual-shop-editor-v1"></script>{% endblock %}
+{% endblock %}{% block scripts %}<script src="{{url_for('static',filename='js/admin-storefront-order.js')}}?v=20261116-photo-first-drag-v2"></script>{% endblock %}
