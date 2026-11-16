@@ -314,13 +314,22 @@ def _manifest_photo_url(product) -> str:
     return candidate if _is_verified_bundled_photo_id(product_id) and _local_static_image(candidate) else ""
 
 
+IMAGE_REMOVED_SENTINEL = "__DENMART_IMAGE_REMOVED__"
+
+
 def product_image_sources(product) -> list[str]:
-    """Return trustworthy image candidates with durable/local photos first.
+    """Return trustworthy image candidates, with administrator overrides first.
 
     A photo already cached in PostgreSQL must beat its original external URL. This
     prevents every visit from waiting on a supplier CDN and makes images survive
     Render redeploys. Generated silhouette art is never accepted as a real photo.
     """
+    # An explicit admin removal is authoritative: never resurrect an older
+    # bundled, barcode, supplier, or cache image for this product.
+    current_image = str(getattr(product, "image_url", "") or "").strip()
+    if current_image == IMAGE_REMOVED_SENTINEL:
+        return []
+
     values: list[str] = []
 
     def add(raw):
@@ -355,35 +364,28 @@ def product_image_sources(product) -> list[str]:
         if value.startswith("/static/") or is_data_image_url(value):
             add(value)
 
-    # 1) Persistent database cache: it survives a new deployment and avoids hotlinks.
-    for saved in (getattr(product, "_denmart_durable_image_urls", None) or []):
-        add(saved)
-
-    # 2) Same-origin files bundled by the latest build. Prefer their versioned
-    # manifest URL so a corrected photo can replace an old immutable browser cache.
-    barcode = str(getattr(product, "barcode", "") or "").strip()
-    versioned_static = _static_manifest_photo_url(product)
-    add(versioned_static)
-    if barcode and barcode.isdigit():
-        fallback_barcode_url = f"/static/catalogue/products/by-barcode/{barcode}.webp"
-        if not any(value.split("?", 1)[0] == fallback_barcode_url for value in values):
-            add(fallback_barcode_url)
-    add(_manifest_photo_url(product))
-
-    # 3) Existing product/gallery uploads and local product.image_url mappings.
-    add_if_local_or_data(getattr(product, "image_url", ""))
-    add_if_local_or_data(getattr(product, "_denmart_saved_image_url", ""))
+    # 1) Administrator-selected primary image. ProductImage rows and the master
+    # image_url are the source of truth and must beat every bundled fallback.
+    add(getattr(product, "_denmart_saved_image_url", ""))
+    add_if_local_or_data(current_image)
     for saved in (getattr(product, "_denmart_gallery_image_urls", None) or []):
         add_if_local_or_data(saved)
 
-    # 4) Only after durable assets, try live sources. If they succeed, the image route
-    # saves a compressed copy in ProductImage so future visits no longer need the CDN.
+    # 2) Persistent cache and bundled assets are fallbacks only when no admin
+    # override exists.
+    for saved in (getattr(product, "_denmart_durable_image_urls", None) or []):
+        add(saved)
+    barcode = str(getattr(product, "barcode", "") or "").strip()
+    add(_static_manifest_photo_url(product))
+    if barcode and barcode.isdigit():
+        fallback_barcode_url = f"/static/catalogue/products/by-barcode/{barcode}.webp"
+        add(fallback_barcode_url)
+    add(_manifest_photo_url(product))
+
+    # 3) Live feeder/supplier sources are last-resort candidates.
     if bool(getattr(product, "_denmart_online_feeder_active", False)):
         add(getattr(product, "_denmart_online_image_url", ""))
-    add(getattr(product, "_denmart_saved_image_url", ""))
-    for saved in (getattr(product, "_denmart_gallery_image_urls", None) or []):
-        add(saved)
-    add(getattr(product, "image_url", ""))
+    add(current_image)
     add(_manifest_source_url(product))
 
     # Exact-name mappings are last-resort candidates. Ambiguous URLs shared by many
@@ -415,7 +417,12 @@ def public_product_image(product) -> str:
         return source
     product_id = str(getattr(product, "id", "") or "").strip()
     if product_id:
-        return f"/product-photo/{product_id}.jpg"
+        updated = getattr(product, "updated_at", None)
+        try:
+            version = int(updated.timestamp()) if updated else 0
+        except Exception:
+            version = 0
+        return f"/product-photo/{product_id}.jpg?v={version}"
     return source
 
 
