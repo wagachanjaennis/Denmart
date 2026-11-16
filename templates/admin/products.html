@@ -2,9 +2,40 @@
 {% block body_class %}admin-page{% endblock %}
 {% block chrome %}{% endblock %}
 {% block content %}
+<link rel="stylesheet" href="{{url_for('static',filename='css/admin-bulk-photo-products.css')}}?v=20261116-bulk-photo-v1">
 <div class="control-shell">{% set admin_sidebar_class='control-sidebar' %}{% include 'admin/_nav.html' %}
 <main class="control-main product-admin-main">
   <header class="control-header"><div><span class="eyebrow">CATALOGUE & STOCK</span><h1>Products</h1><p>Scan, type, save and move directly to the next item. No page refresh needed.</p></div><div class="control-user"><strong>{{total_rows}}</strong><small>matching catalogue rows</small></div></header>
+  <section class="admin-panel universal-bulk-editor" id="universalBulkEditor">
+    <div class="panel-heading">
+      <div><span class="eyebrow">ONE SAVE FOR THE WHOLE BATCH</span><h2>Universal bulk product editor</h2>
+        <p class="muted">Drop in many product photos, edit each name, add a selling price and opening quantity when ready, then save everything together. Price and quantity are optional.</p>
+      </div>
+      <span class="bulk-editor-count" id="bulkPhotoCount">0 photos added</span>
+    </div>
+    <form id="bulkPhotoProductForm" action="{{url_for('admin.bulk_create_products_with_images')}}" method="post" enctype="multipart/form-data" data-bulk-photo-products>
+      <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+      <div class="bulk-editor-global-fields">
+        <label>Save products to mart<select class="admin-input wide" name="store_id" id="bulkProductStore" required>{% for s in stores %}<option value="{{s.id}}" {% if store_id==s.id %}selected{% elif not store_id and loop.first %}selected{% endif %}>{{s.name}}</option>{% endfor %}</select></label>
+        <label>Category for this batch <span class="muted">(optional)</span><select class="admin-input wide" name="category_id" id="bulkProductCategory"><option value="">Choose later / no category</option>{% for c in categories %}<option value="{{c.id}}" {% if category_id==c.id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></label>
+      </div>
+      <label class="bulk-photo-dropzone" id="bulkPhotoDropzone" for="bulkProductImages" tabindex="0">
+        <span class="bulk-photo-drop-icon" aria-hidden="true">＋</span>
+        <strong>Drop multiple product photos here</strong>
+        <span>or tap to browse from your phone or computer</span>
+        <small>Up to 30 photos per save · JPG, PNG, WEBP and other supported image formats · 8 MB per image</small>
+        <input id="bulkProductImages" type="file" accept="image/*" multiple>
+      </label>
+      <div class="bulk-photo-queue-empty" id="bulkPhotoEmpty">Your selected product photos will appear here. Each photo becomes one new product.</div>
+      <div class="bulk-photo-queue" id="bulkPhotoQueue" aria-live="polite"></div>
+      <div class="bulk-editor-footer">
+        <div><strong id="bulkPhotoSummary">No products waiting</strong><small>Blank price saves an unpriced draft. Blank quantity saves zero opening stock.</small></div>
+        <div class="bulk-editor-actions"><button class="admin-action secondary-action" type="button" id="bulkPhotoClear" disabled>Clear batch</button><button class="login-action" type="submit" id="bulkPhotoSave" disabled>Save all products</button></div>
+      </div>
+      <div id="bulkPhotoFeedback" class="bulk-photo-feedback" role="status" aria-live="polite" hidden></div>
+    </form>
+  </section>
+
   <section class="admin-panel quick-product-panel" id="quickAddPanel">
     <div class="panel-heading"><div><h2>Quick product entry</h2><p class="muted">Barcode + name are enough to capture an item. Prices and stock can be filled now or later. Stock entered here is added to existing stock, never replaces it.</p></div><a class="admin-action secondary-action" href="#productSearch">Find existing products</a></div>
     <form id="quickProductForm" action="/control/api/products/quick-create" method="post" data-quick-product>
@@ -45,4 +76,4 @@
   </section>
 </main></div>
 {% endblock %}
-{% block scripts %}<script src="{{url_for('static',filename='js/admin-product-scan.js')}}?v=20261013-fast-quick-scan"></script><script src="{{url_for('static',filename='js/admin-quick-product.js')}}?v=20261013-1"></script>{% endblock %}
+{% block scripts %}<script src="{{url_for('static',filename='js/admin-bulk-photo-products.js')}}?v=20261116-bulk-photo-v1"></script><script src="{{url_for('static',filename='js/admin-product-scan.js')}}?v=20261013-fast-quick-scan"></script><script src="{{url_for('static',filename='js/admin-quick-product.js')}}?v=20261013-1"></script>{% endblock %}

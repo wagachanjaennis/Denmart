@@ -1,0 +1,32 @@
+/* Batch product photo capture: responsive owner-only admin editor. */
+.universal-bulk-editor{margin:0 0 20px;border:1px solid #dce9e1;background:linear-gradient(180deg,#fbfefc 0%,#fff 100%)}
+.universal-bulk-editor .panel-heading{align-items:flex-start;gap:14px}
+.universal-bulk-editor .panel-heading h2{margin:4px 0 6px}
+.universal-bulk-editor .panel-heading p{max-width:760px;margin:0;line-height:1.5}
+.bulk-editor-count{flex:none;padding:7px 11px;border:1px solid #dce9e1;border-radius:999px;background:#f1f8f3;color:#176746;font-size:12px;font-weight:800;white-space:nowrap}
+.bulk-editor-global-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+.bulk-editor-global-fields label,.bulk-photo-field{display:grid;gap:6px;min-width:0;font-size:12px;font-weight:750;color:#405149}
+.bulk-photo-dropzone{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:164px;padding:22px;border:2px dashed #a9cbb6;border-radius:15px;background:#f5fbf7;color:#285b43;text-align:center;cursor:pointer;transition:border-color .15s,background .15s,transform .15s}
+.bulk-photo-dropzone:hover,.bulk-photo-dropzone.is-drag-over{border-color:#168456;background:#eaf7ef}
+.bulk-photo-dropzone.is-drag-over{transform:scale(.995)}
+.bulk-photo-drop-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:#dff1e5;color:#176746;font-size:27px;line-height:1}
+.bulk-photo-dropzone strong{font-size:15px}.bulk-photo-dropzone>span:not(.bulk-photo-drop-icon){font-size:13px;color:#587166}.bulk-photo-dropzone small{font-size:11px;color:#75877d}
+.bulk-photo-dropzone input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.bulk-photo-queue-empty{padding:18px 12px;margin-top:12px;border:1px dashed #dce5df;border-radius:12px;color:#75827a;text-align:center;font-size:12px}
+.bulk-photo-queue{display:grid;grid-template-columns:repeat(auto-fill,minmax(265px,1fr));gap:12px;margin-top:14px}
+.bulk-photo-card{display:grid;grid-template-columns:94px minmax(0,1fr);gap:11px;min-width:0;padding:10px;border:1px solid #e0e9e3;border-radius:13px;background:#fff;box-shadow:0 3px 12px rgba(21,60,39,.045)}
+.bulk-photo-preview{width:94px;height:104px;overflow:hidden;border-radius:10px;background:#f5f8f6;align-self:start}
+.bulk-photo-preview img{width:100%;height:100%;display:block;object-fit:contain}
+.bulk-photo-details{display:grid;gap:8px;min-width:0}
+.bulk-photo-card-heading{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0}
+.bulk-photo-filename{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#7a8980}
+.bulk-photo-remove{flex:none;border:0;background:transparent;color:#a33b35;font-size:11px;font-weight:800;cursor:pointer;padding:3px}
+.bulk-photo-field{gap:4px;font-size:10px}
+.bulk-photo-field input{min-height:35px;padding:7px 9px;font-size:12px}
+.bulk-photo-field input.bulk-product-name{font-weight:700}
+.bulk-editor-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding:13px;border:1px solid #e1ebe4;border-radius:12px;background:#f7fbf8}
+.bulk-editor-footer>div:first-child{display:grid;gap:4px;min-width:0}.bulk-editor-footer strong{font-size:13px;color:#204b37}.bulk-editor-footer small{font-size:11px;color:#6f7f75;line-height:1.4}
+.bulk-editor-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.bulk-editor-actions button{min-height:40px;white-space:nowrap}
+.bulk-photo-feedback{margin-top:12px;padding:10px 12px;border-radius:10px;font-size:12px;line-height:1.5}.bulk-photo-feedback.success{border:1px solid #cfe6d6;background:#f0faf3;color:#17623e}.bulk-photo-feedback.error{border:1px solid #f0d0cc;background:#fff7f6;color:#99372e}
+@media(max-width:700px){.bulk-editor-global-fields{grid-template-columns:minmax(0,1fr)}.bulk-photo-queue{grid-template-columns:minmax(0,1fr)}.bulk-editor-footer{align-items:stretch;flex-direction:column}.bulk-editor-actions{display:grid;grid-template-columns:1fr 1.3fr}.bulk-editor-actions button{width:100%}.bulk-photo-dropzone{min-height:146px;padding:18px 12px}.bulk-photo-dropzone small{max-width:280px;line-height:1.4}}
+@media(max-width:380px){.bulk-photo-card{grid-template-columns:78px minmax(0,1fr);gap:8px;padding:8px}.bulk-photo-preview{width:78px;height:92px}.bulk-editor-actions{grid-template-columns:1fr}}

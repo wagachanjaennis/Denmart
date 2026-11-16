@@ -1209,6 +1209,168 @@ def quick_create_product():
         return jsonify(ok=False, error="save_failed", message="Could not save this product. Nothing was partially saved; check the fields and try again."), 500
 
 
+@bp.post(f"{ADMIN_BASE}/api/products/bulk-create-with-images")
+@admin_required("products.create")
+def bulk_create_products_with_images():
+    """Create a batch of photo-led product drafts in one atomic save."""
+    store_id = str(request.form.get("store_id") or "").strip()
+    category_id = str(request.form.get("category_id") or "").strip() or None
+    store = Store.query.filter_by(
+        id=store_id, business_id=current_user.business_id, is_active=True
+    ).first()
+    if not store:
+        return jsonify(ok=False, error="store_required", message="Choose an active mart before saving the batch."), 400
+
+    if category_id and not Category.query.filter_by(
+        id=category_id, business_id=current_user.business_id, is_active=True
+    ).first():
+        return jsonify(ok=False, error="invalid_category", message="Choose a valid category."), 400
+
+    files = [item for item in request.files.getlist("images") if item and item.filename]
+    if not files:
+        return jsonify(ok=False, error="images_required", message="Add at least one product photo first."), 400
+    if len(files) > 30:
+        return jsonify(ok=False, error="too_many_images", message="Save up to 30 product photos in one batch."), 400
+    if request.content_length and request.content_length > 64 * 1024 * 1024:
+        return jsonify(ok=False, error="batch_too_large", message="This batch is larger than 64 MB. Split it into two smaller batches."), 413
+
+    try:
+        metadata = json.loads(request.form.get("items") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return jsonify(ok=False, error="invalid_items", message="The product details could not be read. Please review the batch and try again."), 400
+    if not isinstance(metadata, list) or len(metadata) != len(files):
+        return jsonify(ok=False, error="item_count_mismatch", message="Each photo needs its own product row. Please add the photos again."), 400
+
+    # Validate and normalize the complete batch before creating any database rows.
+    prepared = []
+    total_bytes = 0
+    try:
+        for index, (upload, row) in enumerate(zip(files, metadata), start=1):
+            if not isinstance(row, dict):
+                raise ValueError(f"Product {index}: its details could not be read.")
+            raw_name = str(row.get("name") or "").strip()
+            if not raw_name:
+                stem = Path(str(upload.filename or "")).stem
+                raw_name = re.sub(r"[\s_-]+", " ", stem).strip(" .-")
+            name = (raw_name or f"New Product {index}")[:240]
+
+            price_raw = str(row.get("selling_price") or "").strip()
+            quantity_raw = str(row.get("stock_quantity") or "").strip()
+            price = Decimal(price_raw) if price_raw else None
+            quantity = Decimal(quantity_raw) if quantity_raw else Decimal("0")
+            if price is not None and (not price.is_finite() or price < 0):
+                raise ValueError(f"{name}: selling price must be a valid non-negative number.")
+            if quantity is None or not quantity.is_finite() or quantity < 0:
+                raise ValueError(f"{name}: opening quantity must be a valid non-negative number.")
+            # A zero price means the same as leaving the price blank: save as a draft.
+            if price is not None and price <= 0:
+                price = None
+
+            raw_size = getattr(upload, "content_length", None) or 0
+            if raw_size:
+                total_bytes += int(raw_size)
+            image_data = _uploaded_product_image(upload, name)
+            if not image_data:
+                raise ValueError(f"{name}: choose a valid product photo.")
+            prepared.append({
+                "name": name,
+                "price": price,
+                "quantity": quantity,
+                "image_data": image_data,
+            })
+        if total_bytes > 64 * 1024 * 1024:
+            raise ValueError("The photos exceed the 64 MB batch limit. Split them into smaller batches.")
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        return jsonify(ok=False, error="invalid_batch", message=str(exc)), 400
+
+    created_products = []
+    try:
+        from seed import slugify
+        for row in prepared:
+            name = row["name"]
+            base_slug = slugify(name) or "new-product"
+            slug = base_slug
+            suffix = 2
+            while Product.query.filter_by(slug=slug).first():
+                slug = f"{base_slug}-{suffix}"
+                suffix += 1
+
+            product = Product(
+                name=name,
+                slug=slug,
+                brand=None,
+                category_id=category_id,
+                unit="unit",
+                pack_size="unit",
+                description=None,
+                status="ACTIVE",
+                search_keywords=name.casefold(),
+            )
+            db.session.add(product)
+            db.session.flush()
+            db.session.add(ProductAlias(product_id=product.id, alias=name, alias_type="SEARCH"))
+            _set_product_image(product, row["image_data"], source_type="ADMIN_BULK_UPLOAD")
+
+            price = row["price"] or Decimal("0")
+            quantity = row["quantity"]
+            store_product = StoreProduct(
+                store_id=store.id,
+                product_id=product.id,
+                cost_price=Decimal("0"),
+                selling_price=price,
+                minimum_price=price if price > 0 else Decimal("0"),
+                maximum_price=(price * Decimal("1.30")) if price > 0 else None,
+                stock_quantity=quantity,
+                reserved_quantity=Decimal("0"),
+                reorder_level=Decimal("5"),
+                is_available=price > 0,
+                available_online=price > 0,
+                available_pos=price > 0,
+            )
+            db.session.add(store_product)
+            db.session.flush()
+
+            if quantity > 0:
+                db.session.add(InventoryTransaction(
+                    store_id=store.id,
+                    product_id=product.id,
+                    transaction_type="OPENING_STOCK",
+                    quantity=quantity,
+                    unit_cost=Decimal("0"),
+                    reference_type="BULK_PHOTO_PRODUCT_ENTRY",
+                    reference_id=store_product.id,
+                    notes="Opening stock entered through the bulk photo product editor",
+                    created_by=current_user.id,
+                ))
+            created_products.append(product)
+
+        # Protect locally uploaded photos from being replaced by catalogue-feeder matches.
+        from services.catalogue_feeder import mark_local_override_many
+        mark_local_override_many(current_user.business_id, [product.id for product in created_products])
+        db.session.commit()
+        audit("PRODUCT_BULK_PHOTO_CAPTURED", "Store", store.id, new_values={
+            "product_count": len(created_products),
+            "priced_count": sum(1 for row in prepared if row["price"] is not None),
+            "unpriced_count": sum(1 for row in prepared if row["price"] is None),
+            "product_ids": [product.id for product in created_products],
+        })
+        return jsonify(
+            ok=True,
+            created=len(created_products),
+            priced=sum(1 for row in prepared if row["price"] is not None),
+            drafts=sum(1 for row in prepared if row["price"] is None),
+            message=(
+                f"Saved {len(created_products)} products to {store.name}. "
+                f"{sum(1 for row in prepared if row['price'] is None)} are unpriced drafts ready for editing."
+            ),
+            products=[{"id": product.id, "name": product.name} for product in created_products],
+        )
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Bulk photo product save failed")
+        return jsonify(ok=False, error="bulk_save_failed", message="The batch could not be saved. The whole batch was rolled back; your selected photos and details are still on this page so you can retry."), 500
+
+
 @bp.post(f"{ADMIN_BASE}/products/import")
 @admin_required("products.create")
 def import_products():
