@@ -1,210 +1,36 @@
 (() => {
   "use strict";
-
-  const grid = document.getElementById("storefrontOrderGrid");
-  const form = document.getElementById("storefrontOrderForm");
-  const output = document.getElementById("orderedProductIds");
-  if (!grid || !form || !output) return;
-
-  const status = document.getElementById("storefrontOrderStatus");
-  const photoSummary = document.getElementById("storefrontPhotoSummary");
-  const cards = () => Array.from(grid.querySelectorAll(":scope > .storefront-order-card"));
-  const hasImage = card => card.dataset.hasImage === "1";
-  const originalOrder = cards().slice();
-  let photoFirstMode = false;
-
-  const sync = () => {
-    const current = cards();
-    output.value = JSON.stringify(current.map(card => card.dataset.productId));
-    const photoCount = current.filter(hasImage).length;
-    const noPhotoCount = current.length - photoCount;
-    if (photoSummary) {
-      photoSummary.textContent = `${photoCount.toLocaleString()} products with photos · ${noPhotoCount.toLocaleString()} without photos · No-photo section starts at position ${(photoCount + 1).toLocaleString()}`;
-    }
-  };
-
-  const announce = message => {
-    if (status) status.textContent = message;
-  };
-
-  const placeCards = list => {
-    const fragment = document.createDocumentFragment();
-    list.forEach(card => fragment.appendChild(card));
-    grid.appendChild(fragment);
-    sync();
-  };
-
-  const sortPhotosFirst = () => {
-    photoFirstMode = true;
-    const current = cards();
-    const withPhotos = current.filter(hasImage);
-    const withoutPhotos = current.filter(card => !hasImage(card));
-    placeCards([...withPhotos, ...withoutPhotos]);
-    announce(`Done. ${withPhotos.length.toLocaleString()} products with photos are first. Products without photos now begin at position ${(withPhotos.length + 1).toLocaleString()}. Save display order to publish this arrangement.`);
-  };
-
-  const resetOrder = () => {
-    photoFirstMode = false;
-    placeCards(originalOrder.slice());
-    announce("Unsaved changes have been undone. The editor is back to the order it had when this page opened.");
-  };
-
-  const move = (card, direction) => {
-    if (!card) return;
-    if (direction === "up" && card.previousElementSibling) {
-      grid.insertBefore(card, card.previousElementSibling);
-    } else if (direction === "down" && card.nextElementSibling) {
-      grid.insertBefore(card.nextElementSibling, card);
-    }
-    sync();
-  };
-
-  grid.addEventListener("click", event => {
-    const button = event.target.closest("button[data-move]");
-    if (!button) return;
-    move(button.closest(".storefront-order-card"), button.dataset.move);
-  });
-
-  document.querySelector("[data-sort-photos-first]")?.addEventListener("click", sortPhotosFirst);
-  document.querySelector("[data-reset-storefront-order]")?.addEventListener("click", resetOrder);
-
-  let dragged = null;
-  let pointerId = null;
-  let captureElement = null;
-  let moved = false;
-  let startX = 0;
-  let startY = 0;
-  let lastX = 0;
-  let lastY = 0;
-  let autoScrollFrame = 0;
-
-  const stopAutoScroll = () => {
-    if (autoScrollFrame) cancelAnimationFrame(autoScrollFrame);
-    autoScrollFrame = 0;
-  };
-
-  const autoScroll = () => {
-    if (!dragged) return stopAutoScroll();
-    const edge = 76;
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    if (lastY < edge) {
-      const speed = Math.max(7, Math.round((edge - lastY) / 4));
-      window.scrollBy(0, -speed);
-    } else if (lastY > viewportHeight - edge) {
-      const speed = Math.max(7, Math.round((lastY - (viewportHeight - edge)) / 4));
-      window.scrollBy(0, speed);
-    }
-    // Re-evaluate the item beneath a stationary pointer while the page scrolls.
-    insertAtPointer(lastX, lastY);
-    autoScrollFrame = requestAnimationFrame(autoScroll);
-  };
-
-  const startAutoScroll = () => {
-    if (!autoScrollFrame) autoScrollFrame = requestAnimationFrame(autoScroll);
-  };
-
-  const insertAtPointer = (x, y) => {
-    const previousPointerEvents = dragged.style.pointerEvents;
-    dragged.style.pointerEvents = "none";
-    const target = document.elementFromPoint(x, y)?.closest(".storefront-order-card");
-    dragged.style.pointerEvents = previousPointerEvents;
-    if (!target || target === dragged || !grid.contains(target)) return;
-
-    const rect = target.getBoundingClientRect();
-    const sameRow = y >= rect.top && y <= rect.bottom;
-    const insertAfter = sameRow
-      ? x > rect.left + rect.width / 2
-      : y > rect.top + rect.height / 2;
-    const reference = insertAfter ? target.nextElementSibling : target;
-    if (reference !== dragged) grid.insertBefore(dragged, reference);
-    cards().forEach(card => card.classList.toggle("is-over", card === target));
-  };
-
-  const finishDrag = () => {
-    if (!dragged) return;
-    dragged.classList.remove("is-dragging");
-    cards().forEach(card => card.classList.remove("is-over"));
-    try {
-      if (captureElement && pointerId !== null && captureElement.hasPointerCapture?.(pointerId)) {
-        captureElement.releasePointerCapture(pointerId);
-      }
-    } catch (_) { /* Pointer may already have been released by the browser. */ }
-    stopAutoScroll();
-    dragged = null;
-    pointerId = null;
-    captureElement = null;
-    moved = false;
-    sync();
-  };
-
-  grid.addEventListener("pointerdown", event => {
-    if (event.button !== 0 || dragged) return;
-    const card = event.target.closest(".storefront-order-card");
-    if (!card) return;
-
-    const handle = event.target.closest(".storefront-drag-handle");
-    const interactive = event.target.closest("a, button, input, select, textarea");
-    // Touch starts from the grip so normal swipes on product cards still scroll.
-    // With a mouse, the product card itself is a convenient drag surface.
-    if (event.pointerType === "touch" && !handle) return;
-    if (event.pointerType !== "touch" && !handle && interactive) return;
-
-    dragged = card;
-    pointerId = event.pointerId;
-    captureElement = event.target;
-    startX = lastX = event.clientX;
-    startY = lastY = event.clientY;
-    moved = false;
-    try { captureElement.setPointerCapture?.(pointerId); } catch (_) { /* Continue with document listeners. */ }
-    if (handle) event.preventDefault();
-  });
-
-  document.addEventListener("pointermove", event => {
-    if (!dragged || event.pointerId !== pointerId) return;
-    lastX = event.clientX;
-    lastY = event.clientY;
-    if (!moved && Math.hypot(lastX - startX, lastY - startY) < 6) return;
-    moved = true;
-    dragged.classList.add("is-dragging");
-    insertAtPointer(lastX, lastY);
-    startAutoScroll();
-  });
-
-  document.addEventListener("pointerup", event => {
-    if (dragged && event.pointerId === pointerId) finishDrag();
-  });
-  document.addEventListener("pointercancel", event => {
-    if (dragged && event.pointerId === pointerId) finishDrag();
-  });
-  window.addEventListener("blur", finishDrag);
-
-  grid.addEventListener("keydown", event => {
-    if (!event.target.matches(".storefront-drag-handle")) return;
-    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-      event.preventDefault();
-      move(event.target.closest(".storefront-order-card"), event.key === "ArrowUp" ? "up" : "down");
-    }
-  });
-
-  // A remote image can fail after the page is rendered. Count it as unavailable
-  // so the next photo-first run puts it in the no-photo section.
-  grid.addEventListener("error", event => {
-    const image = event.target;
-    if (!(image instanceof HTMLImageElement) || !image.closest(".storefront-order-card")) return;
-    const card = image.closest(".storefront-order-card");
-    card.dataset.hasImage = "0";
-    image.replaceWith(Object.assign(document.createElement("div"), {
-      className: "storefront-order-no-image",
-      textContent: "Photo unavailable"
-    }));
-    if (photoFirstMode) {
-      const current = cards();
-      placeCards([...current.filter(hasImage), ...current.filter(card => !hasImage(card))]);
-    } else {
-      sync();
-    }
-  }, true);
-
-  form.addEventListener("submit", sync);
+  const grid=document.getElementById("storefrontOrderGrid"),form=document.getElementById("storefrontOrderForm"),output=document.getElementById("orderedProductIds");
+  if(!grid||!form||!output)return;
+  const status=document.getElementById("storefrontOrderStatus"),photoSummary=document.getElementById("storefrontPhotoSummary"),editButton=document.querySelector("[data-enable-universal-edit]"),library=document.getElementById("storefrontPhotoLibrary"),editHelp=document.getElementById("universalEditHelp"),editFlag=document.getElementById("universalEditSave");
+  const cards=()=>Array.from(grid.querySelectorAll(":scope > .storefront-order-card")),hasImage=c=>c.dataset.hasImage==="1",originalOrder=cards().slice();
+  const initial=new Map();let photoFirstMode=false,editMode=false;
+  const sync=()=>{const current=cards(),photoCount=current.filter(hasImage).length,noPhotoCount=current.length-photoCount;output.value=JSON.stringify(current.map(c=>c.dataset.productId));if(photoSummary)photoSummary.textContent=`${photoCount.toLocaleString()} with photos · ${noPhotoCount.toLocaleString()} without photos · no-photo section starts at ${(photoCount+1).toLocaleString()}`;};
+  const announce=m=>{if(status)status.textContent=m;};
+  const setEditMode=on=>{editMode=!!on;grid.classList.toggle("universal-edit-active",editMode);if(editButton){editButton.setAttribute("aria-pressed",editMode?"true":"false");editButton.textContent=editMode?"Disable universal edit mode":"Enable universal edit mode";}if(library)library.hidden=!editMode;if(editHelp)editHelp.hidden=!editMode;grid.querySelectorAll(".storefront-universal-fields input,.storefront-photo-file,.storefront-photo-url").forEach(el=>{el.disabled=!editMode;});editFlag.value=editMode?"1":"0";announce(editMode?"Universal mode enabled. Edit any product without opening a separate page; drop a library photo or upload a replacement, then click Save display order once.":"Universal edit mode is off. Reordering and photo-first sorting remain available.");};
+  cards().forEach(card=>{const vals={};card.querySelectorAll(".storefront-universal-fields input").forEach(i=>vals[i.name]=i.value);const img=card.querySelector(".storefront-product-preview");initial.set(card,{vals,img:img?.src||"",hadImage:!!img,url:card.querySelector(".storefront-photo-url")?.value||""});});
+  const placeCards=list=>{const f=document.createDocumentFragment();list.forEach(c=>f.appendChild(c));grid.appendChild(f);sync();};
+  const sortPhotosFirst=()=>{photoFirstMode=true;const c=cards(),yes=c.filter(hasImage),no=c.filter(x=>!hasImage(x));placeCards([...yes,...no]);announce(`${yes.length} products with photos are now first. Click Save display order to publish.`);};
+  const resetOrder=()=>{placeCards(originalOrder.slice());cards().forEach(card=>{const start=initial.get(card);if(!start)return;card.querySelectorAll(".storefront-universal-fields input").forEach(i=>{if(Object.hasOwn(start.vals,i.name))i.value=start.vals[i.name];});const file=card.querySelector(".storefront-photo-file");if(file)file.value="";const url=card.querySelector(".storefront-photo-url");if(url)url.value=start.url;const preview=card.querySelector(".storefront-photo-drop");if(preview){const old=preview.querySelector(".storefront-product-preview");if(start.hadImage){if(old)old.src=start.img;else{const img=document.createElement("img");img.className="storefront-product-preview";img.src=start.img;img.alt="Product photo";preview.prepend(img);}preview.querySelector(".storefront-order-no-image")?.remove();card.dataset.hasImage="1";}else{old?.remove();if(!preview.querySelector(".storefront-order-no-image")){const n=document.createElement("div");n.className="storefront-order-no-image";n.textContent="No photo";preview.prepend(n);}card.dataset.hasImage="0";}}});setEditMode(false);announce("Unsaved price, stock, photo and display-order changes have been undone.");};
+  const setPreview=(card,url)=>{const zone=card.querySelector(".storefront-photo-drop"),old=zone.querySelector(".storefront-product-preview");if(old){if(old.dataset.objectUrl)URL.revokeObjectURL(old.dataset.objectUrl);old.src=url;}else{const img=document.createElement("img");img.className="storefront-product-preview";img.alt="Replacement product photo";img.src=url;zone.prepend(img);}zone.querySelector(".storefront-order-no-image")?.remove();card.dataset.hasImage="1";sync();};
+  const useFile=(card,file)=>{if(!editMode||!file||!file.type.startsWith("image/")){announce("Enable universal edit mode and drop a valid image file.");return;}const input=card.querySelector(".storefront-photo-file"),url=card.querySelector(".storefront-photo-url");const dt=new DataTransfer();dt.items.add(file);input.files=dt.files;url.value="";const preview=URL.createObjectURL(file);const img=card.querySelector(".storefront-product-preview");if(img)img.dataset.objectUrl=preview;setPreview(card,preview);announce(`Photo selected for ${card.querySelector('.storefront-order-card-copy strong')?.textContent||'product'}. It will be uploaded when you click Save display order.`);};
+  const useLibraryPhoto=(card,url)=>{if(!editMode)return;const file=card.querySelector(".storefront-photo-file");if(file)file.value="";card.querySelector(".storefront-photo-url").value=url;setPreview(card,url);announce(`Denmart photo library image attached to ${card.querySelector('.storefront-order-card-copy strong')?.textContent||'product'}. Click Save display order to save it.`);};
+  editButton?.addEventListener("click",()=>setEditMode(!editMode));document.querySelector("[data-sort-photos-first]")?.addEventListener("click",sortPhotosFirst);document.querySelector("[data-reset-storefront-order]")?.addEventListener("click",resetOrder);
+  grid.addEventListener("change",e=>{if(e.target.matches(".storefront-photo-file")){const card=e.target.closest(".storefront-order-card"),file=e.target.files?.[0];if(card&&file)useFile(card,file);}});
+  grid.addEventListener("click",e=>{const b=e.target.closest("button[data-move]");if(b){const c=b.closest(".storefront-order-card");if(b.dataset.move==="up"&&c.previousElementSibling)grid.insertBefore(c,c.previousElementSibling);if(b.dataset.move==="down"&&c.nextElementSibling)grid.insertBefore(c.nextElementSibling,c);sync();return;}const zone=e.target.closest(".storefront-photo-drop");if(zone&&editMode&&!e.target.closest("input"))zone.querySelector(".storefront-photo-file")?.click();});
+  grid.addEventListener("dragover",e=>{if(!editMode)return;const target=e.target.closest(".storefront-photo-drop");if(target){e.preventDefault();target.classList.add("is-photo-hover");}});
+  grid.addEventListener("dragleave",e=>{e.target.closest(".storefront-photo-drop")?.classList.remove("is-photo-hover");});
+  grid.addEventListener("drop",e=>{const zone=e.target.closest(".storefront-photo-drop");if(!zone||!editMode)return;e.preventDefault();zone.classList.remove("is-photo-hover");const card=zone.closest(".storefront-order-card"),file=e.dataTransfer?.files?.[0],url=e.dataTransfer?.getData("application/x-denmart-photo");if(file){useFile(card,file);}else if(url){useLibraryPhoto(card,url);}});
+  library?.addEventListener("dragstart",e=>{const item=e.target.closest("[data-library-photo]");if(!item)return;e.dataTransfer.setData("application/x-denmart-photo",item.dataset.libraryPhoto);e.dataTransfer.effectAllowed="copy";});
+  form.addEventListener("submit",e=>{sync();if(editMode){const fileCount=[...grid.querySelectorAll(".storefront-photo-file")].filter(i=>i.files?.length).length,changes=[...grid.querySelectorAll(".storefront-universal-fields input")].length;announce(`Saving universal edits across ${cards().length.toLocaleString()} products${fileCount?` including ${fileCount} uploaded photos`:""}…`);}});
+  let dragged=null,pointerId=null,captureElement=null,moved=false,startX=0,startY=0,lastX=0,lastY=0,autoScrollFrame=0;
+  const stopAutoScroll=()=>{if(autoScrollFrame)cancelAnimationFrame(autoScrollFrame);autoScrollFrame=0;};
+  const insertAtPointer=(x,y)=>{if(!dragged)return;const prev=dragged.style.pointerEvents;dragged.style.pointerEvents="none";const target=document.elementFromPoint(x,y)?.closest(".storefront-order-card");dragged.style.pointerEvents=prev;if(!target||target===dragged||!grid.contains(target))return;const r=target.getBoundingClientRect(),same=y>=r.top&&y<=r.bottom,after=same?x>r.left+r.width/2:y>r.top+r.height/2,ref=after?target.nextElementSibling:target;if(ref!==dragged)grid.insertBefore(dragged,ref);cards().forEach(c=>c.classList.toggle("is-over",c===target));};
+  const autoScroll=()=>{if(!dragged){stopAutoScroll();return;}const edge=76,vh=window.innerHeight||document.documentElement.clientHeight;if(lastY<edge)window.scrollBy(0,-Math.max(7,Math.round((edge-lastY)/4)));else if(lastY>vh-edge)window.scrollBy(0,Math.max(7,Math.round((lastY-(vh-edge))/4)));insertAtPointer(lastX,lastY);autoScrollFrame=requestAnimationFrame(autoScroll);};
+  const finishDrag=()=>{if(!dragged)return;dragged.classList.remove("is-dragging");cards().forEach(c=>c.classList.remove("is-over"));try{if(captureElement&&pointerId!==null&&captureElement.hasPointerCapture?.(pointerId))captureElement.releasePointerCapture(pointerId);}catch(_){}stopAutoScroll();dragged=null;pointerId=null;captureElement=null;moved=false;sync();};
+  grid.addEventListener("pointerdown",e=>{if(e.button!==0||dragged)return;const c=e.target.closest(".storefront-order-card");if(!c)return;const handle=e.target.closest(".storefront-drag-handle"),interactive=e.target.closest("a,button,input,select,textarea,.storefront-photo-drop");if(e.pointerType==="touch"&&!handle)return;if(e.pointerType!=="touch"&&!handle&&interactive)return;dragged=c;pointerId=e.pointerId;captureElement=e.target;startX=lastX=e.clientX;startY=lastY=e.clientY;try{captureElement.setPointerCapture?.(pointerId);}catch(_){}if(handle)e.preventDefault();});
+  document.addEventListener("pointermove",e=>{if(!dragged||e.pointerId!==pointerId)return;lastX=e.clientX;lastY=e.clientY;if(!moved&&Math.hypot(lastX-startX,lastY-startY)<6)return;moved=true;dragged.classList.add("is-dragging");insertAtPointer(lastX,lastY);if(!autoScrollFrame)autoScrollFrame=requestAnimationFrame(autoScroll);});
+  document.addEventListener("pointerup",e=>{if(dragged&&e.pointerId===pointerId)finishDrag();});document.addEventListener("pointercancel",e=>{if(dragged&&e.pointerId===pointerId)finishDrag();});window.addEventListener("blur",finishDrag);
+  grid.addEventListener("error",e=>{const img=e.target;if(!(img instanceof HTMLImageElement)||!img.closest(".storefront-order-card"))return;const card=img.closest(".storefront-order-card");card.dataset.hasImage="0";img.replaceWith(Object.assign(document.createElement("div"),{className:"storefront-order-no-image",textContent:"Photo unavailable"}));if(photoFirstMode){const c=cards();placeCards([...c.filter(hasImage),...c.filter(x=>!hasImage(x))]);}else sync();},true);
   sync();
 })();

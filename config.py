@@ -19,6 +19,9 @@ class Config:
     SQLALCHEMY_DATABASE_URI = normalize_db_url(os.getenv("DATABASE_URL"))
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     MAX_CONTENT_LENGTH = 512 * 1024 * 1024
+    # Universal catalogue editor sends several fields per product in one multipart save.
+    MAX_FORM_MEMORY_SIZE = 64 * 1024 * 1024
+    MAX_FORM_PARTS = 12000
     PRODUCT_IMAGE_LOOKUP_URL = os.getenv("PRODUCT_IMAGE_LOOKUP_URL", "https://world.openfoodfacts.org/cgi/search.pl")
     PRODUCT_IMAGE_LOOKUP_TIMEOUT = float(os.getenv("PRODUCT_IMAGE_LOOKUP_TIMEOUT", "6"))
     SQLALCHEMY_ENGINE_OPTIONS = {

@@ -8,7 +8,7 @@ from models import (
     Business, Store, Role, Permission, User, Category, Product, ProductAlias,
     PricingRule, StoreProduct, SystemSetting,
 )
-from catalog_data import CATALOG, PRICE_BANDS
+from catalog_data import CATALOG
 from services.product_images import real_product_image_url
 from werkzeug.security import generate_password_hash
 
@@ -29,12 +29,6 @@ def slugify(value: str) -> str:
 def image_for(name: str, category: str, brand: str) -> str:
     """Return only an exact curated real-product image URL."""
     return real_product_image_url(name)
-
-
-def starter_price(category: str, index: int) -> Decimal:
-    low, high = PRICE_BANDS[category]
-    ratio = (index % 10) / 9 if index % 10 else 0
-    return Decimal(str(round((low + (high - low) * ratio) / 5) * 5))
 
 
 def seed_defaults():
@@ -157,17 +151,18 @@ def seed_defaults():
                 )
                 db.session.add(product)
                 db.session.flush()
-                price = starter_price(category_name, index)
+                # A catalogue seed has no verified supplier/retailer quote. Never
+                # fabricate a price or claim physical opening stock.
                 db.session.add(StoreProduct(
                     store_id=store.id,
                     product_id=product.id,
-                    cost_price=(price * Decimal("0.80")).quantize(Decimal("1")),
-                    selling_price=price,
-                    stock_quantity=25,
+                    cost_price=Decimal("0"),
+                    selling_price=Decimal("0"),
+                    stock_quantity=Decimal("0"),
                     reserved_quantity=0,
-                    reorder_level=5,
-                    minimum_price=price,
-                    maximum_price=price * Decimal("1.30"),
+                    reorder_level=20,
+                    minimum_price=Decimal("0"),
+                    maximum_price=None,
                     is_available=True,
                     available_online=True,
                     available_pos=True,
@@ -183,11 +178,11 @@ def seed_defaults():
 
                 sp = StoreProduct.query.filter_by(store_id=store.id, product_id=product.id).first()
                 if not sp:
-                    price = starter_price(category_name, index)
                     db.session.add(StoreProduct(
                         store_id=store.id, product_id=product.id,
-                        cost_price=(price * Decimal("0.80")).quantize(Decimal("1")),
-                        selling_price=price, stock_quantity=25, reorder_level=5,
+                        cost_price=Decimal("0"), selling_price=Decimal("0"),
+                        stock_quantity=Decimal("0"), reorder_level=20,
+                        minimum_price=Decimal("0"), maximum_price=None,
                         is_available=True, available_online=True, available_pos=True,
                         pricing_rule_id=rule.id,
                     ))
@@ -195,15 +190,8 @@ def seed_defaults():
                     # A catalogue refresh must not overwrite live/admin prices already
                     # entered for an existing SKU. Only fill genuinely missing price
                     # values, then restore visibility for the new clean catalogue.
-                    price = starter_price(category_name, index)
-                    if sp.selling_price is None or Decimal(str(sp.selling_price)) <= 0:
-                        sp.selling_price = price
-                    if sp.cost_price is None or Decimal(str(sp.cost_price)) < 0:
-                        sp.cost_price = (price * Decimal("0.80")).quantize(Decimal("1"))
-                    if sp.minimum_price is None or Decimal(str(sp.minimum_price)) <= 0:
-                        sp.minimum_price = sp.selling_price
-                    if sp.maximum_price is None or Decimal(str(sp.maximum_price)) <= 0:
-                        sp.maximum_price = Decimal(str(sp.selling_price)) * Decimal("1.30")
+                    # Leave the price pending until a genuine item/pack-specific
+                    # supplier or retailer quote is entered by an administrator.
                     sp.is_available = True
                     sp.available_online = True
                     sp.available_pos = True

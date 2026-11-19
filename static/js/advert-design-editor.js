@@ -214,6 +214,7 @@
     const vals = { adBgColor: d.background || '#10243a', adBgColor2: d.background2 || '#45264f', adVideoTint: d.video_tint || '#10243a', adVideoTintOpacity: Math.round(Math.max(0, Math.min(.75, Number(d.video_tint_opacity) || 0)) * 100) };
     Object.entries(vals).forEach(([id, value]) => { if ($(id)) $(id).value = value; });
     if ($('adBgGradient')) $('adBgGradient').checked = d.gradient !== false;
+    if ($('adBgEffect')) $('adBgEffect').value = d.background_effect || 'none';
   }
   function renderAll() {
     updateHistoryButtons();
@@ -395,11 +396,11 @@
   });
 
   $('adApplyBackground')?.addEventListener('click', () => {
-    mutateDesign((d) => { d.enabled = true; d.background = $('adBgColor').value; d.background2 = $('adBgColor2').value; d.gradient = $('adBgGradient').checked; d.video_tint = $('adVideoTint').value; d.video_tint_opacity = Number($('adVideoTintOpacity').value || 0) / 100; });
+    mutateDesign((d) => { d.enabled = true; d.background = $('adBgColor').value; d.background2 = $('adBgColor2').value; d.gradient = $('adBgGradient').checked; d.background_effect = $('adBgEffect')?.value || 'none'; d.video_tint = $('adVideoTint').value; d.video_tint_opacity = Number($('adVideoTintOpacity').value || 0) / 100; });
     syncPlayer(true); renderAll(); setStatus('Background and video colour updated.');
   });
-  ['adBgColor', 'adBgColor2', 'adBgGradient', 'adVideoTint', 'adVideoTintOpacity'].forEach((id) => $(id)?.addEventListener('change', () => {
-    mutateDesign((d) => { d.enabled = true; d.background = $('adBgColor').value; d.background2 = $('adBgColor2').value; d.gradient = $('adBgGradient').checked; d.video_tint = $('adVideoTint').value; d.video_tint_opacity = Number($('adVideoTintOpacity').value || 0) / 100; }, true);
+  ['adBgColor', 'adBgColor2', 'adBgGradient', 'adBgEffect', 'adVideoTint', 'adVideoTintOpacity'].forEach((id) => $(id)?.addEventListener('change', () => {
+    mutateDesign((d) => { d.enabled = true; d.background = $('adBgColor').value; d.background2 = $('adBgColor2').value; d.gradient = $('adBgGradient').checked; d.background_effect = $('adBgEffect')?.value || 'none'; d.video_tint = $('adVideoTint').value; d.video_tint_opacity = Number($('adVideoTintOpacity').value || 0) / 100; }, true);
   }));
 
   async function searchProducts() {
@@ -431,7 +432,20 @@
   $('adDesignProductSearch')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchProducts(); } });
   $('adDesignProductSearch')?.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 350); });
 
-  $('adDesignSave')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(false); });
+  $('adAutoBlend')?.addEventListener('click', () => {
+    const c = state();
+    const palettes = { emerald:['#041b15','#0a5b3d'], midnight:['#050b25','#20376b'], sunrise:['#3a1124','#b9472a'], christmas:['#071e1a','#851e32'], school:['#091a32','#155a88'], ocean:['#04192a','#086f88'], plum:['#1b0c2d','#6c3385'] };
+    const [bg1,bg2] = palettes[c.theme] || palettes.emerald;
+    (c.slides || []).forEach((s,i) => {
+      if (!s.design || !Array.isArray(s.design.elements)) s.design = {enabled:true,elements:[]};
+      const d=s.design; d.enabled=true; d.background=bg1; d.background2=bg2; d.gradient=true;
+      d.background_effect = i%3===0 ? 'particles' : (i%3===1 ? 'sparkles' : 'rays');
+      d.video_tint_opacity = Math.max(0,Math.min(.22,Number(d.video_tint_opacity)||0));
+      d.elements.forEach((el,j)=>{el.opacity=Math.max(.85,Math.min(1,Number(el.opacity??1)));el.effect=['fade','rise','zoom','glow','pop'][j%5];el.motion_duration=1.0+(j%3)*.15;el.delay=Math.min(2,j*.12);if(el.type==='text'){el.shadow=true;el.weight=Math.max(650,Number(el.weight)||700);}});
+    });
+    api.refresh(); syncPlayer(false); renderAll(); setStatus('Auto blend applied across every scene: matched colour palette, soft background motion, coordinated layer reveals and consistent timing. Review it and save or publish when ready.','success');
+  });
+    $('adDesignSave')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(false); });
   $('adDesignPublish')?.addEventListener('click', () => { if (visibleName && originalName) originalName.value = visibleName.value; api.save(true); });
   $('adUploadFinishedVideo')?.addEventListener('click', () => { if (advanced) advanced.open = true; window.setTimeout(() => $('adVideoUpload')?.click(), 50); });
   $('adOpenAdvanced')?.addEventListener('click', () => { if (advanced) { advanced.open = !advanced.open; if (advanced.open) advanced.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } });

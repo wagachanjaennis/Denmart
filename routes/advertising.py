@@ -58,6 +58,11 @@ def default_campaign():
         "media_asset_id": "",
         "media_name": "",
         "media_mime": "",
+        "audio_asset_id": "",
+        "audio_name": "",
+        "audio_mime": "",
+        "audio_volume": 0.28,
+        "audio_loop": True,
         "slides": [
             {"headline": "WELCOME TO DENMART ONLINE", "body": "Everyday essentials. A simpler way to shop.", "cta": "VISIT DENMART.CO.KE", "image_url": "", "image_urls": [], "show_qr": True, "duration": 6},
             {"headline": "THE THINGS YOUR HOME NEEDS", "body": "Discover groceries, laundry care, bathing essentials and everyday favourites in one convenient place.", "cta": "YOUR EVERYDAY STORE, ONLINE", "image_url": "", "image_urls": [], "show_qr": False, "duration": 6},
@@ -218,11 +223,15 @@ def _valid_campaign(raw):
                 })
             try: tint_opacity = max(0.0, min(0.75, float(design_in.get("video_tint_opacity", 0))))
             except (TypeError, ValueError): tint_opacity = 0.0
+            background_effect = str(design_in.get("background_effect") or "none").lower()
+            if background_effect not in {"none", "particles", "sparkles", "explosion", "confetti", "rays", "embers"}:
+                background_effect = "none"
             slide_out["design"] = {
                 "enabled": bool(design_in.get("enabled", False)),
                 "background": colour(design_in.get("background"), "#10243a"),
                 "background2": colour(design_in.get("background2"), "#45264f"),
                 "gradient": bool(design_in.get("gradient", True)),
+                "background_effect": background_effect,
                 "video_tint": colour(design_in.get("video_tint"), "#10243a"),
                 "video_tint_opacity": tint_opacity,
                 "elements": elements,
@@ -254,6 +263,9 @@ def _valid_campaign(raw):
     except (TypeError, ValueError):
         overlay_opacity = 0.52
     media_asset_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("media_asset_id") or ""))[:80]
+    audio_asset_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("audio_asset_id") or ""))[:80]
+    try: audio_volume = max(0.0, min(1.0, float(raw.get("audio_volume", 0.28))))
+    except (TypeError, ValueError): audio_volume = 0.28
     campaign = {
         "id": campaign_id, "name": title or "Denmart advert", "theme": theme, "ticker": ticker,
         "website": website or "denmart.co.ke", "show_qr": bool(raw.get("show_qr", True)),
@@ -270,6 +282,11 @@ def _valid_campaign(raw):
         "media_asset_id": media_asset_id,
         "media_name": re.sub(r"[\\/\x00-\x1f]", "", str(raw.get("media_name") or ""))[:160],
         "media_mime": "video/mp4" if media_asset_id else "",
+        "audio_asset_id": audio_asset_id,
+        "audio_name": re.sub(r"[\\/\x00-\x1f]", "", str(raw.get("audio_name") or ""))[:160],
+        "audio_mime": str(raw.get("audio_mime") or "")[:80] if audio_asset_id else "",
+        "audio_volume": audio_volume,
+        "audio_loop": bool(raw.get("audio_loop", True)),
         "slides": slides, "updated_at": datetime.now(timezone.utc).isoformat()
     }
     for date_key in ("start_date", "end_date"):
@@ -440,6 +457,53 @@ def upload_ad_video():
                    message="MP4 uploaded. Denmart will play and download the original bytes without changing the video.")
 
 
+@bp.post("/advertcontrol/api/upload-audio")
+@_require_developer
+def upload_ad_audio():
+    business = _business()
+    if not business:
+        return jsonify(ok=False, error="No Denmart database is configured."), 503
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify(ok=False, error="Choose an audio file first."), 400
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "", Path(upload.filename).name).strip()[:150] or "denmart-background.mp3"
+    ext = Path(filename).suffix.lower()
+    types = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac", ".wav": "audio/wav", ".ogg": "audio/ogg"}
+    if ext not in types:
+        return jsonify(ok=False, error="Choose MP3, M4A, AAC, WAV or OGG audio."), 400
+    binary = upload.stream.read(10 * 1024 * 1024 + 1)
+    if len(binary) > 10 * 1024 * 1024:
+        return jsonify(ok=False, error="Keep the background audio at 10 MB or smaller."), 413
+    if len(binary) < 512:
+        return jsonify(ok=False, error="The audio file is empty or too small to be a valid track."), 400
+    mime = types[ext]
+    asset_id = secrets.token_urlsafe(18).replace("-", "").replace("_", "")[:32]
+    value = json.dumps({"mime": mime, "filename": filename, "data": base64.b64encode(binary).decode("ascii")}, separators=(",", ":"))
+    _put_setting(business.id, "advert_audio_" + asset_id, value)
+    db.session.commit()
+    return jsonify(ok=True, asset_id=asset_id, audio_name=filename, audio_mime=mime,
+                   audio_url=f"/advertisement/audio/{asset_id}", message="Background audio saved to Denmart's persistent database storage.")
+
+
+@bp.get("/advertisement/audio/<asset_id>")
+def advertisement_audio(asset_id):
+    business = _business()
+    asset_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(asset_id or ""))[:80]
+    raw = _setting(business.id, "advert_audio_" + asset_id, "") if business and asset_id else ""
+    try:
+        asset = json.loads(raw) if raw else {}
+        binary = base64.b64decode(asset.get("data") or "", validate=True)
+    except Exception:
+        return ("", 404)
+    mime = str(asset.get("mime") or "")
+    if not binary or not mime.startswith("audio/"):
+        return ("", 404)
+    response = send_file(BytesIO(binary), mimetype=mime, as_attachment=False, conditional=True, max_age=31536000)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
 @bp.get("/advertisement/media/<asset_id>")
 def advertisement_media(asset_id):
     business = _business()
@@ -516,6 +580,8 @@ def save_campaign():
         campaign = _valid_campaign(payload.get("campaign"))
         if campaign.get("media_asset_id") and not _setting(business.id, "advert_asset_" + campaign["media_asset_id"], ""):
             raise ValueError("The uploaded MP4 is no longer available. Upload it again before saving this campaign.")
+        if campaign.get("audio_asset_id") and not _setting(business.id, "advert_audio_" + campaign["audio_asset_id"], ""):
+            raise ValueError("The uploaded background audio is no longer available. Upload it again before saving this campaign.")
         publish = bool(payload.get("publish"))
         live_campaign = _published_campaign(business.id) if publish and campaign.get("schedule_enabled") else None
         same_as_live = bool(live_campaign and str(campaign.get("id")) == str(live_campaign.get("id")))

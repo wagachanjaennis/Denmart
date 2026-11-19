@@ -393,10 +393,83 @@ def storefront_order():
         clean_ids.extend(row.id for row in missing_rows)
         for position, row_id in enumerate(clean_ids, start=1):
             row_by_id[row_id].storefront_sort_order = position
+        edited = 0
+        if request.form.get("universal_edit_save") == "1":
+            try:
+                for row in current_rows:
+                    suffix = row.id
+                    product = row.product
+                    old_price = Decimal(str(row.selling_price or 0))
+                    old_min = Decimal(str(row.minimum_price or 0))
+                    old_stock = Decimal(str(row.stock_quantity or 0))
+                    def read_decimal(field, current_value, allow_blank=True):
+                        raw = request.form.get(field)
+                        if raw is None or (allow_blank and not raw.strip()):
+                            return current_value, False
+                        value = Decimal(raw.strip())
+                        if not value.is_finite() or value < 0 or value > Decimal("999999999"):
+                            raise ValueError(f"Invalid value in {field.replace('__', ' ')}.")
+                        return value, True
+                    new_price, price_changed_field = read_decimal(f"selling_price__{suffix}", old_price)
+                    new_min, min_field = read_decimal(f"minimum_price__{suffix}", old_min)
+                    old_max = Decimal(str(row.maximum_price)) if row.maximum_price is not None else None
+                    new_max, max_field = read_decimal(f"maximum_price__{suffix}", old_max)
+                    new_stock, stock_field = read_decimal(f"stock_quantity__{suffix}", old_stock)
+                    if new_price > 0:
+                        if new_min <= 0: new_min = new_price
+                        if new_max is None or new_max <= 0: new_max = new_price
+                        if not (new_min <= new_price <= new_max):
+                            raise ValueError(f"{product.name}: selling price must sit between its minimum and maximum.")
+                    row.selling_price = new_price
+                    row.minimum_price = new_min
+                    row.maximum_price = new_max
+                    if stock_field and new_stock != Decimal(str(row.stock_quantity or 0)):
+                        delta = new_stock - Decimal(str(row.stock_quantity or 0))
+                        row.stock_quantity = new_stock
+                        db.session.add(InventoryTransaction(
+                            store_id=store.id, product_id=product.id,
+                            transaction_type="ADJUSTMENT_IN" if delta > 0 else "ADJUSTMENT_OUT",
+                            quantity=abs(delta), unit_cost=Decimal(str(row.cost_price or 0)),
+                            reference_type="UNIVERSAL_CATALOGUE_EDIT", reference_id=row.id,
+                            notes="Stock quantity changed in Visual Shop Editor universal mode.",
+                            created_by=current_user.id,
+                        ))
+                    elif not stock_field:
+                        row.stock_quantity = new_stock
+                    if price_changed_field and new_price != old_price:
+                        db.session.add(PriceHistory(store_product_id=row.id, old_price=old_price,
+                            new_price=new_price, reason="Universal visual shop editor", source="MANUAL",
+                            changed_by=current_user.id))
+                    upload = request.files.get(f"photo__{suffix}")
+                    photo_url = request.form.get(f"photo_url__{suffix}", "").strip()
+                    if upload and upload.filename:
+                        image_data = _uploaded_product_image(upload, product.name)
+                        if image_data: _set_product_image(product, image_data, source_type="ADMIN_UPLOAD")
+                    elif photo_url:
+                        if not photo_url.startswith("/static/catalogue/new-arrivals/") or ".." in photo_url.split("?")[0].split("/"):
+                            raise ValueError(f"{product.name}: select a photo from Denmart's verified photo library or upload one from your device.")
+                        image_path = Path(current_app.static_folder or "static") / photo_url.removeprefix("/static/")
+                        if not image_path.is_file():
+                            raise ValueError(f"The selected photo for {product.name} is no longer available.")
+                        _set_product_image(product, photo_url, source_type="ADMIN_GALLERY")
+                    if product.status == "ACTIVE":
+                        row.is_available = True
+                        row.available_online = True
+                        row.available_pos = True
+                    has_change = (new_price != old_price or new_min != old_min or new_max != old_max
+                                  or new_stock != old_stock or bool((upload and upload.filename) or photo_url))
+                    edited += int(has_change)
+                db.session.flush()
+            except (ValueError, InvalidOperation) as exc:
+                db.session.rollback()
+                flash(str(exc), "error")
+                return redirect(url_for("admin.storefront_order", store_id=store.id))
         db.session.commit()
         audit("STOREFRONT_PRODUCT_ORDER_UPDATED", "Store", store.id,
-              new_values={"ordered_products": len(clean_ids)})
-        flash(f"Online catalogue order saved for {store.name}: {len(clean_ids)} products.", "success")
+              new_values={"ordered_products": len(clean_ids), "universal_products_edited": edited})
+        message = f"Saved display order for {store.name}: {len(clean_ids)} products."
+        if request.form.get("universal_edit_save") == "1": message += f" Universal edit mode saved changes across {edited} product records."
+        flash(message, "success")
         return redirect(url_for("admin.storefront_order", store_id=store.id))
 
     rows = _storefront_catalogue_order(base_query, store=store).limit(2000).all()
@@ -414,7 +487,9 @@ def storefront_order():
         for offset in range(0, len(rows), 60):
             storefront_sequence.extend(_interleave_catalogue(rows[offset:offset + 60]))
         rows = storefront_sequence
-    return render_template("admin/storefront_order.html", stores=stores, store=store, rows=rows)
+    from services.new_arrivals import list_arrival_photos
+    arrival_photos = list_arrival_photos(current_app.root_path)
+    return render_template("admin/storefront_order.html", stores=stores, store=store, rows=rows, arrival_photos=arrival_photos)
 
 
 @bp.post(f"{ADMIN_BASE}/new-arrivals/register-all")

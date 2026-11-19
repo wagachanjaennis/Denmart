@@ -39,26 +39,32 @@
   const status=$('studioStatus');
   const token=document.querySelector('meta[name="csrf-token"]')?.content||'';
   const themeSet=['emerald','midnight','sunrise','christmas','school','ocean','plum'];
-  let exportAudioContext=null, exportMediaElementSource=null, exportAudioDestination=null;
-  async function attachOriginalVideoAudio(stream){
-    const video=$('adUploadedVideo');
-    if(!stream||!video||!state.media_asset_id)return;
+  let exportAudioContext=null, exportAudioDestination=null;
+  const exportAudioSources=new WeakMap();
+  async function attachCampaignAudio(stream){
+    if(!stream)return;
+    const video=$('adUploadedVideo'), audio=$('adBackgroundAudio');
+    const hasVideo=!!(video&&state.media_asset_id), hasAudio=!!(audio&&state.audio_asset_id);
+    if(!hasVideo&&!hasAudio)return;
     try{
       const AudioContextClass=window.AudioContext||window.webkitAudioContext;
       if(!AudioContextClass)return;
-      if(!exportAudioContext){
-        exportAudioContext=new AudioContextClass();
-        exportMediaElementSource=exportAudioContext.createMediaElementSource(video);
-        exportAudioDestination=exportAudioContext.createMediaStreamDestination();
-        // Do not connect this path to the speakers: it feeds only the recorded ad.
-        exportMediaElementSource.connect(exportAudioDestination);
-      }
-      video.muted=false;
+      if(!exportAudioContext){exportAudioContext=new AudioContextClass();exportAudioDestination=exportAudioContext.createMediaStreamDestination();}
       await exportAudioContext.resume();
-      exportAudioDestination.stream.getAudioTracks().forEach(track=>{
-        try{stream.addTrack(track.clone());}catch(_){}
-      });
-    }catch(err){console.debug("Could not include source video audio in this export.",err);}
+      for(const element of [video,audio]){
+        if(!element||!(element===video?hasVideo:hasAudio))continue;
+        if(!exportAudioSources.has(element)){
+          const source=exportAudioContext.createMediaElementSource(element);
+          source.connect(exportAudioDestination);
+          // Background music remains audible in the editor as well as in the final recording.
+          if(element===audio)source.connect(exportAudioContext.destination);
+          exportAudioSources.set(element,source);
+        }
+        if(element===audio){element.loop=state.audio_loop!==false;element.volume=Math.max(0,Math.min(1,Number(state.audio_volume??.28)));await element.play().catch(()=>{});}
+        else {element.muted=false;await element.play().catch(()=>{});}
+      }
+      if(!stream.getAudioTracks().length)exportAudioDestination.stream.getAudioTracks().forEach(track=>{try{stream.addTrack(track.clone());}catch(_){}});
+    }catch(err){console.debug("Could not include advert audio in this export.",err);}
   }
   function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function notify(message,kind){if(status){status.textContent=message;status.className='studio-status '+(kind||'');}}
@@ -69,6 +75,7 @@
     document.querySelectorAll('[data-schedule-day]').forEach(el=>{el.checked=(state.schedule_days||['mon','tue','wed','thu','fri','sat','sun']).includes(el.dataset.scheduleDay);});
     const mediaName=$('adUploadedVideoName');const mediaState=$('adUploadedVideoState');const download=$('downloadOriginalVideo');
     if(state.media_asset_id){mediaState.hidden=false;mediaName.textContent=state.media_name||'Uploaded MP4';download.href='/advertisement/media/'+encodeURIComponent(state.media_asset_id)+'?download=1';download.hidden=false;}else{mediaState.hidden=true;download.hidden=true;download.href='#';}
+    const audioState=$('adUploadedAudioState'),audioName=$('adUploadedAudioName');if(audioState){audioState.hidden=!state.audio_asset_id;if(state.audio_asset_id&&audioName)audioName.textContent=state.audio_name||'Background audio';}
     renderScenes();updatePreview();updateScheduleButton();
     window.dispatchEvent(new CustomEvent('denmart:statechange'));
   }
@@ -123,6 +130,8 @@
   $('useProductImages').addEventListener('click',()=>{if(!selectedProduct){notify('Search and choose a real product first.','error');return;}const host=$('adProductGalleryItems');const urls=[...host.querySelectorAll('[data-pick-photo]:checked:not(:disabled)')].map(el=>selectedProduct.image_urls[Number(el.dataset.pickPhoto)]).filter(Boolean).slice(0,8);if(!urls.length){notify('Select at least one photo that loads successfully.','error');return;}readControls();const idx=Math.max(0,Math.min(state.slides.length-1,Number($('adTargetScene').value)||0));state.slides[idx].image_urls=urls;state.slides[idx].image_url=urls[0];state.slides[idx].product_id=String(selectedProduct.id);state.slides[idx].product_name=String(selectedProduct.name||'');renderScenes();updatePreview();notify(`${urls.length} product photo(s) attached to scene ${idx+1}; images rotate during playback. Save the campaign to keep changes.`,'success');});
   $('adVideoUpload').addEventListener('change',async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;if(!/\.mp4$/i.test(file.name)||!(file.type==='video/mp4'||file.name.toLowerCase().endsWith('.mp4'))){notify('Choose an MP4 file.','error');e.target.value='';return;}if(file.size>20*1024*1024){notify('Keep the MP4 at 20 MB or smaller.','error');e.target.value='';return;}const form=new FormData();form.append('file',file,file.name);const button=e.target;button.disabled=true;notify('Uploading original MP4 to persistent campaign storage…');try{const r=await fetch('/advertcontrol/api/upload-video',{method:'POST',headers:{'X-CSRFToken':token},body:form});const d=await r.json();if(r.status===401&&d.login_url){location.href=d.login_url;return;}if(!r.ok||!d.ok)throw new Error(d.error||'MP4 upload failed.');readControls();state.media_asset_id=d.asset_id;state.media_name=d.media_name||file.name;state.media_mime='video/mp4';applyObjectToControls();notify('MP4 uploaded unchanged. Save or publish this campaign to play it on the public screen.','success');}catch(err){notify(err.message||'MP4 upload failed.','error');}finally{button.disabled=false;e.target.value='';}});
   $('removeUploadedVideo').addEventListener('click',()=>{readControls();state.media_asset_id='';state.media_name='';state.media_mime='';applyObjectToControls();notify('Uploaded MP4 removed from this campaign draft. The stored media object is retained until separately cleaned up.');});
+  $('adAudioUpload')?.addEventListener('change',async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;const allowed=/\.(mp3|m4a|aac|wav|ogg)$/i;if(!allowed.test(file.name)){notify('Choose an MP3, M4A, AAC, WAV or OGG audio track.','error');e.target.value='';return;}if(file.size>10*1024*1024){notify('Keep the audio file at 10 MB or smaller.','error');e.target.value='';return;}const form=new FormData();form.append('file',file,file.name);const input=e.target;input.disabled=true;notify('Saving continuous background audio…');try{const r=await fetch('/advertcontrol/api/upload-audio',{method:'POST',headers:{'X-CSRFToken':token},body:form});const d=await r.json();if(r.status===401&&d.login_url){location.href=d.login_url;return;}if(!r.ok||!d.ok)throw new Error(d.error||'Audio upload failed.');readControls();state.audio_asset_id=d.asset_id;state.audio_name=d.audio_name||file.name;state.audio_mime=d.audio_mime||file.type;state.audio_volume=Number(state.audio_volume||.28);state.audio_loop=true;applyObjectToControls();updatePreview();notify('Background audio stored. Save or publish this campaign; the track will loop continuously behind the advert.','success');}catch(err){notify(err.message||'Audio upload failed.','error');}finally{input.disabled=false;e.target.value='';}});
+  $('removeUploadedAudio')?.addEventListener('click',()=>{readControls();state.audio_asset_id='';state.audio_name='';state.audio_mime='';applyObjectToControls();updatePreview();notify('Background audio removed from this campaign draft.');});
   function collectionPrompt(){const c=readControls();const idea=$('adIdea').value.trim()||`Create a premium ${c.name} advert for Denmart online.`;const scenes=c.slides.map((s,i)=>`Scene ${i+1}: headline “${s.headline}”; supporting copy “${s.body}”; call to action “${s.cta}”.`).join('\n');return `Create a polished, original retail advertisement for Denmart, a Kenyan everyday-essentials online shop at ${c.website||'denmart.co.ke'}.\nGOAL: ${idea}\nFORMAT: 16:9 landscape, 1920x1080, suitable for a full-screen website / TV display. Aim for 18–30 seconds unless the brief requires otherwise.\nVISUAL DIRECTION: ${c.theme} palette, premium supermarket campaign, clean typography, elegant camera movement, subtle parallax, cinematic but friendly lighting, realistic product photography, smooth transitions, attractive motion graphics and high-contrast readable text. Use genuine provided product images as references; do not invent brand logos, product claims, discounted prices or legal promises.\nSTORYBOARD:\n${scenes}\nON-SCREEN DETAILS: Keep ${c.website||'denmart.co.ke'} clearly readable. A real QR code will be supplied by the Denmart screen, so leave a quiet, uncluttered square in the lower-right when practical. Keep all key words away from the edges.\nAUDIO: Optional warm, trustworthy voice-over in clear Kenyan English, light upbeat instrumental bed, music lower than speech.\nFINISH: Brand-consistent final card with the website and one call to action. Spelling must be exact. Do not add offers or opening dates not present in the brief.`;}
   $('makePrompt').addEventListener('click',()=>{$('aiPromptOutput').value=collectionPrompt();notify('Your ready-to-copy AI creative brief has been built.');});
   $('copyPrompt').addEventListener('click',async()=>{const text=$('aiPromptOutput').value||collectionPrompt();$('aiPromptOutput').value=text;try{await navigator.clipboard.writeText(text);notify('AI prompt copied. Paste it into Canva, CapCut or Adobe Express.');}catch(_){$('aiPromptOutput').focus();$('aiPromptOutput').select();notify('Prompt selected. Press Ctrl+C to copy it.');}});
@@ -138,7 +147,7 @@
     const safeName=(c.name||'denmart-advert').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'denmart-advert';
     if(c.media_asset_id&&!c.slides.some(s=>s.design&&s.design.enabled)){link.href='/advertisement/media/'+encodeURIComponent(c.media_asset_id)+'?download=1';link.download=(c.media_name||safeName+'.mp4').replace(/[^A-Za-z0-9._ -]/g,'')||safeName+'.mp4';link.hidden=false;link.textContent='Download original uploaded MP4 (unchanged)';link.click();notify('The exact uploaded MP4 is available; Denmart does not re-encode uploaded advertisements.','success');return;}
     if(!window.MediaRecorder||!canvas.captureStream){notify('This browser cannot record the animated canvas. Open this studio in current Chrome or Edge, or upload an existing MP4.','error');return;}
-    let stream,recorder;try{if(window.DenmartAdPlayer)window.DenmartAdPlayer.setCampaign(c);stream=canvas.captureStream(30);await attachOriginalVideoAudio(stream);const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(x=>MediaRecorder.isTypeSupported(x));recorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}catch(err){notify('The browser could not record this preview. Use same-origin product images or upload an MP4.','error');return;}
+    let stream,recorder;try{if(window.DenmartAdPlayer)window.DenmartAdPlayer.setCampaign(c);stream=canvas.captureStream(30);await attachCampaignAudio(stream);const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(x=>MediaRecorder.isTypeSupported(x));recorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}catch(err){notify('The browser could not record this preview. Use same-origin product images or upload an MP4.','error');return;}
     const seconds=Math.min(120,c.slides.reduce((n,s)=>n+Math.max(3,Math.min(15,Number(s.duration||6))),0));const chunks=[];button.disabled=true;progress.hidden=false;bar.style.width='0%';notify(`Recording ${seconds} seconds of your animated campaign… keep this tab open.`);
     recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
     recorder.onerror=()=>{stream.getTracks().forEach(t=>t.stop());button.disabled=false;progress.hidden=true;notify('Browser recording failed. Try lighter images or upload an MP4.','error');};
